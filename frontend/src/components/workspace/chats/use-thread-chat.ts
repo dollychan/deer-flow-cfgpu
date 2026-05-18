@@ -18,6 +18,23 @@ export function useThreadChat() {
     () => threadIdFromPath === "new",
   );
 
+  // history.replaceState (used in onStart after thread creation) updates
+  // window.location but does NOT trigger Next.js router updates — useParams()
+  // returns a stale "new" until a real navigation occurs.  After Fast Refresh
+  // the component remounts and re-reads the stale param, losing the real thread
+  // ID.  Recover it from window.location once on mount (client-side only, so
+  // no hydration mismatch).
+  useEffect(() => {
+    if (threadIdFromPath !== "new") return;
+    const urlMatch = window.location.pathname.match(/\/chats\/([^/]+)$/);
+    const urlId = urlMatch?.[1];
+    if (urlId && urlId !== "new") {
+      setThreadId(urlId);
+      setIsNewThread(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // intentionally run once on mount only
+
   useEffect(() => {
     if (pathname.endsWith("/new")) {
       setIsNewThread(true);

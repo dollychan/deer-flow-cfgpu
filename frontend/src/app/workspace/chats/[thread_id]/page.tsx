@@ -19,6 +19,7 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
+import { ToolApprovalPanel } from "@/components/workspace/tool-approval-panel";
 import { Welcome } from "@/components/workspace/welcome";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
@@ -26,6 +27,7 @@ import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import { useThreadStream, useThreadTokenUsage } from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
+import type { ToolApprovals } from "@/core/threads/tool-approval";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -68,7 +70,9 @@ export default function ChatPage() {
   const {
     thread,
     pendingUsageMessages,
+    pendingApprovals,
     sendMessage,
+    sendCommand,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,
@@ -116,6 +120,13 @@ export default function ChatPage() {
       void sendPromise;
     },
     [sendMessage, threadId],
+  );
+
+  const handleApprovalSubmit = useCallback(
+    (approvals: ToolApprovals) => {
+      void sendCommand(threadId, approvals);
+    },
+    [sendCommand, threadId],
   );
   const handleStop = useCallback(async () => {
     await thread.stop();
@@ -185,6 +196,14 @@ export default function ChatPage() {
                     : "max-w-(--container-width-md)",
                 )}
               >
+                {pendingApprovals && (
+                  <div className="relative mb-2">
+                    <ToolApprovalPanel
+                      toolCalls={pendingApprovals}
+                      onSubmit={handleApprovalSubmit}
+                    />
+                  </div>
+                )}
                 {hasTodos && (
                   <div
                     className={cn(
@@ -228,7 +247,8 @@ export default function ChatPage() {
                     }
                     disabled={
                       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
-                      isUploading
+                      isUploading ||
+                      !!pendingApprovals
                     }
                     onContextChange={(context) =>
                       setSettings("context", context)

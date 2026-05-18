@@ -116,6 +116,7 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "max_concurrent_subagents",
         "agent_name",
         "is_bootstrap",
+        "ask",
     }
 )
 
@@ -338,6 +339,7 @@ async def start_run(
             agent_factory=agent_factory,
             graph_input=graph_input,
             config=config,
+            command=body.command,
             stream_modes=stream_modes,
             stream_subgraphs=body.stream_subgraphs,
             interrupt_before=body.interrupt_before,

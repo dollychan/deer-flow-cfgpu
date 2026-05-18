@@ -27,7 +27,9 @@ import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import { useThreadStream, useThreadTokenUsage } from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
+import type { ToolApprovals } from "@/core/threads/tool-approval";
 import { textOfMessage } from "@/core/threads/utils";
+import { ToolApprovalPanel } from "@/components/workspace/tool-approval-panel";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -65,7 +67,9 @@ export default function AgentChatPage() {
   const {
     thread,
     pendingUsageMessages,
+    pendingApprovals,
     sendMessage,
+    sendCommand,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,
@@ -114,6 +118,13 @@ export default function AgentChatPage() {
       void sendPromise;
     },
     [sendMessage, threadId, agent_name],
+  );
+
+  const handleApprovalSubmit = useCallback(
+    (approvals: ToolApprovals) => {
+      void sendCommand(threadId, approvals);
+    },
+    [sendCommand, threadId],
   );
 
   const handleStop = useCallback(async () => {
@@ -205,6 +216,14 @@ export default function AgentChatPage() {
                     : "max-w-(--container-width-md)",
                 )}
               >
+                {pendingApprovals && (
+                  <div className="relative mb-2">
+                    <ToolApprovalPanel
+                      toolCalls={pendingApprovals}
+                      onSubmit={handleApprovalSubmit}
+                    />
+                  </div>
+                )}
                 {hasTodos && (
                   <div
                     className={cn(
@@ -250,7 +269,8 @@ export default function AgentChatPage() {
                   }
                   disabled={
                     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
-                    isUploading
+                    isUploading ||
+                    !!pendingApprovals
                   }
                   onContextChange={(context) => setSettings("context", context)}
                   onSubmit={handleSubmit}

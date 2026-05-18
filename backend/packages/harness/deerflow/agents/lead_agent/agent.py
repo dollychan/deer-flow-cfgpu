@@ -244,6 +244,7 @@ def _build_middlewares(
     custom_middlewares: list[AgentMiddleware] | None = None,
     *,
     app_config: AppConfig | None = None,
+    agent_config=None,
 ):
     """Build middleware chain based on runtime configuration.
 
@@ -251,6 +252,7 @@ def _build_middlewares(
         config: Runtime configuration containing configurable options like is_plan_mode.
         agent_name: If provided, MemoryMiddleware will use per-agent memory storage.
         custom_middlewares: Optional list of custom middlewares to inject into the chain.
+        agent_config: Optional AgentConfig for per-agent middleware configuration.
 
     Returns:
         List of middleware instances.
@@ -312,6 +314,16 @@ def _build_middlewares(
     # Inject custom middlewares before ClarificationMiddleware
     if custom_middlewares:
         middlewares.extend(custom_middlewares)
+
+    # HumanApprovalMiddleware: pause high-cost tool calls for user confirmation.
+    # Must be before ClarificationMiddleware (which must be last).
+    # Enabled only when both: (a) the agent has approval_required_tools configured, and
+    # (b) the runtime config sets ask=True (client opts in per-task).
+    ask = cfg.get("ask", False)
+    if ask and agent_config and agent_config.approval_required_tools:
+        from deerflow.agents.middlewares.human_approval_middleware import HumanApprovalMiddleware
+
+        middlewares.append(HumanApprovalMiddleware(set(agent_config.approval_required_tools)))
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
@@ -416,7 +428,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         return create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config),
             tools=filter_tools_by_skill_allowed_tools(tools, skills_for_tool_policy),
-            middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config),
+            middleware=_build_middlewares(config, model_name=model_name, app_config=resolved_app_config, agent_config=None),
             system_prompt=apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
@@ -434,7 +446,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     return create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config),
         tools=filter_tools_by_skill_allowed_tools(tools + extra_tools, skills_for_tool_policy),
-        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config),
+        middleware=_build_middlewares(config, model_name=model_name, agent_name=agent_name, app_config=resolved_app_config, agent_config=agent_config),
         system_prompt=apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
