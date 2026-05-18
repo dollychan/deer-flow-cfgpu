@@ -126,12 +126,18 @@ async def run_agent(
     agent_factory: Any,
     graph_input: dict,
     config: dict,
+    command: dict | None = None,
     stream_modes: list[str] | None = None,
     stream_subgraphs: bool = False,
     interrupt_before: list[str] | Literal["*"] | None = None,
     interrupt_after: list[str] | Literal["*"] | None = None,
 ) -> None:
-    """Execute an agent in the background, publishing events to *bridge*."""
+    """Execute an agent in the background, publishing events to *bridge*.
+
+    When *command* is provided (e.g. ``{"resume": {...}}``), it is wrapped in a
+    LangGraph ``Command`` and used as the stream input instead of *graph_input*,
+    resuming the graph from its last interrupt checkpoint.
+    """
 
     # Unpack infrastructure dependencies from RunContext.
     checkpointer = ctx.checkpointer
@@ -279,11 +285,20 @@ async def run_agent(
 
         logger.info("Run %s: streaming with modes %s (requested: %s)", run_id, lg_modes, requested_modes)
 
-        # 7. Stream using graph.astream
+        # 7. Determine stream input: Command(resume=...) for HIL resume, or graph_input for normal run.
+        if command:
+            from langgraph.types import Command as LGCommand
+
+            stream_input: Any = LGCommand(**command)
+            logger.info("Run %s: resuming from HIL interrupt (command keys: %s)", run_id, list(command.keys()))
+        else:
+            stream_input = graph_input
+
+        # 8. Stream using graph.astream
         if len(lg_modes) == 1 and not stream_subgraphs:
             # Single mode, no subgraphs: astream yields raw chunks
             single_mode = lg_modes[0]
-            async for chunk in agent.astream(graph_input, config=runnable_config, stream_mode=single_mode):
+            async for chunk in agent.astream(stream_input, config=runnable_config, stream_mode=single_mode):
                 if record.abort_event.is_set():
                     logger.info("Run %s abort requested — stopping", run_id)
                     break
@@ -292,7 +307,7 @@ async def run_agent(
         else:
             # Multiple modes or subgraphs: astream yields tuples
             async for item in agent.astream(
-                graph_input,
+                stream_input,
                 config=runnable_config,
                 stream_mode=lg_modes,
                 subgraphs=stream_subgraphs,
@@ -328,7 +343,47 @@ async def run_agent(
             else:
                 await run_manager.set_status(run_id, RunStatus.interrupted)
         else:
-            await run_manager.set_status(run_id, RunStatus.success)
+            # Detect if the graph paused at an interrupt() (HIL approval pending).
+            # astream() exits normally when interrupt() is called, so we must inspect
+            # the final checkpoint to distinguish success from paused-for-approval.
+            is_paused_for_approval = False
+            if checkpointer is not None:
+                try:
+                    final_state = await agent.aget_state(runnable_config)
+                    if final_state and any(t.interrupts for t in (final_state.tasks or [])):
+                        is_paused_for_approval = True
+                except Exception:
+                    logger.debug("Run %s: could not inspect final state for interrupt detection", run_id, exc_info=True)
+
+            if is_paused_for_approval:
+                await run_manager.set_status(run_id, RunStatus.interrupted)
+                # Recover tool_approval_required payloads from the checkpoint's interrupt values.
+                # The middleware's get_stream_writer() call may be dropped by LangGraph before the
+                # astream() loop yields it; this is the reliable fallback delivery path.
+                # Skip payloads where sse_emitted=True — the middleware already sent them successfully.
+                approval_payloads: list[dict] = []
+                for _task in final_state.tasks or []:
+                    for _intr in _task.interrupts or []:
+                        _v = getattr(_intr, "value", None)
+                        if isinstance(_v, dict) and _v.get("type") == "tool_approval_required":
+                            if not _v.get("sse_emitted"):
+                                approval_payloads.append(_v)
+                            else:
+                                logger.info("Run %s: skipping re-publish (sse_emitted=True) for %d tool_calls", run_id, len(_v.get("tool_calls", [])))
+                if approval_payloads:
+                    for _payload in approval_payloads:
+                        logger.info("Run %s: publishing tool_approval_required SSE with %d tool_calls", run_id, len(_payload.get("tool_calls", [])))
+                        await bridge.publish(run_id, "custom", _payload)
+                elif not any(
+                    isinstance(getattr(_intr, "value", None), dict) and getattr(_intr, "value", {}).get("sse_emitted")
+                    for _task in (final_state.tasks or [])
+                    for _intr in (_task.interrupts or [])
+                ):
+                    logger.warning("Run %s: no tool_approval_required payload found in interrupt values, sending run_paused fallback", run_id)
+                    await bridge.publish(run_id, "custom", {"type": "run_paused", "reason": "tool_approval_required"})
+                logger.info("Run %s paused for human approval", run_id)
+            else:
+                await run_manager.set_status(run_id, RunStatus.success)
 
     except asyncio.CancelledError:
         action = record.abort_action

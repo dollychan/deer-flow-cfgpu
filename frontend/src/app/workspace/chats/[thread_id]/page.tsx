@@ -19,6 +19,7 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
+import { ToolApprovalPanel } from "@/components/workspace/tool-approval-panel";
 import { Welcome } from "@/components/workspace/welcome";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
@@ -68,7 +69,9 @@ export default function ChatPage() {
   const {
     thread,
     pendingUsageMessages,
+    pendingApprovals,
     sendMessage,
+    sendCommand,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,
@@ -117,6 +120,7 @@ export default function ChatPage() {
     },
     [sendMessage, threadId],
   );
+
   const handleStop = useCallback(async () => {
     await thread.stop();
   }, [thread]);
@@ -185,6 +189,13 @@ export default function ChatPage() {
                     : "max-w-(--container-width-md)",
                 )}
               >
+                {pendingApprovals && (
+                  <ToolApprovalPanel
+                    className="mb-2"
+                    toolCalls={pendingApprovals}
+                    onSubmit={(approvals) => void sendCommand(threadId, approvals)}
+                  />
+                )}
                 {hasTodos && (
                   <div
                     className={cn(
@@ -228,7 +239,8 @@ export default function ChatPage() {
                     }
                     disabled={
                       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
-                      isUploading
+                      isUploading ||
+                      !!pendingApprovals
                     }
                     onContextChange={(context) =>
                       setSettings("context", context)

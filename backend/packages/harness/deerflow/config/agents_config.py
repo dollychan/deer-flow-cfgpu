@@ -47,6 +47,11 @@ class AgentConfig(BaseModel):
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+    # approval_required_tools: tool name patterns (fnmatch) that require human
+    # confirmation before execution. Matched tools pause the graph via
+    # LangGraph interrupt() until the client sends Command(resume={...}).
+    # e.g. ["cfgpu__generate_image", "cfgpu__generate_video", "*generate*"]
+    approval_required_tools: list[str] | None = None
 
 
 def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
@@ -67,7 +72,7 @@ def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
     paths = get_paths()
     effective_user = user_id or get_effective_user_id()
     user_path = paths.user_agent_dir(effective_user, name)
-    if user_path.exists():
+    if user_path.exists() and (user_path / "config.yaml").exists():
         return user_path
 
     legacy_path = paths.agent_dir(name)

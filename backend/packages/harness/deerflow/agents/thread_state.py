@@ -1,4 +1,4 @@
-from typing import Annotated, NotRequired, TypedDict
+from typing import Annotated, Any, NotRequired, TypedDict
 
 from langchain.agents import AgentState
 
@@ -28,6 +28,20 @@ def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[s
     return list(dict.fromkeys(existing + new))
 
 
+def merge_tool_approvals(existing: dict[str, Any] | None, new: dict[str, Any] | None) -> dict[str, Any]:
+    """Reducer for tool_approvals dict — merges decisions, new keys override existing.
+
+    Used by HumanApprovalMiddleware to persist approval/rejection decisions across
+    the interrupt→resume cycle. The client writes decisions via Command.update so
+    that after_model can detect them on re-entry and skip re-emitting the SSE event.
+    """
+    if existing is None:
+        return new or {}
+    if new is None:
+        return existing
+    return {**existing, **new}
+
+
 def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[str, ViewedImageData] | None) -> dict[str, ViewedImageData]:
     """Reducer for viewed_images dict - merges image dictionaries.
 
@@ -53,3 +67,4 @@ class ThreadState(AgentState):
     todos: NotRequired[list | None]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
+    tool_approvals: Annotated[dict[str, Any], merge_tool_approvals]  # tool_call_id -> {status, args?, reason?}

@@ -40,6 +40,14 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+_log_file = logging.FileHandler("gateway.log", encoding="utf-8")
+_log_file.setLevel(logging.INFO)
+_log_file.setFormatter(logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+))
+logging.getLogger().addHandler(_log_file)
+
 logger = logging.getLogger(__name__)
 
 # Upper bound (seconds) each lifespan shutdown hook is allowed to run.
