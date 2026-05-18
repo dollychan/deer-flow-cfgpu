@@ -15,7 +15,6 @@ interface ToolCallCardState {
   decision: "approved" | "rejected" | null;
   argsJson: string;
   reason: string;
-  argsError: boolean;
 }
 
 function parseArgsJson(
@@ -41,6 +40,8 @@ function ToolCallCard({
   state: ToolCallCardState;
   onChange: (state: ToolCallCardState) => void;
 }) {
+  const argsError = state.decision !== "rejected" && parseArgsJson(state.argsJson) === null;
+
   return (
     <div
       className={cn(
@@ -63,9 +64,7 @@ function ToolCallCard({
               state.decision === "approved" &&
                 "bg-green-600 hover:bg-green-700",
             )}
-            onClick={() =>
-              onChange({ ...state, decision: "approved", argsError: false })
-            }
+            onClick={() => onChange({ ...state, decision: "approved" })}
           >
             <CheckIcon className="size-3" />
             批准
@@ -74,9 +73,7 @@ function ToolCallCard({
             size="sm"
             variant={state.decision === "rejected" ? "destructive" : "outline"}
             className="h-6 gap-1 px-2 text-xs"
-            onClick={() =>
-              onChange({ ...state, decision: "rejected", argsError: false })
-            }
+            onClick={() => onChange({ ...state, decision: "rejected" })}
           >
             <XIcon className="size-3" />
             拒绝
@@ -88,22 +85,15 @@ function ToolCallCard({
         className={cn(
           "w-full resize-y rounded-lg border bg-background/80 p-2 font-mono text-xs leading-relaxed outline-none",
           "focus:ring-1 focus:ring-ring",
-          state.argsError ? "border-red-500" : "border-border/60",
+          argsError ? "border-red-500" : "border-border/60",
           state.decision === "rejected" && "opacity-50",
         )}
         rows={Math.min(8, state.argsJson.split("\n").length + 1)}
         value={state.argsJson}
         disabled={state.decision === "rejected"}
-        onChange={(e) => {
-          const newJson = e.target.value;
-          onChange({
-            ...state,
-            argsJson: newJson,
-            argsError: parseArgsJson(newJson) === null,
-          });
-        }}
+        onChange={(e) => onChange({ ...state, argsJson: e.target.value })}
       />
-      {state.argsError && (
+      {argsError && (
         <p className="mt-1 text-xs text-red-500">JSON 格式错误</p>
       )}
 
@@ -122,27 +112,28 @@ function ToolCallCard({
 export function ToolApprovalPanel({
   toolCalls,
   onSubmit,
+  className,
 }: {
   toolCalls: PendingToolCall[];
   onSubmit: (approvals: ToolApprovals) => void;
+  className?: string;
 }) {
   const [cardStates, setCardStates] = useState<ToolCallCardState[]>(() =>
     toolCalls.map((tc) => ({
       decision: null,
       argsJson: JSON.stringify(tc.args, null, 2),
       reason: "",
-      argsError: false,
     })),
   );
 
   const decidedCount = cardStates.filter((s) => s.decision !== null).length;
   const allDecided = decidedCount === toolCalls.length;
-  const hasErrors = cardStates.some((s) => s.argsError);
+  const hasErrors = cardStates.some(
+    (s) => s.decision === "approved" && parseArgsJson(s.argsJson) === null,
+  );
 
   const handleApproveAll = useCallback(() => {
-    setCardStates((prev) =>
-      prev.map((s) => ({ ...s, decision: "approved" as const, argsError: false })),
-    );
+    setCardStates((prev) => prev.map((s) => ({ ...s, decision: "approved" as const })));
   }, []);
 
   const handleSubmit = useCallback(() => {
@@ -168,7 +159,7 @@ export function ToolApprovalPanel({
   }, [toolCalls, cardStates, onSubmit]);
 
   return (
-    <div className="rounded-2xl border bg-background/80 backdrop-blur-sm">
+    <div className={cn("rounded-2xl border bg-background/80 backdrop-blur-sm", className)}>
       <div className="flex items-center justify-between border-b px-4 py-2.5">
         <div>
           <p className="text-sm font-medium">工具调用待审批</p>

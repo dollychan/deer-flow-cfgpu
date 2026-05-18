@@ -98,6 +98,7 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
         self,
         ai_msg: AIMessage,
         tool_approvals: dict[str, Any],
+        approval_ids: set[str],
     ) -> dict[str, Any] | None:
         """Apply approval decisions to the AIMessage.
 
@@ -109,7 +110,7 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
         artificial_messages: list[ToolMessage] = []
 
         for tc in ai_msg.tool_calls or []:
-            if not self._needs_approval(tc["name"]):
+            if tc["id"] not in approval_ids:
                 new_tool_calls.append(tc)
                 continue
 
@@ -163,14 +164,16 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
                 "HumanApproval: all %d decisions found in state, applying without interrupt",
                 len(decided_ids),
             )
-            return self._build_response(last_msg, tool_approvals)
+            return self._build_response(last_msg, tool_approvals, pending_ids)
 
         # --- First call: emit SSE and interrupt ---
         pending_payload = [{"id": tc["id"], "name": tc["name"], "args": tc["args"]} for tc in pending]
 
+        sse_emitted = False
         try:
             writer = get_stream_writer()
             writer({"type": _APPROVAL_SSE_TYPE, "tool_calls": pending_payload})
+            sse_emitted = True
             logger.info("HumanApproval: stream_writer emitted %s successfully", _APPROVAL_SSE_TYPE)
         except Exception:
             logger.warning("HumanApproval: get_stream_writer failed; %s event will be emitted by worker fallback", _APPROVAL_SSE_TYPE, exc_info=True)
@@ -181,9 +184,11 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
         )
 
         # Single interrupt for the whole batch.
+        # sse_emitted=True tells worker.py not to re-publish the SSE from the checkpoint,
+        # preventing duplicate delivery to the client.
         # Raises GraphInterrupt on the first execution (graph checkpoints and pauses).
         # On an unexpected resume-without-state-update, returns the resume value as fallback.
-        fallback_decision: dict = interrupt({"type": _APPROVAL_SSE_TYPE, "tool_calls": pending_payload})
+        fallback_decision: dict = interrupt({"type": _APPROVAL_SSE_TYPE, "tool_calls": pending_payload, "sse_emitted": sse_emitted})
 
         # Fallback: client sent Command(resume=...) without writing to state.
         # Build a tool_approvals map from the resume value and apply it.
@@ -200,7 +205,7 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
                     fallback_approvals[tc_id] = {"status": "rejected"}
 
         merged = {**tool_approvals, **fallback_approvals}
-        return self._build_response(last_msg, merged)
+        return self._build_response(last_msg, merged, pending_ids)
 
     @override
     async def aafter_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:

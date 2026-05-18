@@ -20,6 +20,7 @@ import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 import { approvalStore } from "./approval-store";
 import { fetchThreadTokenUsage } from "./api";
 import { threadTokenUsageQueryKey } from "./token-usage";
+import { TOOL_APPROVAL_REQUIRED_EVENT } from "./tool-approval";
 import type { PendingToolCall, ToolApprovals } from "./tool-approval";
 import type {
   AgentThread,
@@ -225,20 +226,17 @@ export function useThreadStream({
   const queryClient = useQueryClient();
   const updateSubtask = useUpdateSubtask();
 
-  // Declare BEFORE useStream so onCustomEvent can reference setSseApprovals
-  // without hitting the temporal dead zone.
   const [sseApprovals, setSseApprovals] = useState<PendingToolCall[] | null>(null);
 
-  // On mount: recover approvals that were stored before a Fast Refresh remount.
-  // The window-global store survives HMR module re-evaluation; reading it here
-  // ensures the panel shows even when the React state update was discarded.
+  // On mount: recover approvals from the window-global store, which survives
+  // Turbopack HMR module re-evaluation when React state is wiped on remount.
   useEffect(() => {
     const stored = approvalStore.get();
     if (stored) {
       setSseApprovals(stored);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // intentionally run once on mount only
+  }, []);
 
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
@@ -326,7 +324,7 @@ export function useThreadStream({
         typeof event === "object" &&
         event !== null &&
         "type" in event &&
-        event.type === "tool_approval_required" &&
+        event.type === TOOL_APPROVAL_REQUIRED_EVENT &&
         "tool_calls" in event &&
         Array.isArray(event.tool_calls)
       ) {
@@ -394,8 +392,6 @@ export function useThreadStream({
     },
   });
 
-  // SSE event is the primary source; window-global store is a fallback that
-  // survives Turbopack HMR module re-evaluation when the component remounts.
   const pendingApprovals = sseApprovals ?? approvalStore.get();
 
   // Optimistic messages shown before the server stream responds

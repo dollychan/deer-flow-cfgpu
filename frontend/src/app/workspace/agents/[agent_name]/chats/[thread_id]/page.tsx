@@ -27,7 +27,6 @@ import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import { useThreadStream, useThreadTokenUsage } from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
-import type { ToolApprovals } from "@/core/threads/tool-approval";
 import { textOfMessage } from "@/core/threads/utils";
 import { ToolApprovalPanel } from "@/components/workspace/tool-approval-panel";
 import { env } from "@/env";
@@ -120,13 +119,6 @@ export default function AgentChatPage() {
     [sendMessage, threadId, agent_name],
   );
 
-  const handleApprovalSubmit = useCallback(
-    (approvals: ToolApprovals) => {
-      void sendCommand(threadId, approvals);
-    },
-    [sendCommand, threadId],
-  );
-
   const handleStop = useCallback(async () => {
     await thread.stop();
   }, [thread]);
@@ -217,12 +209,11 @@ export default function AgentChatPage() {
                 )}
               >
                 {pendingApprovals && (
-                  <div className="relative mb-2">
-                    <ToolApprovalPanel
-                      toolCalls={pendingApprovals}
-                      onSubmit={handleApprovalSubmit}
-                    />
-                  </div>
+                  <ToolApprovalPanel
+                    className="mb-2"
+                    toolCalls={pendingApprovals}
+                    onSubmit={(approvals) => void sendCommand(threadId, approvals)}
+                  />
                 )}
                 {hasTodos && (
                   <div

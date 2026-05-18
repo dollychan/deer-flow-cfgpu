@@ -357,24 +357,28 @@ async def run_agent(
 
             if is_paused_for_approval:
                 await run_manager.set_status(run_id, RunStatus.interrupted)
-                # get_stream_writer() events written before interrupt() may be lost if LangGraph
-                # stops the astream() loop before they are yielded.  Recover the full
-                # tool_approval_required payload from the checkpoint's interrupt value so the
-                # frontend always receives the tool call details it needs to show the approval panel.
+                # Recover tool_approval_required payloads from the checkpoint's interrupt values.
+                # The middleware's get_stream_writer() call may be dropped by LangGraph before the
+                # astream() loop yields it; this is the reliable fallback delivery path.
+                # Skip payloads where sse_emitted=True — the middleware already sent them successfully.
                 approval_payloads: list[dict] = []
                 for _task in final_state.tasks or []:
                     for _intr in _task.interrupts or []:
                         _v = getattr(_intr, "value", None)
-                        logger.info("Run %s: interrupt task=%s value_type=%s value=%r", run_id, _task.name, type(_v).__name__, _v)
                         if isinstance(_v, dict) and _v.get("type") == "tool_approval_required":
-                            approval_payloads.append(_v)
-                logger.info("Run %s: found %d approval payloads", run_id, len(approval_payloads))
+                            if not _v.get("sse_emitted"):
+                                approval_payloads.append(_v)
+                            else:
+                                logger.info("Run %s: skipping re-publish (sse_emitted=True) for %d tool_calls", run_id, len(_v.get("tool_calls", [])))
                 if approval_payloads:
                     for _payload in approval_payloads:
                         logger.info("Run %s: publishing tool_approval_required SSE with %d tool_calls", run_id, len(_payload.get("tool_calls", [])))
                         await bridge.publish(run_id, "custom", _payload)
-                else:
-                    # Fallback for unexpected interrupt formats.
+                elif not any(
+                    isinstance(getattr(_intr, "value", None), dict) and getattr(_intr, "value", {}).get("sse_emitted")
+                    for _task in (final_state.tasks or [])
+                    for _intr in (_task.interrupts or [])
+                ):
                     logger.warning("Run %s: no tool_approval_required payload found in interrupt values, sending run_paused fallback", run_id)
                     await bridge.publish(run_id, "custom", {"type": "run_paused", "reason": "tool_approval_required"})
                 logger.info("Run %s paused for human approval", run_id)

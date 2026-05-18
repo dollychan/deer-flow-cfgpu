@@ -1,3 +1,5 @@
+export const TOOL_APPROVAL_REQUIRED_EVENT = "tool_approval_required" as const;
+
 export interface PendingToolCall {
   id: string;
   name: string;

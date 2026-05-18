@@ -27,7 +27,6 @@ import { useNotification } from "@/core/notification/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import { useThreadStream, useThreadTokenUsage } from "@/core/threads/hooks";
 import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
-import type { ToolApprovals } from "@/core/threads/tool-approval";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -122,12 +121,6 @@ export default function ChatPage() {
     [sendMessage, threadId],
   );
 
-  const handleApprovalSubmit = useCallback(
-    (approvals: ToolApprovals) => {
-      void sendCommand(threadId, approvals);
-    },
-    [sendCommand, threadId],
-  );
   const handleStop = useCallback(async () => {
     await thread.stop();
   }, [thread]);
@@ -197,12 +190,11 @@ export default function ChatPage() {
                 )}
               >
                 {pendingApprovals && (
-                  <div className="relative mb-2">
-                    <ToolApprovalPanel
-                      toolCalls={pendingApprovals}
-                      onSubmit={handleApprovalSubmit}
-                    />
-                  </div>
+                  <ToolApprovalPanel
+                    className="mb-2"
+                    toolCalls={pendingApprovals}
+                    onSubmit={(approvals) => void sendCommand(threadId, approvals)}
+                  />
                 )}
                 {hasTodos && (
                   <div

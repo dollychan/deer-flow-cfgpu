@@ -17,7 +17,7 @@ from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddlew
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
-from deerflow.config.agents_config import load_agent_config, validate_agent_name
+from deerflow.config.agents_config import AgentConfig, load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.models import create_chat_model
 from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
@@ -244,7 +244,7 @@ def _build_middlewares(
     custom_middlewares: list[AgentMiddleware] | None = None,
     *,
     app_config: AppConfig | None = None,
-    agent_config=None,
+    agent_config: AgentConfig | None = None,
 ):
     """Build middleware chain based on runtime configuration.
 
