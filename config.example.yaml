@@ -1089,3 +1089,37 @@ run_events:
 #   failure_threshold: 5
 #   # Time in seconds before attempting to recover (default: 60)
 #   recovery_timeout_sec: 60
+
+# ============================================================================
+# Consumer Configuration (RocketMQ mode only)
+# ============================================================================
+# Used when running the standalone Consumer process: python -m app.consumer
+# The Consumer subscribes to two topics:
+#   $AGENT_TASKS   — task messages (throttled by concurrent run slots)
+#   $AGENT_SIGNALS — cancel / ping control signals (always polled)
+# Results are published to $AGENT_RESULTS.
+
+# consumer:
+#   # ── MQ connection ──────────────────────────────────────────────────────
+#   endpoint: $ROCKETMQ_ENDPOINT       # RocketMQ gRPC endpoint (host:port)
+#   username: $ROCKETMQ_USERNAME       # access key
+#   password: $ROCKETMQ_PASSWORD       # secret key
+#
+#   # ── Topics ─────────────────────────────────────────────────────────────
+#   task_topic:   $AGENT_TASKS         # incoming task messages
+#   signal_topic: $AGENT_SIGNALS       # incoming cancel / ping signals
+#   result_topic: $AGENT_RESULTS       # outgoing progress / result / error / pong
+#
+#   # ── Consumer groups ─────────────────────────────────────────────────────
+#   consumer_group:        $AGENT_CONSUMER_GROUP          # for task_topic  
+#   signal_consumer_group: $AGENT_SIGNAL_CONSUMER_GROUP   # for signal_topic  
+#
+#   # ── Optional tag filters (empty = accept all) ───────────────────────────
+#   # task_topic_tag:   ""
+#   # signal_topic_tag: ""
+#
+#   # ── Runtime limits ──────────────────────────────────────────────────────
+#   max_concurrent_runs: 10       # max simultaneous agent runs per instance
+#   poll_batch_size: 20           # max messages fetched per task receive() call
+#   invisible_duration_seconds: 300    # task message lease (must exceed max run time)
+#   processed_messages_ttl_days: 7    # days to retain idempotency records (0 = disabled)

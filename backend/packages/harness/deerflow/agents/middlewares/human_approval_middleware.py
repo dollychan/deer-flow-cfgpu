@@ -75,8 +75,8 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
     parallel-interrupt race that occurs when intercepting per-tool in wrap_tool_call.
 
     Matching uses fnmatch patterns, e.g.:
-      - "cfgpu__generate_image"   exact MCP-prefixed name
-      - "cfgpu__generate_*"       MCP server glob
+      - "cfgpu_generate_image"   exact MCP-prefixed name
+      - "cfgpu_generate_*"       MCP server glob
       - "*generate*"              substring glob
 
     Args:
