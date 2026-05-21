@@ -5,7 +5,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
-from deerflow.agents.memory.summarization_hook import memory_flush_hook
+from deerflow.agents.memory.summarization_hook import memory_flush_hook, mlm_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
@@ -95,6 +95,8 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     hooks: list[BeforeSummarizationHook] = []
     if resolved_app_config.memory.enabled:
         hooks.append(memory_flush_hook)
+    if resolved_app_config.memory.mlm_enabled:
+        hooks.append(mlm_flush_hook)
 
     # The logic below relies on two assumptions holding true: this factory is
     # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime
@@ -263,8 +265,14 @@ def _build_middlewares(
     # Always inject current date (and optionally memory) as <system-reminder> into the
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+    from deerflow.agents.middlewares.mlm_middleware import MlmMiddleware
 
     middlewares.append(DynamicContextMiddleware(agent_name=agent_name, app_config=resolved_app_config))
+
+    # Inject multi-level DB memory as a <system-reminder> on the first turn,
+    # and queue extraction after each turn.
+    if resolved_app_config.memory.mlm_enabled:
+        middlewares.append(MlmMiddleware(agent_name=agent_name))
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)

@@ -51,6 +51,12 @@ class ThreadRunStateRow(Base):
     status lifecycle:
       idle    → claimed by Consumer → running
       running → run completes      → idle
+
+    drain_mode controls how the followup queue is drained after a run ends:
+      followup — take the earliest row and start a new independent run (default)
+      collect  — take all pending rows, merge their messages, start a single run
+    drain_mode is set to 'collect' when a collect-mode message is enqueued while
+    the thread is running, and reset to 'followup' when the thread goes idle.
     """
 
     __tablename__ = "thread_run_state"
@@ -62,6 +68,8 @@ class ThreadRunStateRow(Base):
     # message_id of the task currently being executed
     status: Mapped[str] = mapped_column(Text, nullable=False)
     # "running" | "idle"
+    drain_mode: Mapped[str] = mapped_column(Text, nullable=False, default="followup")
+    # "followup" | "collect"
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # stale-run auto-retry count; reset to 0 after each run completes
     # reply_config removed: full MQ envelope (incl. reply_config) is in thread_msg_queue(policy='current')

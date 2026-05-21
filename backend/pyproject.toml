@@ -26,6 +26,7 @@ dependencies = [
 [project.optional-dependencies]
 postgres = ["deerflow-harness[postgres]"]
 discord = ["discord.py>=2.7.0"]
+consumer = ["rocketmq-python-client==5.1.1"]
 
 [dependency-groups]
 dev = [

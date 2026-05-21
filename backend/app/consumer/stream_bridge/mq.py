@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class MQProducer(Protocol):
     """Minimal interface required from a RocketMQ producer."""
 
-    async def send_async(self, body: bytes) -> None: ...
+    async def send_async(self, body: bytes, *, keys: str = "") -> None: ...
 
 
 @dataclass
@@ -150,7 +150,7 @@ class MQStreamBridge(StreamBridge):
 
         if usage:
             payload["usage"] = usage
-        if not stream_events and final_state is not None:
+        if final_state is not None:
             payload["final_state"] = final_state
 
         envelope = self._build_envelope(
@@ -175,7 +175,7 @@ class MQStreamBridge(StreamBridge):
         """Publish an error envelope for a task run.
 
         Error codes: AGENT_TIMEOUT | TOOL_FAILED | QUOTA_EXCEEDED |
-                     INTERNAL_ERROR | AGENT_BUSY
+                     INTERNAL_ERROR | AGENT_BUSY | INVALID_SCHEMA
         """
         ctx = self._runs.get(run_id)
         seq = ctx.seq if ctx else 0
@@ -194,6 +194,46 @@ class MQStreamBridge(StreamBridge):
             thread_id=thread_id,
         )
         await self._send(envelope)
+
+    async def replay(self, message_id: str, thread_id: str, result_cache: dict) -> None:
+        """Replay a cached result for a duplicate message delivery.
+
+        Bypasses run registration so it works outside an active AgentRunner run.
+        Sends events in protocol order:
+          1. tool_approval_required custom progress event (HIL pause only)
+          2. Terminal result or error envelope
+        """
+        seq = 0
+
+        if tool_approval := result_cache.get("tool_approval_required"):
+            progress = self._build_envelope(
+                message_id=message_id,
+                type="progress",
+                payload={"event_type": "custom", "data": tool_approval},
+                seq=seq,
+                thread_id=thread_id,
+            )
+            await self._send(progress)
+            seq += 1
+
+        if "error" in result_cache:
+            terminal = self._build_envelope(
+                message_id=message_id,
+                type="error",
+                payload=result_cache,
+                seq=seq,
+                thread_id=thread_id,
+            )
+        else:
+            status_payload = {k: v for k, v in result_cache.items() if k != "tool_approval_required"}
+            terminal = self._build_envelope(
+                message_id=message_id,
+                type="result",
+                payload=status_payload,
+                seq=seq,
+                thread_id=thread_id,
+            )
+        await self._send(terminal)
 
     async def publish_pong(
         self,
@@ -250,4 +290,5 @@ class MQStreamBridge(StreamBridge):
 
     async def _send(self, envelope: dict) -> None:
         body = json.dumps(envelope, ensure_ascii=False).encode()
-        await self._producer.send_async(body)
+        keys = envelope.get("message_id", "")
+        await self._producer.send_async(body, keys=keys)

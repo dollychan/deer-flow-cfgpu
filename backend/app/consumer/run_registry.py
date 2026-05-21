@@ -13,7 +13,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.runtime.runs.models import (
+from app.consumer.models import (
     ConsumerInstanceRow,
     ProcessedMessageRow,
     ThreadCancelSignalRow,
@@ -270,12 +270,9 @@ class RunRegistry:
         async with self._sf() as session:
             async with session.begin():
                 await session.execute(
-                    update(ThreadMsgQueueRow)
-                    .where(
+                    delete(ThreadMsgQueueRow).where(
                         ThreadMsgQueueRow.id == queue_id,
-                        ThreadMsgQueueRow.consumed_at.is_(None),
                     )
-                    .values(consumed_at=now)
                 )
                 await session.execute(
                     update(ThreadRunStateRow)

@@ -8,6 +8,6 @@ Usage:
     from deerflow.persistence import init_engine, close_engine, get_session_factory
 """
 
-from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine
+from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine, init_engine_from_config
 
-__all__ = ["close_engine", "get_engine", "get_session_factory", "init_engine"]
+__all__ = ["close_engine", "get_engine", "get_session_factory", "init_engine", "init_engine_from_config"]

@@ -45,7 +45,7 @@ from typing import Any
 # This registers the 5 consumer tables (consumer_instances, thread_run_state,
 # thread_msg_queue, thread_cancel_signals, processed_messages) into
 # Base.metadata so that create_all() creates them alongside the core tables.
-import deerflow.runtime.runs.models  # noqa: F401
+import app.consumer.models  # noqa: F401
 
 from deerflow.config.app_config import get_app_config
 from deerflow.persistence import close_engine, get_session_factory, init_engine_from_config
@@ -76,7 +76,7 @@ class _RocketMQProducerAdapter:
         self._tag = tag
         self._executor = executor
 
-    async def send_async(self, body: bytes) -> None:
+    async def send_async(self, body: bytes, *, keys: str = "") -> None:
         from rocketmq import Message
 
         msg = Message()
@@ -84,6 +84,8 @@ class _RocketMQProducerAdapter:
         msg.body = body
         if self._tag:
             msg.tag = self._tag
+        if keys:
+            msg.keys = keys
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(self._executor, self._producer.send, msg)
@@ -351,13 +353,15 @@ async def main() -> None:
         logger.info("Consumer instance registered: %s", instance_id)
 
         bridge = MQStreamBridge(producer_adapter, result_topic=consumer_cfg.result_topic)
-        runner = AgentRunner(registry, bridge, checkpointer, config)
+        active_tasks: set[asyncio.Task] = set()
+        runner = AgentRunner(registry, bridge, checkpointer, config, task_registry=active_tasks)
         task_consumer = TaskConsumer(
             registry,
             runner,
             bridge,
             instance_id,
             max_concurrent=consumer_cfg.max_concurrent_runs,
+            active_tasks=active_tasks,
         )
 
         # 7. Build RocketMQ consumers (SimpleConsumer — message-granularity, POP mode)
@@ -461,10 +465,12 @@ async def main() -> None:
         await stop_event.wait()
         logger.info("Shutdown signal received, stopping poll loop...")
 
-        # 11. Graceful shutdown
+        # 11. Graceful shutdown — stop polls, then wait for in-flight agent runs
         for task in bg_tasks:
             task.cancel()
         await asyncio.gather(*bg_tasks, return_exceptions=True)
+
+        await task_consumer.shutdown(timeout=30.0)
 
         mq_task_consumer.shutdown()
         mq_signal_consumer.shutdown()

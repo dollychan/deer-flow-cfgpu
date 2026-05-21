@@ -13,14 +13,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 
 from app.consumer.agent_runner import AgentRunner
 from app.consumer.constants import ClaimResult, MessageMode, QueuePolicy
 from app.consumer.run_registry import RunRegistry
-from app.consumer.schemas import TaskMessage
+from app.consumer.schemas import SchemaValidationError, TaskMessage
 from app.consumer.stream_bridge.mq import MQStreamBridge
 
 logger = logging.getLogger(__name__)
+
+# Regex to salvage message_id / thread_id from malformed JSON bodies.
+# Used only when json.loads() fails so error envelopes can still be sent.
+_RESCUE_MSG_ID_RE = re.compile(rb'"message_id"\s*:\s*"([^"]{1,256})"')
+_RESCUE_THREAD_ID_RE = re.compile(rb'"thread_id"\s*:\s*"([^"]{1,256})"')
 
 
 class TaskConsumer:
@@ -41,6 +47,7 @@ class TaskConsumer:
         bridge: MQStreamBridge,
         instance_id: str,
         max_concurrent: int = 10,
+        active_tasks: set[asyncio.Task] | None = None,
     ) -> None:
         self._registry = registry
         self._runner = runner
@@ -49,27 +56,93 @@ class TaskConsumer:
         self._sem = asyncio.Semaphore(max_concurrent)
         self._max_concurrent = max_concurrent
         self._running_count = 0
+        self._active_tasks: set[asyncio.Task] = active_tasks if active_tasks is not None else set()
 
     @property
     def available_slots(self) -> int:
         """Semaphore slots currently available (for poll-loop throttling)."""
         return self._max_concurrent - self._running_count
 
+    async def shutdown(self, timeout: float = 30.0) -> None:
+        """Wait for all active agent run tasks to finish, then cancel stragglers.
+
+        Called during graceful shutdown before tearing down DB / MQ / checkpointer.
+        """
+        if not self._active_tasks:
+            return
+        logger.info("Waiting up to %.0fs for %d active agent run(s) to finish...", timeout, len(self._active_tasks))
+        _, pending = await asyncio.wait(self._active_tasks, timeout=timeout)
+        if pending:
+            logger.warning("Cancelling %d agent run(s) that did not finish in time", len(pending))
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
     # ── Public entry point ────────────────────────────────────────────────────
 
     async def handle_message(self, body: str | bytes) -> None:
-        """Deserialize and dispatch a single RocketMQ message body.
+        """Deserialize, validate, and dispatch a single RocketMQ message body.
 
-        Designed to be called from the MQ receive callback. Exceptions are
+        Designed to be called from the MQ receive callback. All exceptions are
         caught and logged so the caller can always ack the message.
+
+        On schema validation failure the error is published back to the upstream
+        caller via an ``INVALID_SCHEMA`` error envelope (when ``message_id`` is
+        recoverable from the raw body).
         """
+        # ── Step 1: JSON parse — extract identifiers for error reporting ──────
+        message_id: str | None = None
+        thread_id: str | None = None
+        raw_envelope: dict
         try:
-            raw_envelope: dict = json.loads(body)
-            message = TaskMessage.from_dict(raw_envelope)
+            raw_envelope = json.loads(body)
+            message_id = raw_envelope.get("message_id") or None
+            thread_id = raw_envelope.get("thread_id") or None
         except Exception as exc:
-            logger.error("Failed to deserialize MQ message: %s", exc)
+            logger.error("MQ message is not valid JSON: %s", exc)
+            # Best-effort: salvage message_id from malformed body so we can send
+            # an error envelope back to the caller even when JSON parse fails.
+            raw_bytes = body if isinstance(body, bytes) else body.encode()
+            m = _RESCUE_MSG_ID_RE.search(raw_bytes)
+            if m:
+                rescued_msg_id = m.group(1).decode(errors="replace")
+                t = _RESCUE_THREAD_ID_RE.search(raw_bytes)
+                rescued_thread_id = t.group(1).decode(errors="replace") if t else ""
+                await self._bridge.publish_error(
+                    rescued_msg_id,
+                    "INVALID_SCHEMA",
+                    thread_id=rescued_thread_id,
+                    message=f"Message body is not valid JSON: {exc}",
+                    retriable=False,
+                )
             return
 
+        # ── Step 2: Schema validation + deserialization ───────────────────────
+        try:
+            message = TaskMessage.from_dict(raw_envelope)
+        except SchemaValidationError as exc:
+            logger.error(
+                "MQ schema validation failed message_id=%s thread_id=%s: %s",
+                message_id,
+                thread_id,
+                exc.reason,
+            )
+            if message_id:
+                await self._bridge.publish_error(
+                    message_id,
+                    "INVALID_SCHEMA",
+                    thread_id=thread_id or "",
+                    message=exc.reason,
+                    retriable=False,
+                )
+            return
+        except Exception as exc:
+            logger.error(
+                "Failed to deserialize MQ message message_id=%s: %s", message_id, exc
+            )
+            return
+
+        # ── Step 3: Dispatch by message type ──────────────────────────────────
         try:
             if message.type == "ping":
                 await self._handle_ping(message)
@@ -77,8 +150,6 @@ class TaskConsumer:
                 await self._handle_cancel(message)
             elif message.type == "task":
                 await self._handle_task(message, raw_envelope)
-            else:
-                logger.warning("Unknown message type=%s, message_id=%s", message.type, message.message_id)
         except Exception as exc:
             logger.exception(
                 "Unhandled error dispatching message_id=%s type=%s: %s",
@@ -129,9 +200,9 @@ class TaskConsumer:
                 existing.status,
             )
             if existing.result_cache:
-                await self._bridge.publish(
+                await self._bridge.replay(
                     message.message_id,
-                    "result",
+                    message.thread_id,
                     existing.result_cache,
                 )
             return
@@ -162,6 +233,8 @@ class TaskConsumer:
             self._run_and_release(message),
             name=f"run-{message.message_id[:8]}",
         )
+        self._active_tasks.add(task)
+        task.add_done_callback(self._active_tasks.discard)
         logger.info(
             "Started run thread=%s message_id=%s task=%s",
             message.thread_id,

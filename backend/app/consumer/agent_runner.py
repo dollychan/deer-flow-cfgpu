@@ -40,11 +40,13 @@ class AgentRunner:
         bridge: MQStreamBridge,
         checkpointer: Any,
         app_config: AppConfig,
+        task_registry: set[asyncio.Task] | None = None,
     ) -> None:
         self._registry = registry
         self._bridge = bridge
         self._checkpointer = checkpointer
         self._app_config = app_config
+        self._task_registry = task_registry  # shared with TaskConsumer._active_tasks
 
     # ── Public entry point ────────────────────────────────────────────────────
 
@@ -70,12 +72,13 @@ class AgentRunner:
         )
 
         processed_status = ProcessedStatus.COMPLETED
+        result_cache: dict | None = None
         try:
             coro = self._execute(message, run_id)
             if message.timeout_seconds:
-                is_paused = await asyncio.wait_for(coro, timeout=message.timeout_seconds)
+                is_paused, result_cache = await asyncio.wait_for(coro, timeout=message.timeout_seconds)
             else:
-                is_paused = await coro
+                is_paused, result_cache = await coro
 
             if is_paused:
                 processed_status = ProcessedStatus.PAUSED_FOR_APPROVAL
@@ -88,40 +91,46 @@ class AgentRunner:
                 thread_id=thread_id,
                 stream_events=message.reply_config.stream_events,
             )
+            result_cache = {"status": ProcessedStatus.CANCELLED}
 
         except (asyncio.TimeoutError, TimeoutError):
             processed_status = ProcessedStatus.FAILED
+            timeout_msg = f"Agent execution timed out after {message.timeout_seconds}s"
             await self._bridge.publish_error(
                 run_id,
                 "AGENT_TIMEOUT",
                 thread_id=thread_id,
                 retriable=True,
-                message=f"Agent execution timed out after {message.timeout_seconds}s",
+                message=timeout_msg,
             )
+            result_cache = {"error": {"code": "AGENT_TIMEOUT", "retriable": True, "message": timeout_msg}}
 
         except Exception as exc:
             processed_status = ProcessedStatus.FAILED
             logger.exception("Run %s failed: %s", run_id, exc)
+            error_msg = str(exc)
             await self._bridge.publish_error(
                 run_id,
                 "INTERNAL_ERROR",
                 thread_id=thread_id,
                 retriable=False,
-                message=str(exc),
+                message=error_msg,
             )
+            result_cache = {"error": {"code": "INTERNAL_ERROR", "retriable": False, "message": error_msg}}
 
         finally:
             cancel_watcher_task.cancel()
             heartbeat_task.cancel()
             self._bridge.unregister_run(run_id)
-            await self._registry.mark_processed(run_id, thread_id, processed_status)
+            await self._registry.mark_processed(run_id, thread_id, processed_status, result_cache)
             await self._registry.reset_retry_count(thread_id)
             await self._drain_and_release(thread_id)
 
     # ── Core execution ────────────────────────────────────────────────────────
 
-    async def _execute(self, message: TaskMessage, run_id: str) -> bool:
-        """Run the agent graph; returns True when paused for HIL, False on success."""
+    async def _execute(self, message: TaskMessage, run_id: str) -> tuple[bool, dict]:
+        """Run the agent graph; returns (is_paused, result_payload) where result_payload
+        mirrors the payload sent via publish_result for use as result_cache."""
         # Auto-correct missing ask=True on HIL resume messages
         if message.is_resume and not message.config.get("ask"):
             await self._bridge.publish(
@@ -145,11 +154,21 @@ class AgentRunner:
         else:
             stream_input = _normalize_messages(message.messages or [])
 
+        # Use client-requested event types as stream_mode so LangGraph only
+        # generates events that will actually be forwarded. When stream_events
+        # is disabled, use "values" as a minimal mode to drive graph execution
+        # without emitting any published events.
+        rc = message.reply_config
+        stream_mode: list[str] = (
+            rc.stream_event_types if rc.stream_events and rc.stream_event_types else ["values"]
+        )
         async for mode, chunk in agent.astream(
             stream_input,
             config=runnable_config,
-            stream_mode=["messages", "values", "custom"],
+            stream_mode=stream_mode,
         ):
+            if mode == "messages" and _is_empty_message_chunk(chunk):
+                continue
             await self._bridge.publish(run_id, mode, serialize(chunk, mode=mode))
 
         is_paused = False
@@ -162,13 +181,16 @@ class AgentRunner:
             final_state = None
 
         if is_paused:
-            # Ensure tool_approval_required custom event reaches upstream.
-            # The middleware normally publishes via stream_writer; if it was
-            # dropped by LangGraph before astream() yielded it, re-publish here.
+            # Collect tool_approval_required payload for result_cache so that
+            # duplicate deliveries can replay the approval prompt to the client.
+            tool_approval_payload: dict | None = None
             for task in final_state.tasks or []:
                 for intr in task.interrupts or []:
                     v = getattr(intr, "value", None)
                     if isinstance(v, dict) and v.get("type") == "tool_approval_required":
+                        tool_approval_payload = v
+                        # Ensure the event reaches upstream if the middleware
+                        # stream_writer dropped it before astream() yielded it.
                         if not v.get("sse_emitted"):
                             logger.info(
                                 "Run %s: re-publishing tool_approval_required (%d calls)",
@@ -185,15 +207,17 @@ class AgentRunner:
             )
             # Thread goes idle — HIL interrupt stored in LangGraph checkpoint.
             # Resume message arrives as a new task and is claimed normally.
-            return True
+            hil_cache: dict = {"status": ProcessedStatus.PAUSED_FOR_APPROVAL}
+            if tool_approval_payload is not None:
+                hil_cache["tool_approval_required"] = tool_approval_payload
+            return True, hil_cache
 
-        # Normal success — include final_state when stream_events=False
         final_state_data = None
-        if not message.reply_config.stream_events and final_state is not None:
+        if final_state is not None:
             from deerflow.runtime.serialization import serialize_channel_values
 
             try:
-                final_state_data = serialize_channel_values(final_state.values or {})
+                final_state_data = serialize_channel_values(dict(final_state.values or {}))
             except Exception:
                 logger.debug("Run %s: could not serialize final state", run_id, exc_info=True)
 
@@ -204,7 +228,10 @@ class AgentRunner:
             stream_events=message.reply_config.stream_events,
             final_state=final_state_data,
         )
-        return False
+        result_payload: dict = {"status": "success"}
+        if final_state_data is not None:
+            result_payload["final_state"] = final_state_data
+        return False, result_payload
 
     # ── Public error publishing ───────────────────────────────────────────────
 
@@ -292,7 +319,13 @@ class AgentRunner:
         if task_cfg.get("models"):
             context["models"] = task_cfg["models"]
 
-        return RunnableConfig(configurable=configurable, context=context)
+        # Inject Runtime so middleware/tools see runtime.context (reads from
+        # configurable["__pregel_runtime"], NOT from RunnableConfig(context=...)).
+        from langgraph.runtime import Runtime
+
+        configurable["__pregel_runtime"] = Runtime(context=context)
+
+        return RunnableConfig(configurable=configurable)
 
     # ── Drain-before-Idle ─────────────────────────────────────────────────────
 
@@ -319,10 +352,13 @@ class AgentRunner:
         )
 
         logger.info("Thread %s: draining followup message_id=%s", thread_id, next_row.message_id)
-        asyncio.create_task(
+        task = asyncio.create_task(
             self.run(next_task),
             name=f"followup-{next_row.message_id[:8]}",
         )
+        if self._task_registry is not None:
+            self._task_registry.add(task)
+            task.add_done_callback(self._task_registry.discard)
 
     async def trigger_drain(self, thread_id: str) -> None:
         """Trigger drain from outside a run context (e.g., stale-run-watchdog)."""
@@ -358,6 +394,24 @@ class AgentRunner:
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────────
+
+
+def _is_empty_message_chunk(chunk: Any) -> bool:
+    """Return True if a messages-mode chunk carries no meaningful content.
+
+    LangGraph messages mode yields (AIMessageChunk, metadata) tuples. Chunks
+    with empty content and no tool call data are start/end bookkeeping events
+    that add no value to the upstream consumer.
+    """
+    msg = chunk[0] if isinstance(chunk, tuple) else chunk
+    content = getattr(msg, "content", None)
+    if content:
+        return False
+    if getattr(msg, "tool_call_chunks", None):
+        return False
+    if getattr(msg, "tool_calls", None):
+        return False
+    return True
 
 
 def _normalize_messages(messages: list[UserMessage]) -> dict[str, Any]:
