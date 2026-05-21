@@ -160,6 +160,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if _matches_any(lowered, _BUSY_PATTERNS):
             return True, "busy"
 
+        # Empty stream from model endpoint — transient GPU/infra issue
+        if isinstance(exc, ValueError) and "no generations found in stream" in lowered:
+            return True, "transient"
+
         return False, "generic"
 
     def _build_retry_delay_ms(self, attempt: int, exc: BaseException) -> int:
