@@ -60,7 +60,14 @@ class AgentRunner:
         run_id = message.message_id
         runner_task = asyncio.current_task()
 
-        self._bridge.register_run(run_id, thread_id, message.reply_config)
+        self._bridge.register_run(
+            run_id,
+            thread_id,
+            message.reply_config,
+            agent_name=message.agent_name,
+            user_id=message.user_id or "",
+            project_id=message.project_id or "",
+        )
 
         heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(thread_id, interval=10),
@@ -212,8 +219,12 @@ class AgentRunner:
                 hil_cache["tool_approval_required"] = tool_approval_payload
             return True, hil_cache
 
+        rc = message.reply_config
+
+        # Only serialize final_state for non-streaming clients; streaming clients
+        # already have all content via custom events and don't need the state dump.
         final_state_data = None
-        if final_state is not None:
+        if final_state is not None and not rc.stream_events:
             from deerflow.runtime.serialization import serialize_channel_values
 
             try:
@@ -225,11 +236,15 @@ class AgentRunner:
             run_id,
             status="success",
             thread_id=message.thread_id,
-            stream_events=message.reply_config.stream_events,
+            stream_events=rc.stream_events,
             final_state=final_state_data,
         )
-        result_payload: dict = {"status": "success"}
-        if final_state_data is not None:
+
+        result_payload: dict = {"status": "success", "stream_events": rc.stream_events}
+        if rc.stream_events:
+            # Store buffered custom events so duplicate deliveries can replay the stream.
+            result_payload["events"] = self._bridge.get_buffered_events(run_id)
+        elif final_state_data is not None:
             result_payload["final_state"] = final_state_data
         return False, result_payload
 
@@ -309,6 +324,8 @@ class AgentRunner:
         # Per-user isolation (memory, sandbox path, custom agents)
         if message.user_id:
             context["user_id"] = message.user_id
+        if message.project_id:
+            context["project_id"] = message.project_id
         # Mirror all configurable keys that _CONTEXT_CONFIGURABLE_KEYS defines in services.py,
         # so tools/middleware that read runtime.context see the same values as Gateway runs.
         for key in ("agent_name", "thinking_enabled", "is_plan_mode", "ask",

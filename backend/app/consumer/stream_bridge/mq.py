@@ -42,7 +42,11 @@ class MQProducer(Protocol):
 class _RunContext:
     thread_id: str
     reply_config: ReplyConfig
+    agent_name: str = ""
+    user_id: str = ""
+    project_id: str = ""
     seq: int = field(default=0)
+    buffered_events: list[dict] = field(default_factory=list)
 
 
 # Events that must never be forwarded to upstream
@@ -68,9 +72,24 @@ class MQStreamBridge(StreamBridge):
 
     # ── Run context ───────────────────────────────────────────────────────────
 
-    def register_run(self, run_id: str, thread_id: str, reply_config: ReplyConfig) -> None:
+    def register_run(
+        self,
+        run_id: str,
+        thread_id: str,
+        reply_config: ReplyConfig,
+        *,
+        agent_name: str = "",
+        user_id: str = "",
+        project_id: str = "",
+    ) -> None:
         """Associate a run with its thread and reply configuration before streaming."""
-        self._runs[run_id] = _RunContext(thread_id=thread_id, reply_config=reply_config)
+        self._runs[run_id] = _RunContext(
+            thread_id=thread_id,
+            reply_config=reply_config,
+            agent_name=agent_name,
+            user_id=user_id,
+            project_id=project_id,
+        )
 
     def unregister_run(self, run_id: str) -> None:
         """Remove run context after streaming is complete."""
@@ -107,8 +126,20 @@ class MQStreamBridge(StreamBridge):
             payload={"event_type": event, "data": data},
             seq=seq,
             thread_id=ctx.thread_id,
+            agent_name=ctx.agent_name,
+            user_id=ctx.user_id,
+            project_id=ctx.project_id,
         )
         await self._send(envelope)
+
+        # Buffer custom events for duplicate-delivery replay (only what was actually sent).
+        if event == "custom" and isinstance(data, dict):
+            ctx.buffered_events.append(data)
+
+    def get_buffered_events(self, run_id: str) -> list[dict]:
+        """Return a copy of the custom events buffered during this run, for result_cache storage."""
+        ctx = self._runs.get(run_id)
+        return list(ctx.buffered_events) if ctx else []
 
     async def publish_end(self, run_id: str) -> None:
         """No-op: MQ stream termination is signalled by publish_result/publish_error."""
@@ -144,13 +175,15 @@ class MQStreamBridge(StreamBridge):
           - stream_events=False: include final_state in the payload.
         """
         ctx = self._runs.get(run_id)
-        seq = ctx.seq if ctx else 0
+        seq, agent_name, user_id, project_id = self._unpack_ctx(ctx)
 
         payload: dict[str, Any] = {"status": status}
 
         if usage:
             payload["usage"] = usage
-        if final_state is not None:
+        # stream_events=True: client received the full custom event stream; final_state redundant.
+        # stream_events=False: client has no stream data; include final_state for display.
+        if not stream_events and final_state is not None:
             payload["final_state"] = final_state
 
         envelope = self._build_envelope(
@@ -159,6 +192,9 @@ class MQStreamBridge(StreamBridge):
             payload=payload,
             seq=seq,
             thread_id=thread_id,
+            agent_name=agent_name,
+            user_id=user_id,
+            project_id=project_id,
         )
         await self._send(envelope)
 
@@ -178,7 +214,7 @@ class MQStreamBridge(StreamBridge):
                      INTERNAL_ERROR | AGENT_BUSY | INVALID_SCHEMA
         """
         ctx = self._runs.get(run_id)
-        seq = ctx.seq if ctx else 0
+        seq, agent_name, user_id, project_id = self._unpack_ctx(ctx)
 
         error: dict[str, Any] = {"code": code, "retriable": retriable}
         if message:
@@ -192,19 +228,48 @@ class MQStreamBridge(StreamBridge):
             payload={"error": error},
             seq=seq,
             thread_id=thread_id,
+            agent_name=agent_name,
+            user_id=user_id,
+            project_id=project_id,
         )
         await self._send(envelope)
 
-    async def replay(self, message_id: str, thread_id: str, result_cache: dict) -> None:
+    async def replay(
+        self,
+        message_id: str,
+        thread_id: str,
+        result_cache: dict,
+        *,
+        agent_name: str = "",
+        user_id: str = "",
+        project_id: str = "",
+    ) -> None:
         """Replay a cached result for a duplicate message delivery.
 
         Bypasses run registration so it works outside an active AgentRunner run.
         Sends events in protocol order:
-          1. tool_approval_required custom progress event (HIL pause only)
-          2. Terminal result or error envelope
+          1. Buffered custom events (ai_message / tool_result, streaming runs only)
+          2. tool_approval_required custom progress event (HIL pause only)
+          3. Terminal result or error envelope
         """
         seq = 0
 
+        # Replay buffered custom event stream (present when stream_events=True).
+        for event_data in result_cache.get("events", []):
+            progress = self._build_envelope(
+                message_id=message_id,
+                type="progress",
+                payload={"event_type": "custom", "data": event_data},
+                seq=seq,
+                thread_id=thread_id,
+                agent_name=agent_name,
+                user_id=user_id,
+                project_id=project_id,
+            )
+            await self._send(progress)
+            seq += 1
+
+        # HIL pause: tool_approval_required event (PAUSED_FOR_APPROVAL state only).
         if tool_approval := result_cache.get("tool_approval_required"):
             progress = self._build_envelope(
                 message_id=message_id,
@@ -212,26 +277,41 @@ class MQStreamBridge(StreamBridge):
                 payload={"event_type": "custom", "data": tool_approval},
                 seq=seq,
                 thread_id=thread_id,
+                agent_name=agent_name,
+                user_id=user_id,
+                project_id=project_id,
             )
             await self._send(progress)
             seq += 1
 
+        # Terminal envelope: error or result.
         if "error" in result_cache:
             terminal = self._build_envelope(
                 message_id=message_id,
                 type="error",
-                payload=result_cache,
+                payload={"error": result_cache["error"]},
                 seq=seq,
                 thread_id=thread_id,
+                agent_name=agent_name,
+                user_id=user_id,
+                project_id=project_id,
             )
         else:
-            status_payload = {k: v for k, v in result_cache.items() if k != "tool_approval_required"}
+            result_payload: dict[str, Any] = {"status": result_cache.get("status", "success")}
+            if "usage" in result_cache:
+                result_payload["usage"] = result_cache["usage"]
+            # Only include final_state when the original run was non-streaming.
+            if not result_cache.get("stream_events", True) and "final_state" in result_cache:
+                result_payload["final_state"] = result_cache["final_state"]
             terminal = self._build_envelope(
                 message_id=message_id,
                 type="result",
-                payload=status_payload,
+                payload=result_payload,
                 seq=seq,
                 thread_id=thread_id,
+                agent_name=agent_name,
+                user_id=user_id,
+                project_id=project_id,
             )
         await self._send(terminal)
 
@@ -267,6 +347,13 @@ class MQStreamBridge(StreamBridge):
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _unpack_ctx(ctx: "_RunContext | None") -> tuple[int, str, str, str]:
+        """Return (seq, agent_name, user_id, project_id) from a run context, or zero/empty defaults."""
+        if ctx is None:
+            return 0, "", "", ""
+        return ctx.seq, ctx.agent_name, ctx.user_id, ctx.project_id
+
     def _build_envelope(
         self,
         *,
@@ -275,18 +362,28 @@ class MQStreamBridge(StreamBridge):
         payload: dict,
         seq: int,
         thread_id: str,
+        agent_name: str = "",
+        user_id: str = "",
+        project_id: str = "",
     ) -> dict:
         dt = datetime.now(UTC)
         timestamp = dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
-        return {
-            "schema_version": "2.3",
+        envelope: dict = {
+            "schema_version": "2.4",
             "message_id": message_id,
             "message_seq": seq,
             "timestamp": timestamp,
             "type": type,
-            "payload": payload,
             "thread_id": thread_id,
         }
+        if agent_name:
+            envelope["agent_name"] = agent_name
+        if user_id:
+            envelope["user_id"] = user_id
+        if project_id:
+            envelope["project_id"] = project_id
+        envelope["payload"] = payload
+        return envelope
 
     async def _send(self, envelope: dict) -> None:
         body = json.dumps(envelope, ensure_ascii=False).encode()

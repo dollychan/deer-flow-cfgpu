@@ -1,6 +1,6 @@
 """RocketMQ message schemas for the Consumer layer.
 
-Deserializes the MQ protocol envelope (v2.3) into typed dataclasses.
+Deserializes the MQ protocol envelope (v2.4) into typed dataclasses.
 All fields map 1-to-1 to the protocol spec in cfgpu-docs/MQ消息协议.md.
 """
 
@@ -64,7 +64,7 @@ class ReplyConfig:
     """Controls what the Consumer publishes back on $AGENT_RESULTS."""
 
     stream_events: bool = True
-    stream_event_types: list[str] = field(default_factory=lambda: ["messages", "custom"])
+    stream_event_types: list[str] = field(default_factory=lambda: ["custom"])
 
     @classmethod
     def from_dict(cls, d: dict | None) -> ReplyConfig:
@@ -72,13 +72,13 @@ class ReplyConfig:
             return cls()
         return cls(
             stream_events=d.get("stream_events", True),
-            stream_event_types=d.get("stream_event_types", ["messages", "custom"]),
+            stream_event_types=d.get("stream_event_types", ["custom"]),
         )
 
 
 @dataclass
 class TaskMessage:
-    """Parsed MQ message envelope (schema_version 2.3).
+    """Parsed MQ message envelope (schema_version 2.4).
 
     Covers all three upstream message types: task, cancel, ping.
     For non-task types, payload fields (messages, command, config, reply_config)
@@ -231,7 +231,7 @@ class TaskMessage:
         messages_raw = payload.get("messages")
         messages = [UserMessage.from_dict(m) for m in messages_raw] if messages_raw else None
         return cls(
-            schema_version=data.get("schema_version", "2.3"),
+            schema_version=data.get("schema_version", "2.4"),
             message_id=data["message_id"],
             message_seq=data.get("message_seq", 0),
             timestamp=data.get("timestamp", ""),
