@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, override
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES, RemoveMessage
 from langgraph.runtime import Runtime
 
 if TYPE_CHECKING:
@@ -153,6 +154,39 @@ class DynamicContextMiddleware(AgentMiddleware):
         )
         return reminder_msg, user_msg
 
+    @staticmethod
+    def _ordered_injection(
+        reminder_msg: HumanMessage,
+        user_msg: HumanMessage,
+        all_messages: list,
+        target_idx: int,
+    ) -> dict:
+        """Build a state update that places reminder→user at *target_idx*, preserving order.
+
+        add_messages appends new message IDs to the end of the list and cannot insert
+        at an arbitrary position.  When messages exist after the injection target (e.g.
+        a second user turn was appended in the same thread), user_msg (a new ID) would
+        land after them instead of immediately after reminder_msg.
+
+        We use REMOVE_ALL_MESSAGES to replace the entire list with the correctly ordered
+        version.  all_messages is read from state at the start of _inject(), so it already
+        includes every message that earlier middlewares may have added this turn.
+
+        Without this fix:
+          before: [Msg(A, old_content), Msg(B, new_input)]
+          after:  [Reminder(A), Msg(B, new_input), UserMsg(A__user, old_content)]  ← wrong
+
+        With this fix:
+          after:  [Reminder(A), UserMsg(A__user, old_content), Msg(B, new_input)]  ← correct
+        """
+        later_messages = all_messages[target_idx + 1:]
+        if not later_messages:
+            return {"messages": [reminder_msg, user_msg]}
+        correct_order = all_messages[:target_idx] + [reminder_msg, user_msg] + later_messages
+        # REMOVE_ALL_MESSAGES discards the left list entirely and uses right[1:] as the
+        # result, giving us full control over the final message order.
+        return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + correct_order}
+
     def _inject(self, state) -> dict | None:
         messages = list(state.get("messages", []))
         if not messages:
@@ -180,7 +214,7 @@ class DynamicContextMiddleware(AgentMiddleware):
                 messages[first_idx].id,
             )
             reminder_msg, user_msg = self._make_reminder_and_user_messages(messages[first_idx], full_reminder)
-            return {"messages": [reminder_msg, user_msg]}
+            return self._ordered_injection(reminder_msg, user_msg, messages, first_idx)
 
         if last_date == current_date:
             # ── Same day: nothing to do ──────────────────────────────────────────
@@ -193,7 +227,7 @@ class DynamicContextMiddleware(AgentMiddleware):
 
         reminder_msg, user_msg = self._make_reminder_and_user_messages(messages[last_human_idx], self._build_date_update_reminder())
         logger.info("DynamicContextMiddleware: midnight crossing detected — injected date update before current turn")
-        return {"messages": [reminder_msg, user_msg]}
+        return self._ordered_injection(reminder_msg, user_msg, messages, last_human_idx)
 
     @override
     def before_agent(self, state, runtime: Runtime) -> dict | None:

@@ -204,6 +204,9 @@ class TaskConsumer:
                     message.message_id,
                     message.thread_id,
                     existing.result_cache,
+                    agent_name=message.agent_name,
+                    user_id=message.user_id or "",
+                    project_id=message.project_id or "",
                 )
             return
 

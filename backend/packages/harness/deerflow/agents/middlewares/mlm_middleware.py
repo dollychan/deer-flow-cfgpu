@@ -23,6 +23,7 @@ from typing import override
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.config import get_config
+from langgraph.graph.message import REMOVE_ALL_MESSAGES, RemoveMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.memory.injector import build_injection
@@ -137,7 +138,15 @@ class MlmMiddleware(AgentMiddleware):
             len(reminder_content),
             messages[first_idx].id,
         )
-        return {"messages": [reminder_msg, user_msg]}
+        later_messages = messages[first_idx + 1:]
+        if not later_messages:
+            return {"messages": [reminder_msg, user_msg]}
+        # REMOVE_ALL_MESSAGES discards the existing list and uses right[1:] as the full
+        # result, giving us complete control over message order.  The broken alternative
+        # (RemoveMessage(id) + re-append) does NOT work: add_messages sees the id still
+        # in merged_by_id and updates it in place rather than re-appending to end.
+        correct_order = messages[:first_idx] + [reminder_msg, user_msg] + later_messages
+        return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + correct_order}
 
     # ── Extraction ────────────────────────────────────────────────────────
 
@@ -152,9 +161,9 @@ class MlmMiddleware(AgentMiddleware):
 
         messages = state.get("messages", [])
         filtered = filter_messages_for_memory(messages)
-        user_messages = [m for m in filtered if getattr(m, "type", None) == "human"]
-        ai_messages = [m for m in filtered if getattr(m, "type", None) == "ai"]
-        if not user_messages or not ai_messages:
+        has_human = any(getattr(m, "type", None) == "human" for m in filtered)
+        has_ai = any(getattr(m, "type", None) == "ai" for m in filtered)
+        if not has_human or not has_ai:
             return None
 
         context = runtime.context or {}

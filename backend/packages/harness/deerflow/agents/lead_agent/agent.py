@@ -333,6 +333,15 @@ def _build_middlewares(
 
         middlewares.append(HumanApprovalMiddleware(set(agent_config.approval_required_tools)))
 
+    # MessageStreamMiddleware: emit ai_message / tool_result custom events via
+    # wrap_model_call and wrap_tool_call so the MQ consumer receives semantic
+    # events instead of raw LangGraph values/messages stream noise.
+    # Inserted after HumanApprovalMiddleware so both middlewares operate on
+    # independent hook phases (wrap vs after_model) without interfering.
+    from deerflow.agents.middlewares.message_stream_middleware import MessageStreamMiddleware
+
+    middlewares.append(MessageStreamMiddleware())
+
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
     return middlewares
@@ -382,7 +391,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     subagent_enabled = cfg.get("subagent_enabled", False)
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     is_bootstrap = cfg.get("is_bootstrap", False)
-    web_search_enabled = cfg.get("web_search_enabled", False)
+    web_search_enabled = cfg.get("web_search_enabled", True)
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None

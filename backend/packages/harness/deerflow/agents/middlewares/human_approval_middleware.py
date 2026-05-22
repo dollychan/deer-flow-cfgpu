@@ -21,7 +21,11 @@ Flow (resume path — state-based, no duplicate SSE):
   8. after_model detects all decisions already in state.tool_approvals → skips
      SSE and interrupt(), applies decisions directly.
   9. Returns modified AIMessage (approved calls with updated args, rejected calls
-     removed) plus artificial ToolMessages for any rejected calls.
+     retained in tool_calls) plus artificial ToolMessages for any rejected calls.
+     Rejected calls are kept in AIMessage.tool_calls so that every ToolMessage has a
+     matching tool_call_id — stripping them would create orphaned ToolMessages that
+     break LangChain message history validation. Routing still goes to END because
+     should_continue checks messages[-1], which is the ToolMessage, not the AIMessage.
 
 Client protocol summary:
   Subscribe to stream_mode including "custom" to receive approval events.
@@ -103,7 +107,7 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
         """Apply approval decisions to the AIMessage.
 
         - approved: keep tool_call with (possibly modified) args
-        - rejected: drop from tool_calls, inject error ToolMessage
+        - rejected: keep in tool_calls (preserves AIMessage↔ToolMessage pairing), inject error ToolMessage
         - non-approval tools: pass through unchanged
         """
         new_tool_calls: list[dict] = []
@@ -130,6 +134,11 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
                 )
             else:
                 reason = decision.get("reason", "User rejected the tool call.")
+                # Keep the tool_call in the AIMessage so ToolMessage.tool_call_id has a
+                # matching entry — stripping it creates an orphaned ToolMessage that breaks
+                # LangChain message history validation and confuses the model on future turns.
+                # Routing still goes to END because messages[-1] is the ToolMessage (not AIMessage).
+                new_tool_calls.append(tc)
                 artificial_messages.append(
                     ToolMessage(
                         content=json.dumps({"status": "cancelled", "reason": reason}),

@@ -172,7 +172,8 @@ Lead-agent middlewares are assembled in strict append order across `packages/har
 15. **DeferredToolFilterMiddleware** - Hides deferred tool schemas from the bound model until tool search is enabled (optional)
 16. **SubagentLimitMiddleware** - Truncates excess `task` tool calls from model response to enforce `MAX_CONCURRENT_SUBAGENTS` limit (optional, if `subagent_enabled`)
 17. **LoopDetectionMiddleware** - Detects repeated tool-call loops; hard-stop responses clear both structured `tool_calls` and raw provider tool-call metadata before forcing a final text answer
-18. **ClarificationMiddleware** - Intercepts `ask_clarification` tool calls, interrupts via `Command(goto=END)` (must be last)
+18. **HumanApprovalMiddleware** - Pauses high-cost tool calls for human confirmation via `interrupt()` (optional; enabled when `ask=True` in runtime config AND `approval_required_tools` is set in agent config). On first pass: emits `tool_approval_required` SSE event and interrupts. On resume: reads decisions from `state.tool_approvals`; approved calls proceed with (possibly modified) args; rejected calls are retained in AIMessage.tool_calls (so every ToolMessage has a matching tool_call_id) and returned as error ToolMessages — routing still ends because `should_continue` checks `messages[-1]` which is the ToolMessage. Supports fnmatch patterns for tool name matching (e.g. `cfgpu_generate_*`). Must be before ClarificationMiddleware.
+19. **ClarificationMiddleware** - Intercepts `ask_clarification` tool calls, interrupts via `Command(goto=END)` (must be last)
 
 ### Configuration System
 

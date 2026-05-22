@@ -22,6 +22,8 @@ from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
 
+_model_cache: dict[str | None, Any] = {}
+
 
 @dataclass
 class ExtractionResult:
@@ -38,8 +40,10 @@ class ExtractionResult:
 
 
 def _get_model():
-    config = get_memory_config()
-    return create_chat_model(name=config.model_name, thinking_enabled=False)
+    name = get_memory_config().model_name
+    if name not in _model_cache:
+        _model_cache[name] = create_chat_model(name=name, thinking_enabled=False)
+    return _model_cache[name]
 
 
 def _parse_response(raw: Any) -> list[ExtractionResult]:

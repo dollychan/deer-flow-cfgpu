@@ -161,8 +161,7 @@ class MlmUpdateQueue:
         self._queue.append(ctx)
 
     def _reset_timer(self) -> None:
-        config = get_memory_config()
-        self._schedule_timer(config.debounce_seconds)
+        self._schedule_timer(self._debounce)
 
     def _schedule_timer(self, delay: float) -> None:
         if self._timer is not None:
