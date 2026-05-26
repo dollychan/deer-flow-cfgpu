@@ -103,7 +103,14 @@ ai_message        ← 模型对结果的最终回复
         "height": 1024
       }
     }
-  ]
+  ],
+  "usage": {
+    "input_tokens": 9307,
+    "output_tokens": 57,
+    "total_tokens": 9364,
+    "input_token_details": {},
+    "output_token_details": { "reasoning": 23 }
+  }
 }
 ```
 
@@ -115,13 +122,34 @@ ai_message        ← 模型对结果的最终回复
 | tool_calls | array | 本轮工具调用列表，无工具调用时为空数组 `[]` |
 | tool_calls[].id | string | 工具调用 ID（`tool_call_id`），与后续 `tool_result` 关联 |
 | tool_calls[].name | string | 工具名（含 MCP server 前缀，如 `cfgpu__generate_image`） |
-| tool_calls[].args | object | 模型生成的原始工具参数 |
+| tool_calls[].args | object | 模型生成的原始工具参数（审批前）。用户通过 HIL resume 修改的参数不回写此字段 |
+| usage | object | 本次 LLM 调用的 token 用量，直接来自 `AIMessage.usage_metadata`（由 LangChain provider 自动填充）。provider 不支持时字段不存在 |
+| usage.input_tokens | int | 本次调用输入 token 数 |
+| usage.output_tokens | int | 本次调用输出 token 数 |
+| usage.total_tokens | int | input + output 合计 |
+| usage.input_token_details | object | 输入 token 明细（如 cache_read、cache_creation），provider 不支持时为空对象 |
+| usage.output_token_details | object | 输出 token 明细（如 reasoning），provider 不支持时为空对象 |
 
 **emit 条件**：`content` 非空 **或** `tool_calls` 非空；两者均为空（即空 AIMessage）时跳过，不 emit。
 
 ### 3.2 tool_result — 工具执行结果
 
 由 `wrap_tool_call` 在每次工具调用完成后 emit（每个工具调用独立一条事件）。
+
+**普通工具（无 usage）**：
+
+```json
+{
+  "type": "tool_result",
+  "message_id": "msg_tool_uuid",
+  "tool_call_id": "call_abc123",
+  "name": "web_search",
+  "content": "搜索结果摘要...",
+  "status": "success"
+}
+```
+
+**cfgpu generate 类工具（含 usage）**：
 
 ```json
 {
@@ -130,7 +158,13 @@ ai_message        ← 模型对结果的最终回复
   "tool_call_id": "call_abc123",
   "name": "cfgpu__generate_image",
   "content": "{\"image_url\": \"https://cdn.example.com/output.png\", \"width\": 1024}",
-  "status": "success"
+  "status": "success",
+  "usage": {
+    "compute_units": 1.5,
+    "model": "flux-pro",
+    "completionTokens": 108900,
+    "totalTokens": 108900
+  }
 }
 ```
 
@@ -153,8 +187,9 @@ ai_message        ← 模型对结果的最终回复
 | message_id | string | ToolMessage 的 ID |
 | tool_call_id | string | 对应 `ai_message.tool_calls[].id` |
 | name | string | 工具名 |
-| content | string | 工具输出内容。超出 `max_content_chars`（默认 4096）时截断，附加 `[truncated]` 标记 |
+| content | string | 工具输出内容。超出 `max_content_chars`（默认 4096）时截断，附加 `[truncated: N chars omitted]` 标记 |
 | status | enum | `"success"` 或 `"error"` |
+| usage | object | 工具调用的资源消耗，来自 `ToolMessage.additional_kwargs["usage"]`。**仅在工具自身上报 usage 时存在**（如 cfgpu generate 类工具调用外部模型 API）；普通工具无此字段。具体字段结构由 cfgpu MCP server 定义 |
 
 ---
 

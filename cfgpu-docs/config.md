@@ -57,7 +57,7 @@ AgentRunner._build_config()
 | 字段 | 类型 | 默认值 | 用途 |
 |------|------|--------|------|
 | `stream_events` | bool | `true` | 控制 `publish_result` 是否推送流式事件；`false` 时追加 `final_state` 数据 |
-| `stream_event_types` | array | `["messages","custom","values"]` | 过滤推送的 LangGraph stream mode（仅 `stream_events=true` 时生效） |
+| `stream_event_types` | array | `["custom"]` | 过滤推送的 LangGraph stream mode（仅 `stream_events=true` 时生效）。默认只推送 custom 事件，配合 `MessageStreamMiddleware` 获得语义化输出 |
 
 > `reply_config` 由 `MQStreamBridge` 消费，不传入 `make_lead_agent`。
 
