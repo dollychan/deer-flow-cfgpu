@@ -16,7 +16,13 @@ import logging
 import re
 
 from app.consumer.agent_runner import AgentRunner
-from app.consumer.constants import ClaimResult, MessageMode, QueuePolicy
+from app.consumer.constants import (
+    ClaimResult,
+    MessageMode,
+    ProcessedStatus,
+    QueuePolicy,
+    ThreadStatus,
+)
 from app.consumer.run_registry import RunRegistry
 from app.consumer.schemas import SchemaValidationError, TaskMessage
 from app.consumer.stream_bridge.mq import MQStreamBridge
@@ -109,9 +115,8 @@ class TaskConsumer:
                 t = _RESCUE_THREAD_ID_RE.search(raw_bytes)
                 rescued_thread_id = t.group(1).decode(errors="replace") if t else ""
                 await self._bridge.publish_error(
-                    rescued_msg_id,
                     "INVALID_SCHEMA",
-                    thread_id=rescued_thread_id,
+                    echo={"message_id": rescued_msg_id, "thread_id": rescued_thread_id},
                     message=f"Message body is not valid JSON: {exc}",
                     retriable=False,
                 )
@@ -129,9 +134,8 @@ class TaskConsumer:
             )
             if message_id:
                 await self._bridge.publish_error(
-                    message_id,
                     "INVALID_SCHEMA",
-                    thread_id=thread_id or "",
+                    echo={"message_id": message_id, "thread_id": thread_id or ""},
                     message=exc.reason,
                     retriable=False,
                 )
@@ -147,7 +151,7 @@ class TaskConsumer:
             if message.type == "ping":
                 await self._handle_ping(message)
             elif message.type == "cancel":
-                await self._handle_cancel(message)
+                await self._handle_cancel(message, raw_envelope)
             elif message.type == "task":
                 await self._handle_task(message, raw_envelope)
         except Exception as exc:
@@ -168,29 +172,40 @@ class TaskConsumer:
             target_status = "not_found" if row is None else row.status
             last_heartbeat = None if row is None else row.last_heartbeat.isoformat()
             await self._bridge.publish_pong(
-                message.message_id,
                 self._instance_id,
+                echo=message.downlink_echo(),
                 target_instance_id=target,
                 target_status=target_status,
                 last_heartbeat=last_heartbeat,
             )
         else:
-            await self._bridge.publish_pong(message.message_id, self._instance_id)
+            await self._bridge.publish_pong(self._instance_id, echo=message.downlink_echo())
         logger.debug("Pong sent for ping message_id=%s target=%s", message.message_id, target)
 
-    async def _handle_cancel(self, message: TaskMessage) -> None:
-        """Write a cancel signal for the thread; AgentRunner polls and reacts."""
-        reason = message.config.get("reason")
-        await self._registry.insert_cancel_signal(message.thread_id, reason)
-        logger.info(
-            "Cancel signal inserted for thread=%s reason=%s (message_id=%s)",
+    async def _handle_cancel(self, message: TaskMessage, raw_envelope: dict) -> None:
+        """Enqueue a cancel row in thread_msg_queue with thread_msg_seq for ordering."""
+        inserted = await self._registry.enqueue_message(
             message.thread_id,
-            reason,
+            message.message_id,
+            raw_envelope,
+            message.thread_msg_seq,
+            QueuePolicy.CANCEL,
+        )
+        if not inserted:
+            logger.info(
+                "Duplicate cancel message_id=%s already queued; skipping enqueue",
+                message.message_id,
+            )
+            return
+        logger.info(
+            "Cancel enqueued thread=%s seq=%d message_id=%s",
+            message.thread_id,
+            message.thread_msg_seq,
             message.message_id,
         )
 
     async def _handle_task(self, message: TaskMessage, raw_envelope: dict) -> None:
-        """Main task routing: idempotency → claim → run | enqueue | reject."""
+        """Main task routing: idempotency → reject-check → enqueue → try_dispatch."""
         # ① Skip re-execution on duplicate delivery
         existing = await self._registry.check_processed(message.message_id)
         if existing is not None:
@@ -200,48 +215,143 @@ class TaskConsumer:
                 existing.status,
             )
             if existing.result_cache:
-                await self._bridge.replay(
-                    message.message_id,
-                    message.thread_id,
-                    existing.result_cache,
-                    agent_name=message.agent_name,
-                    user_id=message.user_id or "",
-                    project_id=message.project_id or "",
-                )
+                await self._bridge.replay(existing.result_cache, echo=message.downlink_echo())
             return
 
-        # ② Only one instance runs a thread at a time
-        result = await self._registry.claim_thread(
-            message.thread_id,
-            self._instance_id,
-            message.message_id,
-        )
+        # ② reject 模式快速短路：thread running + message_mode=reject → error + return
+        if message.message_mode == MessageMode.REJECT:
+            state = await self._registry.get_thread_state(message.thread_id)
+            if state and state.status == ThreadStatus.RUNNING:
+                logger.info(
+                    "Thread=%s busy; rejecting message_id=%s (message_mode=reject)",
+                    message.thread_id,
+                    message.message_id,
+                )
+                await self._bridge.publish_error(
+                    "AGENT_BUSY",
+                    echo=message.downlink_echo(),
+                    retriable=True,
+                    message="Thread is already running; retry later",
+                )
+                return
 
-        if result == ClaimResult.CLAIMED:
-            # ③ Crash-recovery row must be written before execution starts
-            await self._registry.upsert_current_msg(
-                message.thread_id, message.message_id, raw_envelope
+        # ③ steer degrades to followup for now
+        if message.message_mode == MessageMode.STEER:
+            logger.info(
+                "Steer not yet implemented; degrading to followup for message_id=%s",
+                message.message_id,
             )
-            await self._start_run(message)
-        else:
-            await self._handle_busy(message, raw_envelope)
+
+        # ④ enqueue as followup (all task messages go to queue first)
+        inserted = await self._registry.enqueue_message(
+            message.thread_id,
+            message.message_id,
+            raw_envelope,
+            message.thread_msg_seq,
+            QueuePolicy.FOLLOWUP,
+        )
+        if not inserted:
+            logger.info(
+                "Duplicate message_id=%s already queued/current; skipping enqueue",
+                message.message_id,
+            )
+            return
+
+        # ⑤ try to dispatch immediately if thread is idle and slots available
+        asyncio.create_task(
+            self._try_dispatch(message.thread_id),
+            name=f"dispatch-{message.message_id[:8]}",
+        )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    async def _start_run(self, message: TaskMessage) -> None:
-        """Acquire concurrency slot and fire the agent run as a background task."""
+    async def _try_dispatch(self, thread_id: str) -> None:
+        """Attempt to dispatch the next queued task for a thread.
+
+        Called after every enqueue. Acquires a semaphore slot and claims the thread
+        only if the thread is idle; if running, _drain_and_release handles the chain.
+        """
+        if self._sem._value == 0:
+            return
+
+        pending = await self._registry.peek_thread_queue(
+            thread_id,
+            policies=(QueuePolicy.FOLLOWUP, QueuePolicy.CANCEL, QueuePolicy.PREFIX),
+        )
+        if not pending:
+            return
+
+        # cancel barrier: convert pre-cancel followups to prefix, notify upstream
+        cancel_idx = next(
+            (i for i, r in enumerate(pending) if r.policy == QueuePolicy.CANCEL), None
+        )
+        if cancel_idx is not None:
+            cancel_row = pending[cancel_idx]
+            tasks_before = [
+                r for r in pending[:cancel_idx]
+                if r.policy in (QueuePolicy.FOLLOWUP, QueuePolicy.PREFIX)
+            ]
+            if tasks_before:
+                await self._registry.convert_to_prefix(
+                    thread_id, [r.id for r in tasks_before]
+                )
+                for row in tasks_before:
+                    await self._bridge.publish_result(
+                        row.message_id,
+                        status=ProcessedStatus.CANCELLED,
+                        stream_events=False,
+                        echo={
+                            "message_id": row.message_id,
+                            "thread_id": thread_id,
+                            "thread_msg_seq": row.thread_msg_seq,
+                        },
+                    )
+            await self._registry.delete_queue_items(thread_id, [cancel_row.id])
+            asyncio.create_task(self._try_dispatch(thread_id))
+            return
+
+        followup_rows = [r for r in pending if r.policy == QueuePolicy.FOLLOWUP]
+        prefix_rows   = [r for r in pending if r.policy == QueuePolicy.PREFIX]
+        if not followup_rows:
+            return
+
+        next_row = followup_rows[0]
+
+        # Acquire slot, then claim the thread atomically
         await self._sem.acquire()
         self._running_count += 1
+        try:
+            result = await self._registry.claim_thread(
+                thread_id, self._instance_id, next_row.message_id, next_row.thread_msg_seq
+            )
+            if result == ClaimResult.RUNNING:
+                # Another instance or _drain_and_release already holds the thread
+                self._running_count -= 1
+                self._sem.release()
+                return
+            await self._registry.upsert_current_msg(
+                thread_id, next_row.message_id, next_row.body, next_row.thread_msg_seq
+            )
+            await self._registry.delete_queue_items(
+                thread_id, [next_row.id] + [r.id for r in prefix_rows]
+            )
+        except Exception:
+            self._running_count -= 1
+            self._sem.release()
+            raise
+
+        # TODO: merge prefix_rows messages into next_task input for full prefix context
+        next_task = TaskMessage.from_json(json.dumps(next_row.body))
         task = asyncio.create_task(
-            self._run_and_release(message),
-            name=f"run-{message.message_id[:8]}",
+            self._run_and_release(next_task),
+            name=f"run-{next_row.message_id[:8]}",
         )
         self._active_tasks.add(task)
         task.add_done_callback(self._active_tasks.discard)
         logger.info(
-            "Started run thread=%s message_id=%s task=%s",
-            message.thread_id,
-            message.message_id,
+            "Dispatched thread=%s message_id=%s task=%s",
+            thread_id,
+            next_row.message_id,
             task.get_name(),
         )
 
@@ -252,40 +362,3 @@ class TaskConsumer:
         finally:
             self._running_count -= 1
             self._sem.release()
-
-    async def _handle_busy(self, message: TaskMessage, raw_envelope: dict) -> None:
-        """Handle the case where the thread is already running on another task."""
-        mode = message.message_mode
-        if mode == MessageMode.REJECT:
-            logger.info(
-                "Thread=%s busy; rejecting message_id=%s (message_mode=reject)",
-                message.thread_id,
-                message.message_id,
-            )
-            await self._bridge.publish_error(
-                message.message_id,
-                "AGENT_BUSY",
-                thread_id=message.thread_id,
-                retriable=True,
-                message="Thread is already running; retry later",
-            )
-            return
-        # followup (default) and steer both enqueue; steer degrades to followup for now
-        if mode == MessageMode.STEER:
-            logger.info(
-                "Steer not yet implemented; degrading to followup for message_id=%s",
-                message.message_id,
-            )
-        await self._registry.enqueue_inject(
-            message.thread_id,
-            message.message_id,
-            raw_envelope,
-            QueuePolicy.FOLLOWUP,
-        )
-        logger.info(
-            "Enqueued followup for thread=%s message_id=%s",
-            message.thread_id,
-            message.message_id,
-        )
-
-

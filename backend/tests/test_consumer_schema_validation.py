@@ -291,8 +291,8 @@ async def test_invalid_json_with_recoverable_message_id_publishes_error():
 
     bridge.publish_error.assert_called_once()
     call = bridge.publish_error.call_args
-    assert call.args[0] == "msg-rescue-001"
-    assert call.args[1] == "INVALID_SCHEMA"
+    assert call.args[0] == "INVALID_SCHEMA"
+    assert call.kwargs["echo"]["message_id"] == "msg-rescue-001"
     assert call.kwargs["retriable"] is False
     assert "JSON" in call.kwargs["message"]
 
@@ -305,8 +305,8 @@ async def test_invalid_json_with_recoverable_message_id_no_thread_id():
 
     bridge.publish_error.assert_called_once()
     call = bridge.publish_error.call_args
-    assert call.args[0] == "msg-rescue-002"
-    assert call.kwargs["thread_id"] == ""
+    assert call.kwargs["echo"]["message_id"] == "msg-rescue-002"
+    assert call.kwargs["echo"]["thread_id"] == ""
 
 
 @pytest.mark.anyio
@@ -317,11 +317,11 @@ async def test_schema_error_with_message_id_publishes_error():
     await consumer.handle_message(json.dumps(bad).encode())
 
     bridge.publish_error.assert_called_once()
-    call_kwargs = bridge.publish_error.call_args
-    assert call_kwargs.args[0] == "msg-bad"
-    assert call_kwargs.args[1] == "INVALID_SCHEMA"
-    assert call_kwargs.kwargs["retriable"] is False
-    assert "thread_id" in call_kwargs.kwargs["message"]
+    call = bridge.publish_error.call_args
+    assert call.args[0] == "INVALID_SCHEMA"
+    assert call.kwargs["echo"]["message_id"] == "msg-bad"
+    assert call.kwargs["retriable"] is False
+    assert "thread_id" in call.kwargs["message"]
 
 
 @pytest.mark.anyio
@@ -357,5 +357,5 @@ async def test_unknown_type_publishes_invalid_schema():
     await consumer.handle_message(json.dumps(bad).encode())
 
     bridge.publish_error.assert_called_once()
-    assert bridge.publish_error.call_args.args[1] == "INVALID_SCHEMA"
+    assert bridge.publish_error.call_args.args[0] == "INVALID_SCHEMA"
     assert "inject" in bridge.publish_error.call_args.kwargs["message"]

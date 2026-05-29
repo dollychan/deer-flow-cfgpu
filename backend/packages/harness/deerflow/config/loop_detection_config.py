@@ -1,5 +1,7 @@
 """Configuration for loop detection middleware."""
 
+from enum import Enum
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -19,6 +21,41 @@ class ToolFreqOverride(BaseModel):
         if self.hard_limit < self.warn:
             raise ValueError("hard_limit must be >= warn")
         return self
+
+
+class ToolKeyMode(str, Enum):
+    """How to derive the stable key used for loop-detection hashing.
+
+    full   — hash all args (no false positives for content-rich tools such as
+             image/video generators where every call has a unique prompt).
+    fields — hash only the listed ``fields``; useful when only certain
+             parameters distinguish one call from another.
+    """
+
+    full = "full"
+    fields = "fields"
+
+
+class ToolKeyOverride(BaseModel):
+    """Per-tool-pattern override for the loop-detection key derivation strategy.
+
+    Keys in ``LoopDetectionConfig.tool_key_overrides`` are fnmatch patterns
+    matched against the tool name, e.g. ``"cfgpu_generate_*"`` or
+    ``"*generate*"``.  The first matching pattern wins.
+
+    Examples (config.yaml)::
+
+        loop_detection:
+          tool_key_overrides:
+            "cfgpu_generate_*":
+              mode: full          # hash all args; different prompts → different hashes
+            "my_custom_draw":
+              mode: fields
+              fields: [prompt, style]   # only these fields distinguish calls
+    """
+
+    mode: ToolKeyMode = ToolKeyMode.full
+    fields: list[str] = Field(default_factory=list, description="Fields to hash when mode=fields")
 
 
 class LoopDetectionConfig(BaseModel):
@@ -61,6 +98,15 @@ class LoopDetectionConfig(BaseModel):
     tool_freq_overrides: dict[str, ToolFreqOverride] = Field(
         default_factory=dict,
         description=("Per-tool overrides for tool_freq_warn / tool_freq_hard_limit, keyed by tool name. Values can be higher or lower than the global defaults. Commonly used to raise thresholds for high-frequency tools like bash."),
+    )
+    tool_key_overrides: dict[str, ToolKeyOverride] = Field(
+        default_factory=dict,
+        description=(
+            "Per-tool-pattern overrides for loop-detection key derivation, keyed by fnmatch pattern. "
+            "Controls which args are hashed when deciding whether two tool calls are 'the same'. "
+            "Use mode=full for content-rich tools (image/video generators) so that calls with "
+            "different prompts are never collapsed to the same hash."
+        ),
     )
 
     @model_validator(mode="after")

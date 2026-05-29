@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import logging
 from pathlib import Path
 from typing import Annotated
 
@@ -9,6 +12,8 @@ from langgraph.types import Command
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
+
+logger = logging.getLogger(__name__)
 
 OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs"
 
@@ -80,8 +85,14 @@ def _normalize_presented_filepath(
     return f"{OUTPUTS_VIRTUAL_PREFIX}/{relative_path.as_posix()}"
 
 
+def _virtual_to_physical(virtual_path: str, outputs_path: str) -> str:
+    """Derive the physical filesystem path from a normalized virtual outputs path."""
+    relative = virtual_path[len(OUTPUTS_VIRTUAL_PREFIX):].lstrip("/")
+    return str(Path(outputs_path).resolve() / relative)
+
+
 @tool("present_files", parse_docstring=True)
-def present_file_tool(
+async def present_file_tool(
     runtime: Runtime,
     filepaths: list[str],
     tool_call_id: Annotated[str, InjectedToolCallId],
@@ -112,10 +123,36 @@ def present_file_tool(
             update={"messages": [ToolMessage(f"Error: {exc}", tool_call_id=tool_call_id)]},
         )
 
-    # The merge_artifacts reducer will handle merging and deduplication
+    from deerflow.oss.uploader import get_oss_uploader
+
+    uploader = get_oss_uploader()
+    if uploader is None:
+        # OSS not configured: original behaviour — store virtual paths directly.
+        return Command(
+            update={
+                "artifacts": normalized_paths,
+                "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)],
+            },
+        )
+
+    # OSS enabled: upload each file and replace path with presigned URL.
+    thread_id = _get_thread_id(runtime) or "unknown"
+    thread_data = (runtime.state or {}).get("thread_data") or {}
+    outputs_path = thread_data.get("outputs_path", "")
+
+    resolved: list[str] = []
+    for vpath in normalized_paths:
+        try:
+            physical = _virtual_to_physical(vpath, outputs_path)
+            url = await uploader.upload_local_file(vpath, physical, thread_id)
+            resolved.append(url)
+        except Exception:
+            logger.warning("present_files: OSS upload failed for %s, falling back to local path", vpath)
+            resolved.append(vpath)
+
     return Command(
         update={
-            "artifacts": normalized_paths,
+            "artifacts": resolved,
             "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)],
         },
     )

@@ -535,6 +535,27 @@ loop_detection:
   #     warn: 150
   #     hard_limit: 300
 
+  # Per-tool-pattern overrides for the hash key used in loop detection.
+  # Keys are fnmatch patterns matched against the tool name; first match wins.
+  #
+  # mode: full   — hash ALL args. Use for content-rich tools (image/video
+  #                generators) where every call has a unique prompt/seed, so
+  #                different tasks are never misidentified as repeated calls.
+  # mode: fields — hash only the listed fields. Use when just a subset of
+  #                parameters distinguishes one call from another.
+  #
+  # Without an override, the default heuristic extracts a small set of salient
+  # fields (path, url, query, command, …). Tools whose distinguishing args fall
+  # outside that set (e.g. a generate tool with a `prompt` field) will appear
+  # identical across calls, falsely triggering loop detection after 3–5 calls.
+  #
+  # tool_key_overrides:
+  #   "*generate*":           # any tool whose name contains "generate"
+  #     mode: full
+  #   "my_custom_draw":
+  #     mode: fields
+  #     fields: [prompt, style, aspect_ratio]
+
 # ============================================================================
 # Provider Safety Termination Configuration
 # ============================================================================
@@ -1147,20 +1168,34 @@ run_events:
 #   password: $ROCKETMQ_PASSWORD       # secret key
 #
 #   # ── Topics ─────────────────────────────────────────────────────────────
-#   task_topic:   $AGENT_TASKS         # incoming task messages
-#   signal_topic: $AGENT_SIGNALS       # incoming cancel / ping signals
+#   task_topic:   $AGENT_TASKS         # single topic: task/cancel/ping all types
 #   result_topic: $AGENT_RESULTS       # outgoing progress / result / error / pong
 #
-#   # ── Consumer groups ─────────────────────────────────────────────────────
-#   consumer_group:        $AGENT_CONSUMER_GROUP          # for task_topic  
-#   signal_consumer_group: $AGENT_SIGNAL_CONSUMER_GROUP   # for signal_topic  
+#   # ── Consumer group ──────────────────────────────────────────────────────
+#   consumer_group: $AGENT_CONSUMER_GROUP
 #
-#   # ── Optional tag filters (empty = accept all) ───────────────────────────
-#   # task_topic_tag:   ""
-#   # signal_topic_tag: ""
+#   # ── Optional tag filter (empty = accept all) ────────────────────────────
+#   # task_topic_tag: ""
 #
 #   # ── Runtime limits ──────────────────────────────────────────────────────
 #   max_concurrent_runs: 10       # max simultaneous agent runs per instance
-#   poll_batch_size: 20           # max messages fetched per task receive() call
-#   invisible_duration_seconds: 300    # task message lease (must exceed max run time)
+#   poll_batch_size: 20           # max messages fetched per receive() call
+#   invisible_duration_seconds: 300    # message lease (must exceed max run time)
 #   processed_messages_ttl_days: 7    # days to retain idempotency records (0 = disabled)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# OSS (Object Storage) — optional, for serving agent-generated files via MinIO
+# ──────────────────────────────────────────────────────────────────────────────
+# When enabled, present_files uploads output files to MinIO and replaces local
+# virtual paths in artifacts with presigned URLs accessible by the client.
+# When disabled (default), artifacts keep local virtual paths served by the
+# Gateway /api/threads/{id}/artifacts/{path} endpoint — no change from current.
+#
+# oss:
+#   enabled: false
+#   access_key_id: $OSS_ACCESS_KEY_ID
+#   access_key_secret: $OSS_ACCESS_KEY_SECRET
+#   bucket: cf-dream
+#   region: cn-beijing                 # AliOSS region, required for V4 signing
+#   presigned_url_expires_days: 7      # max 7 days (AliOSS V4 limit)
+#   cfgpu_url_refresh_threshold_hours: 2   # re-upload cfgpu URLs expiring within N hours (0 = never)

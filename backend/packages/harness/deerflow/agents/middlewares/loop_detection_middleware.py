@@ -40,6 +40,7 @@ is reached.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import logging
@@ -53,10 +54,11 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import HumanMessage
+from langgraph.config import get_stream_writer
 from langgraph.runtime import Runtime
 
 if TYPE_CHECKING:
-    from deerflow.config.loop_detection_config import LoopDetectionConfig
+    from deerflow.config.loop_detection_config import LoopDetectionConfig, ToolKeyOverride
 
 logger = logging.getLogger(__name__)
 
@@ -96,8 +98,41 @@ def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
     return {}, json.dumps(raw_args, sort_keys=True, default=str)
 
 
-def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
-    """Derive a stable key from salient args without overfitting to noise."""
+def _stable_tool_key(
+    name: str,
+    args: dict,
+    fallback_key: str | None,
+    override: ToolKeyOverride | None = None,
+) -> str:
+    """Derive a stable key from salient args without overfitting to noise.
+
+    When *override* is supplied (from ``LoopDetectionConfig.tool_key_overrides``),
+    it takes precedence over the built-in per-tool heuristics for this tool name:
+
+    * ``mode=full``   — hash all args; use for content-rich tools (image/video
+      generators) where different prompts must produce different hashes.
+    * ``mode=fields`` — hash only the listed ``fields``; useful when only a
+      subset of parameters distinguishes one call from another.
+
+    Built-in heuristics (applied when no override matches):
+    * ``read_file``                → bucket by 200-line ranges to absorb minor offsets.
+    * ``write_file`` / ``str_replace`` → full args hash (content-sensitive).
+    * everything else              → extract a fixed set of salient fields.
+    """
+    # --- Config-driven overrides (checked first) ---
+    if override is not None:
+        from deerflow.config.loop_detection_config import ToolKeyMode
+
+        if override.mode == ToolKeyMode.full:
+            if fallback_key is not None:
+                return fallback_key
+            return json.dumps(args, sort_keys=True, default=str)
+
+        if override.mode == ToolKeyMode.fields:
+            picked = {f: args[f] for f in override.fields if args.get(f) is not None}
+            return json.dumps(picked, sort_keys=True, default=str)
+
+    # --- Built-in heuristics ---
     if name == "read_file" and fallback_key is None:
         path = args.get("path") or ""
         start_line = args.get("start_line")
@@ -139,19 +174,24 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     return json.dumps(args, sort_keys=True, default=str)
 
 
-def _hash_tool_calls(tool_calls: list[dict]) -> str:
+def _hash_tool_calls(
+    tool_calls: list[dict],
+    key_override_fn: Callable[[str], ToolKeyOverride | None] | None = None,
+) -> str:
     """Deterministic hash of a set of tool calls (name + stable key).
 
     This is intended to be order-independent: the same multiset of tool calls
     should always produce the same hash, regardless of their input order.
+
+    *key_override_fn* maps a tool name to a ``ToolKeyOverride`` (or ``None``);
+    when provided, overrides are applied before the built-in heuristics.
     """
-    # Normalize each tool call to a stable (name, key) structure.
     normalized: list[str] = []
     for tc in tool_calls:
         name = tc.get("name", "")
         args, fallback_key = _normalize_tool_call_args(tc.get("args", {}))
-        key = _stable_tool_key(name, args, fallback_key)
-
+        override = key_override_fn(name) if key_override_fn is not None else None
+        key = _stable_tool_key(name, args, fallback_key, override=override)
         normalized.append(f"{name}:{key}")
 
     # Sort so permutations of the same multiset of calls yield the same ordering.
@@ -211,6 +251,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         tool_freq_warn: int = _DEFAULT_TOOL_FREQ_WARN,
         tool_freq_hard_limit: int = _DEFAULT_TOOL_FREQ_HARD_LIMIT,
         tool_freq_overrides: dict[str, tuple[int, int]] | None = None,
+        tool_key_overrides: list[tuple[str, ToolKeyOverride]] | None = None,
     ):
         super().__init__()
         self.warn_threshold = warn_threshold
@@ -220,6 +261,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self.tool_freq_warn = tool_freq_warn
         self.tool_freq_hard_limit = tool_freq_hard_limit
         self._tool_freq_overrides: dict[str, tuple[int, int]] = tool_freq_overrides or {}
+        # Ordered list of (fnmatch_pattern, override) pairs; first match wins.
+        self._tool_key_overrides: list[tuple[str, ToolKeyOverride]] = tool_key_overrides or []
         self._lock = threading.Lock()
         self._history: OrderedDict[str, list[str]] = OrderedDict()
         self._warned: dict[str, set[str]] = defaultdict(set)
@@ -235,6 +278,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     @classmethod
     def from_config(cls, config: LoopDetectionConfig) -> LoopDetectionMiddleware:
         """Construct from a Pydantic-validated config, trusting its validation."""
+        from deerflow.config.loop_detection_config import ToolKeyOverride as _TKO
+
         return cls(
             warn_threshold=config.warn_threshold,
             hard_limit=config.hard_limit,
@@ -243,7 +288,15 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             tool_freq_warn=config.tool_freq_warn,
             tool_freq_hard_limit=config.tool_freq_hard_limit,
             tool_freq_overrides={name: (o.warn, o.hard_limit) for name, o in config.tool_freq_overrides.items()},
+            tool_key_overrides=list(config.tool_key_overrides.items()),
         )
+
+    def _find_key_override(self, tool_name: str) -> ToolKeyOverride | None:
+        """Return the first ToolKeyOverride whose pattern matches *tool_name*, or None."""
+        for pattern, override in self._tool_key_overrides:
+            if fnmatch.fnmatch(tool_name, pattern):
+                return override
+        return None
 
     def _get_thread_id(self, runtime: Runtime) -> str:
         """Extract thread_id from runtime context for per-thread tracking."""
@@ -344,7 +397,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             return None, False
 
         thread_id = self._get_thread_id(runtime)
-        call_hash = _hash_tool_calls(tool_calls)
+        call_hash = _hash_tool_calls(tool_calls, self._find_key_override)
 
         with self._lock:
             # Touch / create entry (move to end for LRU)
@@ -474,6 +527,34 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
         return update
 
+    def _emit_hard_stop_tool_results(self, tool_calls: list[dict], stop_message: str) -> None:
+        """Emit a tool_result custom event for each stripped tool call.
+
+        MSM's wrap_model_call already emitted an ai_message containing these
+        tool_calls. Since hard-stop strips them before the tools node runs, the
+        stream consumer would otherwise see tool_calls with no matching
+        tool_result events. This closes that gap so consumers can reconcile
+        open tool-call placeholders without polling state.
+        """
+        try:
+            writer = get_stream_writer()
+        except Exception:
+            logger.debug("LoopDetection: get_stream_writer unavailable; skipping hard-stop tool_result events", exc_info=True)
+            return
+
+        content = json.dumps({"status": "cancelled", "reason": stop_message})
+        for tc in tool_calls:
+            try:
+                writer({
+                    "type": "tool_result",
+                    "tool_call_id": tc.get("id") or "",
+                    "name": tc.get("name") or "unknown",
+                    "content": content,
+                    "status": "error",
+                })
+            except Exception:
+                logger.debug("LoopDetection: failed to emit tool_result for hard-stop tc=%s", tc.get("id"), exc_info=True)
+
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
         warning, hard_stop = self._track_and_check(state, runtime)
 
@@ -484,8 +565,14 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             # is safe for OpenAI/Moonshot pairing validators.
             messages = state.get("messages", [])
             last_msg = messages[-1]
-            content = self._append_text(last_msg.content, warning or _HARD_STOP_MSG)
+            stop_message = warning or _HARD_STOP_MSG
+            tool_calls = list(last_msg.tool_calls or [])
+            content = self._append_text(last_msg.content, stop_message)
             stripped_msg = last_msg.model_copy(update=self._build_hard_stop_update(last_msg, content))
+            # Notify stream consumers that these tool calls will not execute.
+            # MSM already emitted ai_message with them; without this, consumers
+            # have no signal to close the open tool-call placeholders.
+            self._emit_hard_stop_tool_results(tool_calls, stop_message)
             return {"messages": [stripped_msg]}
 
         if warning:

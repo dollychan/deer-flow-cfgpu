@@ -103,8 +103,24 @@ class TaskMessage:
     # ── optional context ──────────────────────────────────────────────────────
     user_id: str | None = None
     project_id: str | None = None
+    thread_msg_seq: int = 0  # monotonic sequence within a thread; echoed to downlink
 
     # ── derived helpers ───────────────────────────────────────────────────────
+
+    def downlink_echo(self) -> dict:
+        """Return the envelope fields that must be echoed unchanged to every downlink message."""
+        echo: dict = {
+            "message_id": self.message_id,
+            "thread_id": self.thread_id,
+            "thread_msg_seq": self.thread_msg_seq,
+        }
+        if self.agent_name and self.agent_name != "lead_agent":
+            echo["agent_name"] = self.agent_name
+        if self.user_id:
+            echo["user_id"] = self.user_id
+        if self.project_id:
+            echo["project_id"] = self.project_id
+        return echo
 
     @property
     def message_mode(self) -> str:
@@ -230,6 +246,10 @@ class TaskMessage:
         payload = data.get("payload") or {}
         messages_raw = payload.get("messages")
         messages = [UserMessage.from_dict(m) for m in messages_raw] if messages_raw else None
+        config = dict(payload.get("config") or {})
+        # ping: instance_id is a top-level payload field, not nested under config
+        if data.get("type") == "ping" and "instance_id" in payload:
+            config["instance_id"] = payload["instance_id"]
         return cls(
             schema_version=data.get("schema_version", "2.4"),
             message_id=data["message_id"],
@@ -240,10 +260,11 @@ class TaskMessage:
             agent_name=data.get("agent_name") or "lead_agent",
             messages=messages,
             command=payload.get("command"),
-            config=payload.get("config") or {},
+            config=config,
             reply_config=ReplyConfig.from_dict(payload.get("reply_config")),
             user_id=data.get("user_id"),
             project_id=data.get("project_id"),
+            thread_msg_seq=data.get("thread_msg_seq", 0),
         )
 
     @classmethod

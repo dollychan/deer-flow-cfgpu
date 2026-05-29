@@ -32,6 +32,7 @@ from deerflow.config.token_usage_config import TokenUsageConfig
 from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.consumer_config import ConsumerConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
+from deerflow.oss.oss_config import OSSConfig, load_oss_config_from_dict
 
 load_dotenv()
 
@@ -111,6 +112,7 @@ class AppConfig(BaseModel):
     checkpointer: CheckpointerConfig | None = Field(default=None, description="Checkpointer configuration")
     stream_bridge: StreamBridgeConfig | None = Field(default=None, description="Stream bridge configuration")
     consumer: ConsumerConfig = Field(default_factory=ConsumerConfig, description="Consumer process (RocketMQ) configuration")
+    oss: OSSConfig = Field(default_factory=OSSConfig, description="OSS (object storage) configuration for serving agent-generated files via Alibaba Cloud OSS")
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:
@@ -202,6 +204,11 @@ class AppConfig(BaseModel):
         load_checkpointer_config_from_dict(config.checkpointer.model_dump() if config.checkpointer is not None else None)
         load_stream_bridge_config_from_dict(config.stream_bridge.model_dump() if config.stream_bridge is not None else None)
         load_acp_config_from_dict({name: agent.model_dump() for name, agent in acp_agents.items()})
+        load_oss_config_from_dict(config.oss.model_dump())
+        from deerflow.oss.client import init_oss_client
+        from deerflow.oss.uploader import init_oss_uploader
+        init_oss_client(config.oss)
+        init_oss_uploader(config.oss)
 
         if previous_checkpointer_config != config.checkpointer:
             # These runtime singletons derive their backend from checkpointer config.

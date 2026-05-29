@@ -40,6 +40,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ollama = ["langchain-ollama>=0.3.0"]
+oss = ["alibabacloud-oss-v2>=0.1.0", "httpx>=0.28.0"]
 postgres = [
     "asyncpg>=0.29",
     "langgraph-checkpoint-postgres>=3.0.5",

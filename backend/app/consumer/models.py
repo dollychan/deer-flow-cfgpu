@@ -1,23 +1,22 @@
 """SQLAlchemy ORM models for the Consumer layer.
 
-Five tables that extend deerflow's shared persistence Base.
+Four tables that extend deerflow's shared persistence Base.
 Import this module before calling init_engine_from_config() so that
 Base.metadata.create_all() discovers and creates these tables alongside
 the core deerflow tables (runs, threads_meta, etc.).
 
 Table overview:
-  consumer_instances    — running Consumer process registry + heartbeat
-  thread_run_state      — per-thread execution state used for routing
-  thread_msg_queue      — followup (and future steer) message queue
-  thread_cancel_signals — cancel signals written by any instance, polled by runner
-  processed_messages    — idempotency log, also caches results for replay
+  consumer_instances — running Consumer process registry + heartbeat
+  thread_run_state   — per-thread execution state used for routing
+  thread_msg_queue   — message queue (current/followup/cancel/prefix/steer policies)
+  processed_messages — idempotency log, also caches results for replay
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Index, Integer, JSON, Text
+from sqlalchemy import DateTime, Index, Integer, JSON, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -66,13 +65,14 @@ class ThreadRunStateRow(Base):
     # FK to consumer_instances.instance_id (no FK constraint; dead instances may vanish)
     message_id: Mapped[str] = mapped_column(Text, nullable=False)
     # message_id of the task currently being executed
+    thread_msg_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # per-thread sequence number of the current task; cancel_watcher filters by seq > this value
     status: Mapped[str] = mapped_column(Text, nullable=False)
     # "running" | "idle"
     drain_mode: Mapped[str] = mapped_column(Text, nullable=False, default="followup")
     # "followup" | "collect"
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # stale-run auto-retry count; reset to 0 after each run completes
-    # reply_config removed: full MQ envelope (incl. reply_config) is in thread_msg_queue(policy='current')
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_heartbeat: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
 
@@ -105,29 +105,21 @@ class ThreadMsgQueueRow(Base):
     thread_id: Mapped[str] = mapped_column(Text, nullable=False)
     message_id: Mapped[str] = mapped_column(Text, nullable=False)
     body: Mapped[dict] = mapped_column(JSON, nullable=False)
-    # complete MQ envelope; replaces the old partial 'payload' column
+    # complete MQ envelope; TaskMessage.from_json(json.dumps(row.body)) reconstructs losslessly
     policy: Mapped[str] = mapped_column(Text, nullable=False, default="followup")
-    # "current" | "followup" | "steer" (steer: future)
+    # "current"  — crash-recovery row; at most one per thread; deleted on mark_thread_idle
+    # "followup" — queued task waiting for execution; deleted on dispatch
+    # "cancel"   — cancel signal; processed by cancel barrier, then deleted
+    # "prefix"   — followup converted by cancel barrier; merged into next task's context
+    # "steer"    — reserved for InjectMiddleware (future)
+    thread_msg_seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # per-thread sequence number from the uplink message; rows ordered by this for dispatch
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    __table_args__ = (Index("ix_msg_queue_thread_policy_pending", "thread_id", "policy", "consumed_at"),)
-
-
-class ThreadCancelSignalRow(Base):
-    """Cancel signal written by any Consumer instance, polled by the runner.
-
-    Any instance can write here when it receives a cancel message; the
-    cancel watcher coroutine inside AgentRunner polls this table every 2 s
-    and calls runner_task.cancel() when it finds a row for its thread.
-    """
-
-    __tablename__ = "thread_cancel_signals"
-
-    thread_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # mirrors cancel payload reason: "user_requested" | "timeout" | "admin"
-    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC))
+    __table_args__ = (
+        UniqueConstraint("message_id", name="ux_thread_msg_queue_message_id"),
+        Index("ix_msg_queue_thread_policy", "thread_id", "policy"),
+    )
 
 
 class ProcessedMessageRow(Base):

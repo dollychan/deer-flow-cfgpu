@@ -19,7 +19,7 @@ from langchain_core.runnables import RunnableConfig
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
 
-from app.consumer.constants import ProcessedStatus
+from app.consumer.constants import ProcessedStatus, QueuePolicy
 from app.consumer.run_registry import RunRegistry
 from app.consumer.schemas import ContentItem, TaskMessage, UserMessage
 from app.consumer.stream_bridge.mq import MQStreamBridge
@@ -58,23 +58,17 @@ class AgentRunner:
         """
         thread_id = message.thread_id
         run_id = message.message_id
+        current_task_seq = message.thread_msg_seq
         runner_task = asyncio.current_task()
 
-        self._bridge.register_run(
-            run_id,
-            thread_id,
-            message.reply_config,
-            agent_name=message.agent_name,
-            user_id=message.user_id or "",
-            project_id=message.project_id or "",
-        )
+        self._bridge.register_run(run_id, message.reply_config, echo=message.downlink_echo())
 
         heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(thread_id, interval=10),
             name=f"heartbeat-{run_id[:8]}",
         )
         cancel_watcher_task = asyncio.create_task(
-            self._cancel_watcher(thread_id, runner_task, poll_interval=2),
+            self._cancel_watcher(thread_id, current_task_seq, runner_task, poll_interval=2),
             name=f"cancel-watcher-{run_id[:8]}",
         )
 
@@ -92,10 +86,32 @@ class AgentRunner:
 
         except asyncio.CancelledError:
             processed_status = ProcessedStatus.CANCELLED
+            # cancel barrier: convert any pending followups before this cancel to prefix,
+            # notify upstream, then delete the cancel row
+            cancel_row = await self._registry.find_cancel_after_seq(thread_id, current_task_seq)
+            if cancel_row:
+                followup_before = await self._registry.get_followup_before_seq(
+                    thread_id, cancel_row.thread_msg_seq
+                )
+                if followup_before:
+                    await self._registry.convert_to_prefix(
+                        thread_id, [r.id for r in followup_before]
+                    )
+                    for row in followup_before:
+                        await self._bridge.publish_result(
+                            row.message_id,
+                            status=ProcessedStatus.CANCELLED,
+                            stream_events=False,
+                            echo={
+                                "message_id": row.message_id,
+                                "thread_id": thread_id,
+                                "thread_msg_seq": row.thread_msg_seq,
+                            },
+                        )
+                await self._registry.delete_queue_items(thread_id, [cancel_row.id])
             await self._bridge.publish_result(
                 run_id,
                 status=ProcessedStatus.CANCELLED,
-                thread_id=thread_id,
                 stream_events=message.reply_config.stream_events,
             )
             result_cache = {"status": ProcessedStatus.CANCELLED}
@@ -104,9 +120,8 @@ class AgentRunner:
             processed_status = ProcessedStatus.FAILED
             timeout_msg = f"Agent execution timed out after {message.timeout_seconds}s"
             await self._bridge.publish_error(
-                run_id,
                 "AGENT_TIMEOUT",
-                thread_id=thread_id,
+                echo=message.downlink_echo(),
                 retriable=True,
                 message=timeout_msg,
             )
@@ -117,9 +132,8 @@ class AgentRunner:
             logger.exception("Run %s failed: %s", run_id, exc)
             error_msg = str(exc)
             await self._bridge.publish_error(
-                run_id,
                 "INTERNAL_ERROR",
-                thread_id=thread_id,
+                echo=message.downlink_echo(),
                 retriable=False,
                 message=error_msg,
             )
@@ -209,7 +223,6 @@ class AgentRunner:
             await self._bridge.publish_result(
                 run_id,
                 status=ProcessedStatus.PAUSED_FOR_APPROVAL,
-                thread_id=message.thread_id,
                 stream_events=message.reply_config.stream_events,
             )
             # Thread goes idle — HIL interrupt stored in LangGraph checkpoint.
@@ -235,7 +248,6 @@ class AgentRunner:
         await self._bridge.publish_result(
             run_id,
             status="success",
-            thread_id=message.thread_id,
             stream_events=rc.stream_events,
             final_state=final_state_data,
         )
@@ -253,9 +265,8 @@ class AgentRunner:
     async def publish_fatal_error(self, message_id: str, thread_id: str, message: str) -> None:
         """Publish a non-retriable INTERNAL_ERROR for a run that cannot be recovered."""
         await self._bridge.publish_error(
-            message_id,
             "INTERNAL_ERROR",
-            thread_id=thread_id,
+            echo={"message_id": message_id, "thread_id": thread_id},
             retriable=False,
             message=message,
         )
@@ -349,23 +360,80 @@ class AgentRunner:
     async def _drain_and_release(self, thread_id: str) -> None:
         """After a run ends, drive the next queued followup or mark thread idle.
 
-        Triggered by run completion (not polling). Each followup run's own
-        finally block calls _drain_and_release again, naturally chaining until
-        the queue is empty.
+        Processes cancel barriers before dispatching: followup rows before a cancel
+        are converted to prefix (preserving LLM context) and upstream is notified.
+        Naturally chains via each followup run's own finally block.
         """
-        pending = await self._registry.peek_inject_queue(thread_id, policy="followup")
+        pending = await self._registry.peek_thread_queue(
+            thread_id,
+            policies=(QueuePolicy.FOLLOWUP, QueuePolicy.CANCEL, QueuePolicy.PREFIX),
+        )
 
-        if not pending:
+        # ── cancel barrier ────────────────────────────────────────────────────
+        cancel_idx = next(
+            (i for i, r in enumerate(pending) if r.policy == QueuePolicy.CANCEL), None
+        )
+        if cancel_idx is not None:
+            cancel_row = pending[cancel_idx]
+            tasks_before = [
+                r for r in pending[:cancel_idx]
+                if r.policy in (QueuePolicy.FOLLOWUP, QueuePolicy.PREFIX)
+            ]
+            if tasks_before:
+                await self._registry.convert_to_prefix(
+                    thread_id, [r.id for r in tasks_before]
+                )
+                for row in tasks_before:
+                    await self._bridge.publish_result(
+                        row.message_id,
+                        status=ProcessedStatus.CANCELLED,
+                        stream_events=False,
+                        echo={
+                            "message_id": row.message_id,
+                            "thread_id": thread_id,
+                            "thread_msg_seq": row.thread_msg_seq,
+                        },
+                    )
+            await self._registry.delete_queue_items(thread_id, [cancel_row.id])
+            await self._drain_and_release(thread_id)
+            return
+
+        # ── normal drain ──────────────────────────────────────────────────────
+        followup_rows = [r for r in pending if r.policy == QueuePolicy.FOLLOWUP]
+        prefix_rows   = [r for r in pending if r.policy == QueuePolicy.PREFIX]
+
+        if not followup_rows:
             await self._registry.mark_thread_idle(thread_id)
             return
 
-        next_row = pending[0]
+        drain_mode = await self._registry.get_drain_mode(thread_id)
+
+        if drain_mode != "followup":
+            # collect mode — not yet implemented; fall back to followup
+            logger.info("Thread %s: collect drain_mode not implemented; using followup", thread_id)
+
+        next_row = followup_rows[0]
         next_task = TaskMessage.from_json(json.dumps(next_row.body))
 
-        # Atomic: consume followup + advance thread run + write new current msg.
-        # If the process crashes mid-transition without this, the followup is lost.
+        if prefix_rows and next_task.messages is not None:
+            prefix_messages: list[UserMessage] = []
+            for row in prefix_rows:
+                try:
+                    prefix_msg = TaskMessage.from_json(json.dumps(row.body))
+                    if prefix_msg.messages:
+                        prefix_messages.extend(prefix_msg.messages)
+                except Exception:
+                    logger.warning("Prefix row %s parse failed; skipping", row.id)
+            if prefix_messages:
+                next_task.messages = prefix_messages + next_task.messages
+
         await self._registry.transition_thread_followup(
-            thread_id, next_row.id, next_row.message_id, next_row.body
+            thread_id,
+            next_row.id,
+            next_row.message_id,
+            next_row.body,
+            next_row.thread_msg_seq,
+            prefix_ids=[r.id for r in prefix_rows],
         )
 
         logger.info("Thread %s: draining followup message_id=%s", thread_id, next_row.message_id)
@@ -394,18 +462,25 @@ class AgentRunner:
     async def _cancel_watcher(
         self,
         thread_id: str,
+        current_task_seq: int,
         runner_task: asyncio.Task,
         poll_interval: int = 2,
     ) -> None:
-        """Poll thread_cancel_signals; inject CancelledError into runner_task on match."""
+        """Poll thread_msg_queue for cancel rows with seq > current_task_seq."""
         while True:
             await asyncio.sleep(poll_interval)
             try:
-                if await self._registry.has_cancel_signal(thread_id):
-                    await self._registry.clear_cancel_signal(thread_id)
-                    logger.info("Cancel signal detected for thread %s — cancelling task", thread_id)
+                cancel_row = await self._registry.find_cancel_after_seq(
+                    thread_id, current_task_seq
+                )
+                if cancel_row:
+                    logger.info(
+                        "Cancel signal detected for thread %s seq=%d — cancelling task",
+                        thread_id,
+                        cancel_row.thread_msg_seq,
+                    )
                     runner_task.cancel()
-                    return
+                    return  # cancel row preserved; except CancelledError handles cleanup
             except Exception:
                 logger.debug("Cancel watcher error for thread %s", thread_id, exc_info=True)
 

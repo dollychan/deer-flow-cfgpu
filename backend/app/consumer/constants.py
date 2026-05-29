@@ -25,6 +25,8 @@ class InstanceStatus(StrEnum):
 class QueuePolicy(StrEnum):
     CURRENT = "current"
     FOLLOWUP = "followup"
+    CANCEL = "cancel"
+    PREFIX = "prefix"
     STEER = "steer"
 
 
@@ -37,6 +39,7 @@ class ProcessedStatus(StrEnum):
 
 class MessageMode(StrEnum):
     FOLLOWUP = "followup"
+    COLLECT = "collect"
     STEER = "steer"
     REJECT = "reject"
 

@@ -27,6 +27,9 @@ dependencies = [
 postgres = ["deerflow-harness[postgres]"]
 discord = ["discord.py>=2.7.0"]
 consumer = ["rocketmq-python-client==5.1.1"]
+oss = [
+    "alibabacloud-oss-v2>=1.3.0",
+]
 
 [dependency-groups]
 dev = [

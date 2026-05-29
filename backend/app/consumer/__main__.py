@@ -1,8 +1,8 @@
 """Consumer process entry point.
 
-Starts a standalone DeerFlow Consumer that reads task messages from RocketMQ
-($AGENT_TASKS) and control signals from ($AGENT_SIGNALS), runs LangGraph
-agent graphs, and publishes results back to RocketMQ ($AGENT_RESULTS).
+Starts a standalone DeerFlow Consumer that reads all message types (task/cancel/ping)
+from a single RocketMQ topic ($AGENT_TASKS), runs LangGraph agent graphs, and
+publishes results back to RocketMQ ($AGENT_RESULTS).
 
 Usage::
 
@@ -16,14 +16,13 @@ Configuration::
       endpoint: $ROCKETMQ_ENDPOINT          # host:port
       username: $ROCKETMQ_USERNAME           # access key
       password: $ROCKETMQ_PASSWORD           # secret key
-      task_topic: $AGENT_TASKS               # task messages only
-      signal_topic: $AGENT_SIGNALS           # cancel / ping control signals
+      task_topic: $AGENT_TASKS               # single topic: task/cancel/ping
       result_topic: $AGENT_RESULTS
       consumer_group: $AGENT_CONSUMER_GROUP
-      signal_consumer_group: $AGENT_SIGNAL_CONSUMER_GROUP
       max_concurrent_runs: 10
       poll_batch_size: 20
       invisible_duration_seconds: 300        # must exceed max agent run time
+      processed_messages_ttl_days: 7         # 0 = disabled
 
 Requirements:
     - database.backend: sqlite or postgres  (memory is rejected at startup)
@@ -42,9 +41,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 # ── CRITICAL: import Consumer ORM models BEFORE init_engine_from_config ──────
-# This registers the 5 consumer tables (consumer_instances, thread_run_state,
-# thread_msg_queue, thread_cancel_signals, processed_messages) into
-# Base.metadata so that create_all() creates them alongside the core tables.
+# This registers the 4 consumer tables (consumer_instances, thread_run_state,
+# thread_msg_queue, processed_messages) into Base.metadata so that create_all()
+# creates them alongside the core deerflow tables.
 import app.consumer.models  # noqa: F401
 
 from deerflow.config.app_config import get_app_config
@@ -102,39 +101,25 @@ async def _poll_loop(
     batch_size: int,
     invisible_duration: int,
     stop_event: asyncio.Event,
-    throttle: bool,
-    task_prefix: str,
-    loop_name: str,
 ) -> None:
-    """Pull messages from an MQ consumer and dispatch to TaskConsumer.
+    """Pull messages from a single MQ topic and dispatch to TaskConsumer.
 
-    When throttle=True (task topic): backs off when all run slots are occupied
-    so unbounded tasks don't pile up behind the semaphore.
-    When throttle=False (signal topic): always polls — cancel/ping must not be
-    delayed by semaphore pressure on the task topic.
+    No throttle: all message types (task/cancel/ping) are pulled at full speed
+    and immediately ACKed. Capacity control is done at dispatch time in _try_dispatch.
     """
     loop = asyncio.get_running_loop()
 
     while not stop_event.is_set():
-        if throttle:
-            available = task_consumer.available_slots
-            if available == 0:
-                await asyncio.sleep(0.2)
-                continue
-            capacity = min(batch_size, available)
-        else:
-            capacity = batch_size
-
         try:
             msgs = await loop.run_in_executor(
                 executor,
                 mq_consumer.receive,
-                capacity,
+                batch_size,
                 invisible_duration,
             )
         except Exception as exc:
             if not stop_event.is_set():
-                logger.warning("RocketMQ %s receive error: %s", loop_name, exc)
+                logger.warning("RocketMQ receive error: %s", exc)
                 await asyncio.sleep(1)
             continue
 
@@ -144,7 +129,7 @@ async def _poll_loop(
             body = getattr(msg, "body", b"")
             asyncio.create_task(
                 _handle_and_ack(msg, body, mq_consumer, task_consumer, executor),
-                name=f"{task_prefix}-{str(getattr(msg, 'message_id', ''))[:8]}",
+                name=f"msg-{str(getattr(msg, 'message_id', ''))[:8]}",
             )
 
 
@@ -308,6 +293,10 @@ async def main() -> None:
         level=getattr(logging, config.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Alibaba Cloud RocketMQ SDK auto-exports client metrics via OTLP/gRPC to
+    # port 8081 on the broker host. Suppress DEADLINE_EXCEEDED noise when that
+    # port is firewalled — the consumer operates correctly without metrics export.
+    logging.getLogger("opentelemetry.exporter.otlp.proto.grpc.exporter").setLevel(logging.CRITICAL)
 
     if not consumer_cfg.endpoint:
         raise RuntimeError(
@@ -326,9 +315,9 @@ async def main() -> None:
 
     # 3. Init LangGraph checkpointer (context-manager owns the connection)
     async with make_checkpointer(config) as checkpointer:
-        # 4. Build thread-pool executor shared by MQ producer + consumers
-        # Needs 6 workers: task-receive(1) + signal-receive(1) + send(1) + ack×2 + spare(1)
-        executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="rmq")
+        # 4. Build thread-pool executor shared by MQ producer + consumer
+        # Needs 5 workers: task-receive(1) + send(1) + ack×2 + spare(1)
+        executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="rmq")
 
         # 5. Build RocketMQ producer
         from rocketmq import ClientConfiguration, Credentials, FilterExpression, Producer, SimpleConsumer
@@ -364,14 +353,13 @@ async def main() -> None:
             active_tasks=active_tasks,
         )
 
-        # 7. Build RocketMQ consumers (SimpleConsumer — message-granularity, POP mode)
+        # 7. Build single RocketMQ consumer (all message types on one topic)
         def _make_filter(tag: str) -> FilterExpression:
             if tag:
                 from rocketmq.grpc_protocol import FilterType
                 return FilterExpression(f"TAGS = '{tag}'", FilterType.SQL)
             return FilterExpression("*")
 
-        # Task consumer ($AGENT_TASKS): throttled by semaphore slots
         mq_task_consumer = SimpleConsumer(
             mq_client_config,
             consumer_cfg.consumer_group,
@@ -380,23 +368,9 @@ async def main() -> None:
         )
         mq_task_consumer.startup()
         logger.info(
-            "RocketMQ task consumer started (task_topic=%s group=%s)",
+            "RocketMQ consumer started (task_topic=%s group=%s)",
             consumer_cfg.task_topic,
             consumer_cfg.consumer_group,
-        )
-
-        # Signal consumer ($AGENT_SIGNALS): always polls, not throttled
-        mq_signal_consumer = SimpleConsumer(
-            mq_client_config,
-            consumer_cfg.signal_consumer_group,
-            subscription={consumer_cfg.signal_topic: _make_filter(consumer_cfg.signal_topic_tag)},
-            await_duration=20,
-        )
-        mq_signal_consumer.startup()
-        logger.info(
-            "RocketMQ signal consumer started (signal_topic=%s group=%s)",
-            consumer_cfg.signal_topic,
-            consumer_cfg.signal_consumer_group,
         )
 
         # 8. Shutdown event + signal handlers
@@ -423,25 +397,8 @@ async def main() -> None:
                     batch_size=consumer_cfg.poll_batch_size,
                     invisible_duration=consumer_cfg.invisible_duration_seconds,
                     stop_event=stop_event,
-                    throttle=True,
-                    task_prefix="msg",
-                    loop_name="task",
                 ),
-                name="task-poll-loop",
-            ),
-            asyncio.create_task(
-                _poll_loop(
-                    mq_signal_consumer,
-                    task_consumer,
-                    executor,
-                    batch_size=10,
-                    invisible_duration=30,
-                    stop_event=stop_event,
-                    throttle=False,
-                    task_prefix="sig",
-                    loop_name="signal",
-                ),
-                name="signal-poll-loop",
+                name="poll-loop",
             ),
         ]
         if consumer_cfg.processed_messages_ttl_days > 0:
@@ -453,12 +410,11 @@ async def main() -> None:
             )
 
         logger.info(
-            "Consumer %s ready — max_concurrent=%d task_batch=%d task_invisible=%ds signal_topic=%s",
+            "Consumer %s ready — max_concurrent=%d task_batch=%d invisible=%ds",
             instance_id,
             consumer_cfg.max_concurrent_runs,
             consumer_cfg.poll_batch_size,
             consumer_cfg.invisible_duration_seconds,
-            consumer_cfg.signal_topic,
         )
 
         # 10. Block until SIGTERM / SIGINT
@@ -473,8 +429,7 @@ async def main() -> None:
         await task_consumer.shutdown(timeout=30.0)
 
         mq_task_consumer.shutdown()
-        mq_signal_consumer.shutdown()
-        logger.info("RocketMQ consumers shut down")
+        logger.info("RocketMQ consumer shut down")
 
         await registry.mark_instance_draining(instance_id)
         await registry.delete_instance(instance_id)

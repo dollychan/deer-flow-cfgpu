@@ -7,38 +7,43 @@ DeerFlow Agent Server 的 Consumer 层运行管理，涵盖实例管理、任务
 ## 1. 整体架构
 
 ```
-上游 ──► RocketMQ ($AGENT_TASKS,  普通消息)  ─────────────────────┐
-上游 ──► RocketMQ ($AGENT_SIGNALS, 普通消息)  ──────────┐          │
-                                                       │          │
-        ┌──────────────────────────────────────────────▼──────────▼──────┐
-        │                   Consumer 集群（N 个实例）                      │
-        │                                                                 │
-        │  ┌────────────────────┐   ┌─────────────────────────────────┐  │
-        │  │  Signal Consumer   │   │        Task Consumer             │  │
-        │  │  cancel / ping     │   │  task（含 HIL resume）           │  │
-        │  │  （无容量限制）      │    │  （受 Semaphore 槽位节流）       │  │
-        │  └────────┬───────────┘   └──────────────┬──────────────────┘  │
-        │           │                              │                     │
-        │           ▼                              ▼                     │
-        │  ┌────────────────┐          ┌───────────────────┐            │
-        │  │  TaskConsumer  │◄─────────│    AgentRunner     │            │
-        │  │  handle_signal │          │  (LangGraph graph) │            │
-        │  └────────────────┘          └─────────┬─────────┘            │
-        │                                        │                      │
-        │                           ┌────────────▼──────────┐           │
-        │                           │   MQStreamBridge       │           │
-        │                           │ (替换 MemoryStreamBridge)│          │
-        │                           └────────────┬──────────┘           │
-        │                                        │                      │
-        └────────────────────────────────────────┼──────────────────────┘
-                                                 │
-                             ┌───────────────────▼──────────────┐
-                             │     RocketMQ ($AGENT_RESULTS)     │
-                             │   progress / result / error / pong│
-                             └───────────────────────────────────┘
+上游 ──► RocketMQ ($AGENT_TASKS, 普通消息)  ────────────────────────────────┐
+                                                                            │
+        ┌───────────────────────────────────────────────────────────────────▼────┐
+        │                      Consumer 集群（N 个实例）                           │
+        │                                                                        │
+        │  ┌─────────────────────────────────────────────────────────────────┐  │
+        │  │  poll-loop（单 SimpleConsumer，不节流，立即 ACK）                  │  │
+        │  │  ping → 即时处理；task / cancel → thread_msg_queue（含 seq）      │  │
+        │  └──────────────────────────────┬──────────────────────────────────┘  │
+        │                                 │                                      │
+        │                                 ▼                                      │
+        │  ┌──────────────────────────────────────────────────────────────────┐  │
+        │  │            thread_msg_queue（PostgreSQL，per-thread 有序）         │  │
+        │  │  policy: current | followup | cancel | prefix | steer(预留)       │  │
+        │  │  按 thread_msg_seq 排序，保证 task/cancel 在会话内的准确顺序       │  │
+        │  └──────────────────────────────┬──────────────────────────────────┘  │
+        │                                 │  dispatch（Semaphore 控制执行出口）    │
+        │                                 ▼                                      │
+        │                        ┌───────────────────┐                          │
+        │                        │    AgentRunner     │                          │
+        │                        │  (LangGraph graph) │                          │
+        │                        └─────────┬─────────┘                          │
+        │                                  │                                     │
+        │                     ┌────────────▼──────────┐                         │
+        │                     │   MQStreamBridge       │                         │
+        │                     │ (替换 MemoryStreamBridge)│                        │
+        │                     └────────────┬──────────┘                         │
+        │                                  │                                     │
+        └──────────────────────────────────┼─────────────────────────────────────┘
+                                           │
+                           ┌───────────────▼──────────────┐
+                           │     RocketMQ ($AGENT_RESULTS) │
+                           │  progress / result / error / pong │
+                           └───────────────────────────────┘
 
 共享依赖（多节点共享）：
-  PostgreSQL ── checkpointer + 运行状态表 + inject 队列 + 幂等记录
+  PostgreSQL ── checkpointer + 运行状态表 + thread_msg_queue + 幂等记录
   共享文件系统 ── $DEER_FLOW_HOME（config / skills / agents / threads/user-data）
 ```
 
@@ -76,11 +81,12 @@ database:
 | `runs`、`threads_meta`、`run_events`、`feedback`、`users` | `deerflow.persistence.models` ORM | `Base.metadata.create_all` 在 `init_engine` 时自动创建 |
 | `consumer_instances` | 本设计（消费者注册表） | 定义为 SQLAlchemy ORM model，随 `Base.metadata.create_all` 自动创建 |
 | `thread_run_state` | 本设计（路由状态） | 同上 |
-| `thread_msg_queue` | 本设计（inject 队列） | 同上 |
-| `thread_cancel_signals` | 本设计（取消信号） | 同上 |
+| `thread_msg_queue` | 本设计（消息缓冲队列） | 同上；存储 task、cancel、prefix 等所有上行消息，按 thread_msg_seq 排序 |
 | `processed_messages` | 本设计（幂等记录） | 同上 |
 
-本设计新增的 5 张自定义表定义为继承 `deerflow.persistence.base.Base` 的 SQLAlchemy ORM model，与 `runs`、`threads_meta` 等写法完全一致，随 Consumer 启动时 `init_engine_from_config(config.database)` 自动建表，无需单独的 migration 脚本（幂等安全）。RunRegistry 使用 `get_session_factory()` 获取 session，与其他 deerflow ORM 表共用同一 engine，自动跟随 `config.yaml` 的 `database.backend` 配置。
+`thread_cancel_signals` 表已废弃：cancel 语义通过 `thread_msg_queue` 中 `policy='cancel'` 行实现，无需独立表。
+
+本设计新增的 4 张自定义表定义为继承 `deerflow.persistence.base.Base` 的 SQLAlchemy ORM model，与 `runs`、`threads_meta` 等写法完全一致，随 Consumer 启动时 `init_engine_from_config(config.database)` 自动建表，无需单独的 migration 脚本（幂等安全）。RunRegistry 使用 `get_session_factory()` 获取 session，与其他 deerflow ORM 表共用同一 engine，自动跟随 `config.yaml` 的 `database.backend` 配置。
 
 ### 2.3 `SELECT FOR UPDATE` 在 SQLite 下的行为
 
@@ -179,25 +185,23 @@ CREATE TABLE consumer_instances (
 Consumer 进程（单 asyncio 事件循环）
 │
 ├── [固定后台协程，进程启动时创建]
-│   ├── task-poll-loop              拉取 $AGENT_TASKS；槽位耗尽时暂停（capacity=0 → sleep 0.2s）
-│   ├── signal-poll-loop            拉取 $AGENT_SIGNALS（cancel/ping）；无槽位限制，始终拉取
+│   ├── poll-loop                   拉取 $AGENT_TASKS（不节流，全速拉取，立即 ACK）
+│   │                               ping → 即时处理；task/cancel → 写入 thread_msg_queue
 │   ├── instance-heartbeat          每 10 s → UPDATE consumer_instances.last_heartbeat
 │   ├── stale-run-watchdog          每 30 s → 检测并重置心跳超时（>60 s）的 running thread
 │   └── processed-messages-cleanup  每 3600 s → 删除超过 TTL（默认 7 天）的幂等记录
 │                                   （processed_messages_ttl_days=0 时不启动）
 │
 ├── [动态消息任务，每条 MQ 消息创建一个]
-│   ├── msg-<id>   来自 task-poll-loop（类型一定是 task）
-│   │              ├── task_consumer.handle_message(body)
-│   │              └── task_mq_consumer.ack(msg)
-│   └── sig-<id>   来自 signal-poll-loop（类型一定是 cancel 或 ping）
-│                  ├── task_consumer.handle_message(body)
-│                  └── signal_mq_consumer.ack(msg)
+│   └── msg-<id>   来自 poll-loop
+│                  ├── handle_message(body)  → 写 thread_msg_queue / 处理 ping，立即 return
+│                  └── mq_consumer.ack(msg)
 │
-└── [动态 Agent 运行任务，每个 claim 成功的 task 创建一个]
+└── [动态 Agent 运行任务，每个 dispatch 成功的 task 创建一个]
     └── run-<id>   AgentRunner.run()
                    ├── heartbeat_loop   每 10 s → UPDATE thread_run_state.last_heartbeat
-                   ├── cancel_watcher   每  2 s → SELECT thread_cancel_signals → task.cancel()
+                   ├── cancel_watcher   每  2 s → SELECT thread_msg_queue WHERE policy='cancel'
+                   │                              AND thread_msg_seq > current_task_seq → task.cancel()
                    └── graph.astream()  驱动 LangGraph，输出通过 MQStreamBridge 发布
 ```
 
@@ -205,12 +209,12 @@ Consumer 进程（单 asyncio 事件循环）
 
 | 机制 | 作用 |
 |------|------|
-| `asyncio.Semaphore(max_concurrent_runs)` | 限制同时执行的 Agent run 任务数量（默认 10）；`_run_and_release` 包装每次 run，完成后自动释放槽位 |
-| task-poll-loop 槽位节流 | `capacity = min(task_batch_size, available_slots)`；`available_slots == 0` 时 sleep 0.2s 跳过本轮，不拉取新 task，防止任务消息积压 |
-| signal-poll-loop 无节流 | cancel/ping 使用独立 SimpleConsumer，不受 Semaphore 约束，始终可消费；cancel 响应延迟不受 task 负载影响 |
-| ACK 与 run 解耦 | `handle_message` 返回后立即 ACK，run 作为独立后台 Task 继续执行；poll loop 无需等待 run 完成即可接受下一批消息，吞吐不受单次 run 时长影响 |
-| `asyncio.create_task()` | msg 处理（handle + ack）与 run 执行均为独立 Task，互不阻塞；asyncio 事件循环单线程，内存状态（`_runs` 字典、Semaphore）无需额外锁 |
-| `ThreadPoolExecutor(max_workers=6)` | 所有阻塞 SDK 调用通过 `run_in_executor` 在线程池执行；6 workers = task-receive(1) + signal-receive(1) + send(1) + ack×2 + spare(1) |
+| `asyncio.Semaphore(max_concurrent_runs)` | 限制同时执行的 Agent run 任务数量（默认 10）；仅控制执行出口（dispatch），不影响 poll-loop 拉取速度 |
+| poll-loop 不节流 | 单一 SimpleConsumer 全速拉取 $AGENT_TASKS，所有消息立即写入 thread_msg_queue 并 ACK；cancel 不会在 MQ 中排队等待 task 积压清空 |
+| dispatch 槽位控制 | `_try_dispatch` 在 Semaphore 有空闲槽时从 thread_msg_queue 取下一个 task 执行；槽位耗尽时新 task 留在 queue 等待，不阻塞 poll |
+| ACK 与 run 解耦 | `handle_message` 返回后立即 ACK，run 作为独立后台 Task 继续执行；poll loop 无需等待 run 完成即可接受下一批消息 |
+| `asyncio.create_task()` | msg 处理（handle + ack）与 run 执行均为独立 Task，互不阻塞；asyncio 事件循环单线程，内存状态（Semaphore）无需额外锁 |
+| `ThreadPoolExecutor(max_workers=5)` | 所有阻塞 SDK 调用通过 `run_in_executor` 在线程池执行；5 workers = poll-receive(1) + send(1) + ack×2 + spare(1) |
 
 #### 3.4.3 后台协程的 per-instance vs cluster-level 分类
 
@@ -218,8 +222,7 @@ Consumer 进程（单 asyncio 事件循环）
 
 | 协程 | 归属 | 原因 |
 |------|------|------|
-| `task-poll-loop` | **per-instance** | 每个实例独立消费自己的 MQ 份额 |
-| `signal-poll-loop` | **per-instance** | 同上 |
+| `poll-loop` | **per-instance** | 每个实例独立消费自己的 MQ 份额 |
 | `instance-heartbeat` | **per-instance** | 更新自身的 `consumer_instances.last_heartbeat`，只有自己能做 |
 | `stale-run-watchdog` | cluster-level | 整个集群只需一个实例检测并重置 stale run |
 | `processed-messages-cleanup` | cluster-level | 只需一个实例执行定期清理 |
@@ -231,15 +234,14 @@ Consumer 进程（单 asyncio 事件循环）
 #### 3.4.4 容量估算
 
 ```
-同时运行的协程数 ≈ 5（固定后台，含 processed-messages-cleanup；ttl_days=0 时为 4）
-                 + min(task_batch_size, max_concurrent_runs)（task msg 任务，短暂存活）
-                 + signal_batch_size（signal msg 任务，极短暂存活）
+同时运行的协程数 ≈ 4（固定后台，含 processed-messages-cleanup；ttl_days=0 时为 3）
+                 + task_batch_size（poll msg 任务，极短暂存活）
                  + max_concurrent_runs × 3（每个 run：run 主体 + heartbeat + cancel_watcher）
 
-线程数 = ThreadPoolExecutor.max_workers（默认 6，固定不变）
+线程数 = ThreadPoolExecutor.max_workers（默认 5，固定不变）
 ```
 
-例：`max_concurrent_runs=10`、`task_batch_size=20`、`signal_batch_size=10` 时，协程峰值约 **55**，线程数固定 **6**。
+例：`max_concurrent_runs=10`、`task_batch_size=20` 时，协程峰值约 **54**，线程数固定 **5**。
 
 ---
 
@@ -257,23 +259,19 @@ Consumer 进程（单 asyncio 事件循环）
 
 ```sql
 CREATE TABLE thread_run_state (
-    thread_id      TEXT PRIMARY KEY,
-    instance_id    TEXT NOT NULL,        -- 当前持有执行权的 Consumer 实例；无 FK，dead 实例行会被删除
-    message_id     TEXT NOT NULL,        -- 当前运行中 task 的 message_id
-    status         TEXT NOT NULL,        -- running | idle （仅两个状态）
-    drain_mode     TEXT NOT NULL DEFAULT 'followup',  -- followup | collect（见 §5.3）
-    retry_count    INT  NOT NULL DEFAULT 0,  -- stale run 自动重试次数，成功后归零
-    started_at     TIMESTAMPTZ,
-    last_heartbeat TIMESTAMPTZ NOT NULL
+    thread_id         TEXT PRIMARY KEY,
+    instance_id       TEXT NOT NULL,       -- 当前持有执行权的 Consumer 实例；无 FK，dead 实例行会被删除
+    message_id        TEXT NOT NULL,       -- 当前运行中 task 的 message_id
+    thread_msg_seq    INT  NOT NULL,       -- 当前运行中 task 的 thread_msg_seq；cancel_watcher 用于比较
+    status            TEXT NOT NULL,       -- running | idle （仅两个状态）
+    drain_mode        TEXT NOT NULL DEFAULT 'followup',  -- followup | collect（见 §5.3）
+    retry_count       INT  NOT NULL DEFAULT 0,  -- stale run 自动重试次数，成功后归零
+    started_at        TIMESTAMPTZ,
+    last_heartbeat    TIMESTAMPTZ NOT NULL
 );
 -- reply_config 已移至 thread_msg_queue.body（完整 MQ envelope 中）
 -- paused_for_approval 状态已移除（见下方说明）
-
-CREATE TABLE thread_cancel_signals (
-    thread_id    TEXT PRIMARY KEY,
-    reason       TEXT,
-    requested_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+-- thread_cancel_signals 表已废弃：cancel 通过 thread_msg_queue policy='cancel' 行实现
 ```
 
 **字段变更说明：**
@@ -284,98 +282,138 @@ CREATE TABLE thread_cancel_signals (
 | 新增 `retry_count` | 记录 stale run 自动重试次数，防止无限 crash 循环；成功完成后归零 |
 | 删除 `paused_for_approval` 状态和 `paused_reason` 字段 | HIL interrupt 后 agent 正常结束，thread 直接回 `idle`；LangGraph checkpoint 保存 interrupt 状态，resume 消息以新消息方式处理；线程管理层无需感知 HIL 等待语义 |
 | 新增 `drain_mode` | 控制 followup 队列的排空策略（`followup` \| `collect`）；per-thread 粒度，由 collect 消息入队时写入，`mark_thread_idle` 时重置为 `followup` |
+| 新增 `thread_msg_seq` | 记录当前 run 对应的消息序号；cancel_watcher 用于过滤旧 cancel（只响应 seq > thread_msg_seq 的 cancel 行） |
 
 ### 4.3 路由算法
 
-Consumer 接收到一条消息后的处理流程：
+路由分为两个独立阶段：**poll-loop**（快速入队，立即 ACK）和 **dispatch**（容量控制，驱动执行）。
+
+#### poll-loop — 消息入队
 
 ```
 收到消息 M（raw body）
 
-// ─── 步骤 ①：JSON 解析 ───────────────────────────────────────────────────────
+// ─── 步骤 ①：JSON 解析 ──────────────────────────────────────────────────
 try: raw_envelope = json.loads(body)
 except JSONDecodeError:
-    log error; return   // 无 message_id，无法回发，静默 ACK
+    log error; ACK; return   // 无 message_id，无法回发，静默丢弃
 
-message_id = raw_envelope.get("message_id")   // 供后续 error 回发使用
+message_id = raw_envelope.get("message_id")
 thread_id  = raw_envelope.get("thread_id")
 
-// ─── 步骤 ②：Schema 校验 + 反序列化 ─────────────────────────────────────────
-try: message = TaskMessage.from_dict(raw_envelope)
+// ─── 步骤 ②：Schema 校验 + 反序列化 ────────────────────────────────────
+try: message = Message.from_dict(raw_envelope)
 except SchemaValidationError as e:
-    log error(message_id, e.reason)
     if message_id:
         publish error(INVALID_SCHEMA, retriable=False, message=e.reason) → $AGENT_RESULTS
-    return   // ACK，不重投
+    ACK; return
 
-// ─── 步骤 ③：按 type 路由 ────────────────────────────────────────────────────
-// _validate_raw 已保证 type ∈ {"task","cancel","ping"}，无需 else 分支
+// ─── 步骤 ③：按 type 路由 ──────────────────────────────────────────────
 
 if type == ping:
-    target = M.config.get("instance_id")
+    target = M.payload.get("instance_id")
     if target:
-        // 定向 ping：查 consumer_instances 表，任意 Consumer 均可回答
         row = SELECT FROM consumer_instances WHERE instance_id=target
-        target_status = row.status if row else "not_found"
-        last_heartbeat = row.last_heartbeat if row else null
-        publish pong(
-            instance_id=self.instance_id,        // 实际处理这条 ping 的 Consumer
-            target_instance_id=target,
-            target_status=target_status,         // active | draining | not_found
-            last_heartbeat=last_heartbeat,
-        )
+        publish pong(instance_id=self.instance_id, target_instance_id=target,
+                     target_status=row.status if row else "not_found")
     else:
-        // 广播 ping：只报告自身
         publish pong(instance_id=self.instance_id)
-    return                                       // handle_message 返回 → 立即 ACK
+    ACK; return
 
 if type == cancel:
-    INSERT INTO thread_cancel_signals(T, reason)  -- 所有实例都写；执行实例轮询检测
-    return
+    // cancel 写入 thread_msg_queue，携带 thread_msg_seq 保证会话内顺序
+    INSERT INTO thread_msg_queue(thread_id, message_id, body, thread_msg_seq, policy='cancel')
+    ACK; return
+    // cancel_watcher（AgentRunner 内）和 _drain_and_release 负责检测和执行 cancel 语义
 
 if type == task:
     // ① 幂等检查
     if message_id 已在 processed_messages 表中:
-        （可选）重发已缓存的 result
-        MQ ack; return
+        bridge.replay(message_id, thread_id, result_cache)
+        ACK; return
 
-    // ② 尝试原子 claim
-    result = 执行以下 PostgreSQL 事务：
-        SELECT * FROM thread_run_state WHERE thread_id=T FOR UPDATE
-        if 不存在 or status='idle':
-            UPSERT thread_run_state SET
-                instance_id=self, message_id=M.id,
-                status='running', reply_config=M.reply_config,
-                started_at=now(), last_heartbeat=now()
-            return "claimed"
-        elif status='running':
-            return "running_on", existing.instance_id
+    // ② reject 模式快速短路（避免无效入队）
+    state = SELECT FROM thread_run_state WHERE thread_id=T
+    if state.status == 'running' AND message.config.message_mode == 'reject':
+        publish error(AGENT_BUSY, retriable=True) → $AGENT_RESULTS
+        ACK; return
 
-    if result == "claimed":
-        // ② 写入 "current" 行：存完整 MQ body，供 stale run 恢复使用
-        UPSERT thread_msg_queue:
-            DELETE FROM thread_msg_queue WHERE thread_id=T AND policy='current'
-            INSERT INTO thread_msg_queue(T, M.message_id, body=raw_envelope, policy='current')
-        启动 AgentRunner 执行 M
+    // ③ 入队（followup；collect 模式同样入队，drain_mode 在此写入）
+    INSERT INTO thread_msg_queue(thread_id, message_id, body, thread_msg_seq, policy='followup')
+    if message.config.message_mode == 'collect':
+        UPDATE thread_run_state SET drain_mode='collect' WHERE thread_id=T
+    ACK
 
-    if result == ("running_on", other_instance):
-        mode = M.payload.config.get("message_mode", "followup")
+    // ④ 尝试立即 dispatch（thread 空闲 + 有 capacity 时直接启动，无需等待）
+    asyncio.create_task(self._try_dispatch(thread_id))
+```
 
-        if mode == "reject":
-            // ③-a reject：拒绝，立即回复 AGENT_BUSY
-            publish error(AGENT_BUSY, retriable=True) → $AGENT_RESULTS
-            MQ ack; return
+#### _try_dispatch — 从队列取任务执行
 
-        else:  // followup / collect；steer 协议已预留，当前版本降级为 followup
-            // ③-b followup / collect：写入 inject 队列，立即 ack 释放 consumer slot
-            // body 存完整 MQ envelope，_drain_and_release 在当前 run 完成后驱动执行
-            INSERT INTO thread_msg_queue(T, M.message_id, body=raw_envelope, policy='followup')
-            if mode == "collect":
-                // collect 是 per-thread 设置：原子写入 drain_mode（SELECT FOR UPDATE 保护）
-                UPDATE thread_run_state SET drain_mode='collect' WHERE thread_id=T
-                // 注意：无需原子事务包裹 INSERT + UPDATE——即使顺序分开，
-                // drain_mode 只在 drain 时被读取（run 结束后），此时写入已完成
-            MQ ack; return
+```
+_try_dispatch(thread_id):
+
+    if Semaphore 无空闲槽: return   // capacity 耗尽，新 task 留队等待
+
+    async with db.begin():
+        state = SELECT FROM thread_run_state WHERE thread_id=T FOR UPDATE
+        if state.status == 'running': return   // 已有 run，_drain_and_release 负责链式 drain
+
+        pending = SELECT FROM thread_msg_queue
+                  WHERE thread_id=T AND policy IN ('followup','cancel','prefix')
+                  ORDER BY thread_msg_seq
+
+        if not pending:
+            return
+
+        // ─── cancel barrier 处理 ────────────────────────────────────────
+        cancel_idx = index of first row where policy='cancel'
+        if cancel_idx is not None:
+            cancel_row    = pending[cancel_idx]
+            tasks_before  = [r for r in pending[:cancel_idx] if r.policy in ('followup','prefix')]
+
+            // 1. 将 barrier 之前的 task 转为 prefix（保留为下一轮 run 的上下文前缀）
+            UPDATE thread_msg_queue SET policy='prefix'
+                WHERE id IN [r.id for r in tasks_before]
+
+            // 2. 通知上游：这些 task 未执行，已被 cancel 中断
+            for row in tasks_before:
+                publish result(row.message_id, status='cancelled') → $AGENT_RESULTS
+
+            // 3. 删除 cancel 行
+            DELETE FROM thread_msg_queue WHERE id = cancel_row.id
+
+            // cancel 清理后重新检查队列（可能还有后续 cancel 或 task）
+            pending = SELECT FROM thread_msg_queue ... ORDER BY thread_msg_seq
+            if not pending: return
+
+        // ─── 取下一个 task，合并 prefix 上下文 ──────────────────────────
+        prefix_rows   = [r for r in pending if r.policy == 'prefix']
+        next_task_row = first row where policy='followup'
+        if not next_task_row: return
+
+        task = TaskMessage.from_json(next_task_row.body)
+        if prefix_rows:
+            // prefix 消息（被 cancel 中断的历史消息）合并进 input，保留 LLM 上下文
+            prefix_messages = [msg for row in prefix_rows
+                                   for msg in row.body["payload"].get("messages") or []
+                                   if row.body["payload"].get("messages")]   // HIL resume 跳过
+            if prefix_messages:
+                task = task.with_messages(prefix_messages + task.input["messages"])
+
+        // ─── Claim thread，启动 AgentRunner ─────────────────────────────
+        await Semaphore.acquire()
+        UPSERT thread_run_state SET
+            instance_id=self, message_id=next_task_row.message_id,
+            thread_msg_seq=next_task_row.thread_msg_seq,
+            status='running', started_at=now(), last_heartbeat=now()
+
+        DELETE FROM thread_msg_queue WHERE id IN [r.id for r in prefix_rows]
+        DELETE FROM thread_msg_queue WHERE id = next_task_row.id
+        UPSERT thread_msg_queue(thread_id, message_id, body, policy='current')   // stale 恢复用
+
+        asyncio.create_task(AgentRunner.run(task))
+```
 
 ### 4.4 Heartbeat 与 Stale Run 恢复
 
@@ -460,27 +498,31 @@ Consumer-internal retry 相比上游重发的优势：
 
 ```sql
 CREATE TABLE thread_msg_queue (
-    id          BIGSERIAL PRIMARY KEY,
-    thread_id   TEXT NOT NULL,
-    message_id  TEXT NOT NULL,
-    body        JSONB NOT NULL,
-    -- 完整 MQ envelope（schema_version + message_id + agent_name +
+    id              BIGSERIAL PRIMARY KEY,
+    thread_id       TEXT NOT NULL,
+    message_id      TEXT NOT NULL,
+    thread_msg_seq  INT  NOT NULL,   -- 客户端维护的 per-thread 顺序号；per-thread 查询按此排序
+    body            JSONB NOT NULL,
+    -- 完整 MQ envelope（schema_version + message_id + thread_msg_seq + agent_name +
     --   user_id + project_id + payload.{messages,command,config,reply_config}）
-    -- 取代原 payload 列（仅存 payload 子集），不再有信息丢失
-    policy      TEXT NOT NULL DEFAULT 'followup',  -- 'current' | 'followup' | 'steer'
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    consumed_at TIMESTAMPTZ               -- 已废弃，保留列但不再写入；followup 行消费时直接 DELETE
+    policy          TEXT NOT NULL DEFAULT 'followup',
+    -- 'current' | 'followup' | 'cancel' | 'prefix' | 'steer'（预留）
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    -- consumed_at 列已移除；所有行消费时直接 DELETE
 );
 
-CREATE INDEX ON thread_msg_queue(thread_id, policy, consumed_at) WHERE consumed_at IS NULL;
+CREATE INDEX ON thread_msg_queue(thread_id, policy);
+CREATE INDEX ON thread_msg_queue(thread_id, thread_msg_seq) WHERE policy IN ('followup','cancel','prefix');
 ```
 
-`policy` 列区分三种用途：
+`policy` 列区分五种用途：
 
 | policy | 状态 | 写入时机 | 消费者 | 消费时机 |
 |--------|------|---------|--------|---------|
-| `current` | **已设计** | `claim_thread` 成功时 UPSERT（每 thread 至多一行） | `stale-run-watchdog` | crash 恢复时读取，`mark_thread_idle` 时删除 |
-| `followup` | **已实现** | thread 正在运行时新消息到来（message_mode=followup） | `_drain_and_release` | 当前 run 完成后，作为独立新一轮的 input；消费时 DELETE 行（不使用 consumed_at 软删除） |
+| `current` | **已实现** | `_try_dispatch` claim 成功时 UPSERT（每 thread 至多一行） | `stale-run-watchdog` | crash 恢复时读取，`mark_thread_idle` 时删除 |
+| `followup` | **已实现** | poll-loop 收到 task 消息（thread 运行中或空闲均写入） | `_try_dispatch` / `_drain_and_release` | dispatch 时取出执行；消费时 DELETE 行 |
+| `cancel` | **已实现** | poll-loop 收到 cancel 消息 | `_try_dispatch` / `_drain_and_release` | cancel barrier 处理时 DELETE；cancel_watcher 检测后由 except CancelledError 块删除 |
+| `prefix` | **已实现** | cancel barrier 处理：followup 行转为 prefix（保留上下文，不执行） | `_try_dispatch` | 下一个 task dispatch 时合并进 input，DELETE |
 | `steer` | **待实现** | — | InjectMiddleware（预留） | 当前 run 的 before_agent / before_model |
 
 **`body` 列存储完整 MQ envelope 的原因：**

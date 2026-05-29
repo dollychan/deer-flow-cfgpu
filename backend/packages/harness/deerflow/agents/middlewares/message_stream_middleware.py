@@ -116,12 +116,15 @@ class MessageStreamMiddleware(AgentMiddleware):
         if not content and not tool_calls:
             return
 
-        self._emit({
+        event: dict = {
             "type": "ai_message",
             "message_id": ai_msg.id or "",
             "content": content,
             "tool_calls": tool_calls,
-        })
+        }
+        if ai_msg.usage_metadata:
+            event["usage"] = dict(ai_msg.usage_metadata)
+        self._emit(event)
         logger.debug(
             "MessageStreamMiddleware: emitted ai_message id=%s tool_calls=%d",
             ai_msg.id,

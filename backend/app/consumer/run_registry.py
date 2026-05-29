@@ -10,13 +10,14 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.consumer.models import (
     ConsumerInstanceRow,
     ProcessedMessageRow,
-    ThreadCancelSignalRow,
     ThreadMsgQueueRow,
     ThreadRunStateRow,
 )
@@ -77,11 +78,17 @@ class RunRegistry:
 
     # ── Thread routing ────────────────────────────────────────────────────────
 
+    async def get_thread_state(self, thread_id: str) -> ThreadRunStateRow | None:
+        """Return the current ThreadRunStateRow for a thread, or None if not found."""
+        async with self._sf() as session:
+            return await session.get(ThreadRunStateRow, thread_id)
+
     async def claim_thread(
         self,
         thread_id: str,
         instance_id: str,
         message_id: str,
+        thread_msg_seq: int = 0,
     ) -> ClaimResult:
         """Atomically claim a thread for execution.
 
@@ -109,6 +116,7 @@ class RunRegistry:
                                 thread_id=thread_id,
                                 instance_id=instance_id,
                                 message_id=message_id,
+                                thread_msg_seq=thread_msg_seq,
                                 status=ThreadStatus.RUNNING,
                                 started_at=now,
                                 last_heartbeat=now,
@@ -117,6 +125,7 @@ class RunRegistry:
                     else:
                         row.instance_id = instance_id
                         row.message_id = message_id
+                        row.thread_msg_seq = thread_msg_seq
                         row.status = ThreadStatus.RUNNING
                         row.started_at = now
                         row.last_heartbeat = now
@@ -145,13 +154,17 @@ class RunRegistry:
             await session.commit()
 
     async def mark_thread_idle(self, thread_id: str) -> None:
-        """Mark thread idle and delete its 'current' crash-recovery row atomically."""
+        """Mark thread idle, reset drain_mode, and delete its 'current' crash-recovery row."""
         async with self._sf() as session:
             async with session.begin():
                 await session.execute(
                     update(ThreadRunStateRow)
                     .where(ThreadRunStateRow.thread_id == thread_id)
-                    .values(status=ThreadStatus.IDLE, last_heartbeat=datetime.now(UTC))
+                    .values(
+                        status=ThreadStatus.IDLE,
+                        drain_mode="followup",
+                        last_heartbeat=datetime.now(UTC),
+                    )
                 )
                 await session.execute(
                     delete(ThreadMsgQueueRow).where(
@@ -169,33 +182,74 @@ class RunRegistry:
             )
             await session.commit()
 
-    # ── Inject queue ──────────────────────────────────────────────────────────
+    # ── Message queue ─────────────────────────────────────────────────────────
 
-    async def enqueue_inject(
+    async def enqueue_message(
         self,
         thread_id: str,
         message_id: str,
         body: dict,
-        policy: str = "followup",
-    ) -> None:
-        async with self._sf() as session:
-            session.add(
-                ThreadMsgQueueRow(
-                    thread_id=thread_id,
-                    message_id=message_id,
-                    body=body,
-                    policy=policy,
-                    created_at=datetime.now(UTC),
-                )
-            )
-            await session.commit()
+        thread_msg_seq: int,
+        policy: str,
+    ) -> bool:
+        """Insert a queue row idempotently.
 
-    async def upsert_current_msg(self, thread_id: str, message_id: str, body: dict) -> None:
+        Returns True when a new row was inserted, False when the same
+        message_id is already queued/current due to RocketMQ redelivery.
+        """
+        values = {
+            "thread_id": thread_id,
+            "message_id": message_id,
+            "body": body,
+            "policy": policy,
+            "thread_msg_seq": thread_msg_seq,
+            "created_at": datetime.now(UTC),
+        }
+        async with self._sf() as session:
+            bind = await session.connection()
+            dialect_name = bind.dialect.name
+
+            if dialect_name == "postgresql":
+                stmt = (
+                    pg_insert(ThreadMsgQueueRow)
+                    .values(**values)
+                    .on_conflict_do_nothing(
+                        index_elements=[ThreadMsgQueueRow.message_id]
+                    )
+                )
+                result = await session.execute(stmt)
+                await session.commit()
+                return (result.rowcount or 0) > 0
+
+            if dialect_name == "sqlite":
+                stmt = (
+                    sqlite_insert(ThreadMsgQueueRow)
+                    .values(**values)
+                    .on_conflict_do_nothing(
+                        index_elements=[ThreadMsgQueueRow.message_id]
+                    )
+                )
+                result = await session.execute(stmt)
+                await session.commit()
+                return (result.rowcount or 0) > 0
+
+            try:
+                session.add(ThreadMsgQueueRow(**values))
+                await session.commit()
+                return True
+            except IntegrityError:
+                await session.rollback()
+                return False
+
+    async def upsert_current_msg(
+        self, thread_id: str, message_id: str, body: dict, thread_msg_seq: int = 0
+    ) -> None:
         """Write the 'current' crash-recovery row for a newly claimed run.
 
         Atomically replaces any existing 'current' row for this thread so the
         watchdog always sees the latest claimed message's complete MQ envelope.
         """
+        now = datetime.now(UTC)
         async with self._sf() as session:
             async with session.begin():
                 await session.execute(
@@ -204,13 +258,20 @@ class RunRegistry:
                         ThreadMsgQueueRow.policy == QueuePolicy.CURRENT,
                     )
                 )
+                await session.execute(
+                    delete(ThreadMsgQueueRow).where(
+                        ThreadMsgQueueRow.message_id == message_id,
+                        ThreadMsgQueueRow.thread_id == thread_id,
+                    )
+                )
                 session.add(
                     ThreadMsgQueueRow(
                         thread_id=thread_id,
                         message_id=message_id,
                         body=body,
                         policy=QueuePolicy.CURRENT,
-                        created_at=datetime.now(UTC),
+                        thread_msg_seq=thread_msg_seq,
+                        created_at=now,
                     )
                 )
 
@@ -224,35 +285,86 @@ class RunRegistry:
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
 
-    async def peek_inject_queue(
-        self, thread_id: str, policy: str = QueuePolicy.FOLLOWUP
+    async def peek_thread_queue(
+        self,
+        thread_id: str,
+        policies: tuple[str, ...] = (QueuePolicy.FOLLOWUP,),
     ) -> list[ThreadMsgQueueRow]:
-        """Return pending queue rows ordered oldest-first. Does not consume."""
+        """Return queue rows for the given policies, ordered by thread_msg_seq asc."""
         stmt = (
             select(ThreadMsgQueueRow)
             .where(
                 ThreadMsgQueueRow.thread_id == thread_id,
-                ThreadMsgQueueRow.policy == policy,
-                ThreadMsgQueueRow.consumed_at.is_(None),
+                ThreadMsgQueueRow.policy.in_(policies),
             )
-            .order_by(ThreadMsgQueueRow.created_at.asc())
+            .order_by(ThreadMsgQueueRow.thread_msg_seq.asc())
         )
         async with self._sf() as session:
             result = await session.execute(stmt)
             return list(result.scalars())
 
-    async def consume_followup(self, queue_id: int) -> None:
-        """Atomically mark a single queue row as consumed."""
+    async def find_cancel_after_seq(
+        self, thread_id: str, current_task_seq: int
+    ) -> ThreadMsgQueueRow | None:
+        """Return the earliest cancel row with thread_msg_seq > current_task_seq, or None."""
+        stmt = (
+            select(ThreadMsgQueueRow)
+            .where(
+                ThreadMsgQueueRow.thread_id == thread_id,
+                ThreadMsgQueueRow.policy == QueuePolicy.CANCEL,
+                ThreadMsgQueueRow.thread_msg_seq > current_task_seq,
+            )
+            .order_by(ThreadMsgQueueRow.thread_msg_seq.asc())
+            .limit(1)
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+
+    async def get_followup_before_seq(
+        self, thread_id: str, cancel_seq: int
+    ) -> list[ThreadMsgQueueRow]:
+        """Return followup rows with thread_msg_seq < cancel_seq, ordered oldest-first."""
+        stmt = (
+            select(ThreadMsgQueueRow)
+            .where(
+                ThreadMsgQueueRow.thread_id == thread_id,
+                ThreadMsgQueueRow.policy == QueuePolicy.FOLLOWUP,
+                ThreadMsgQueueRow.thread_msg_seq < cancel_seq,
+            )
+            .order_by(ThreadMsgQueueRow.thread_msg_seq.asc())
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return list(result.scalars())
+
+    async def convert_to_prefix(self, thread_id: str, row_ids: list[int]) -> None:
+        """Convert followup rows to prefix policy (preserve LLM context after cancel)."""
+        if not row_ids:
+            return
         async with self._sf() as session:
             await session.execute(
                 update(ThreadMsgQueueRow)
-                .where(
-                    ThreadMsgQueueRow.id == queue_id,
-                    ThreadMsgQueueRow.consumed_at.is_(None),
-                )
-                .values(consumed_at=datetime.now(UTC))
+                .where(ThreadMsgQueueRow.id.in_(row_ids))
+                .values(policy=QueuePolicy.PREFIX)
             )
             await session.commit()
+
+    async def delete_queue_items(self, thread_id: str, row_ids: list[int]) -> None:
+        """Hard-delete queue rows by id."""
+        if not row_ids:
+            return
+        async with self._sf() as session:
+            await session.execute(
+                delete(ThreadMsgQueueRow).where(ThreadMsgQueueRow.id.in_(row_ids))
+            )
+            await session.commit()
+
+    async def get_drain_mode(self, thread_id: str) -> str:
+        """Return the drain_mode for a thread ('followup' if thread not found)."""
+        async with self._sf() as session:
+            row = await session.get(ThreadRunStateRow, thread_id)
+            return row.drain_mode if row else "followup"
 
     async def transition_thread_followup(
         self,
@@ -260,25 +372,30 @@ class RunRegistry:
         queue_id: int,
         new_message_id: str,
         new_body: dict,
+        thread_msg_seq: int,
+        *,
+        prefix_ids: list[int] | None = None,
     ) -> None:
-        """Atomically: consume followup, advance thread run, and set new current msg.
+        """Atomically: delete followup + prefix rows, advance thread run, replace current row.
 
-        Three operations that must all succeed or all roll back to avoid losing a
-        followup message if the process crashes mid-transition.
+        All four operations in one transaction to prevent followup loss on crash.
         """
         now = datetime.now(UTC)
         async with self._sf() as session:
             async with session.begin():
                 await session.execute(
-                    delete(ThreadMsgQueueRow).where(
-                        ThreadMsgQueueRow.id == queue_id,
-                    )
+                    delete(ThreadMsgQueueRow).where(ThreadMsgQueueRow.id == queue_id)
                 )
+                if prefix_ids:
+                    await session.execute(
+                        delete(ThreadMsgQueueRow).where(ThreadMsgQueueRow.id.in_(prefix_ids))
+                    )
                 await session.execute(
                     update(ThreadRunStateRow)
                     .where(ThreadRunStateRow.thread_id == thread_id)
                     .values(
                         message_id=new_message_id,
+                        thread_msg_seq=thread_msg_seq,
                         status=ThreadStatus.RUNNING,
                         started_at=now,
                         last_heartbeat=now,
@@ -296,45 +413,10 @@ class RunRegistry:
                         message_id=new_message_id,
                         body=new_body,
                         policy=QueuePolicy.CURRENT,
+                        thread_msg_seq=thread_msg_seq,
                         created_at=now,
                     )
                 )
-
-    # ── Cancel signals ────────────────────────────────────────────────────────
-
-    async def insert_cancel_signal(self, thread_id: str, reason: str | None = None) -> None:
-        """Write a cancel signal, overwriting any existing one for this thread."""
-        now = datetime.now(UTC)
-        async with self._sf() as session:
-            try:
-                existing = await session.get(ThreadCancelSignalRow, thread_id)
-                if existing is not None:
-                    existing.reason = reason
-                    existing.requested_at = now
-                else:
-                    session.add(
-                        ThreadCancelSignalRow(
-                            thread_id=thread_id,
-                            reason=reason,
-                            requested_at=now,
-                        )
-                    )
-                await session.commit()
-            except IntegrityError:
-                # Two concurrent callers both saw existing=None; the other insert won.
-                # The signal exists in the DB, which is the intended outcome.
-                await session.rollback()
-
-    async def has_cancel_signal(self, thread_id: str) -> bool:
-        async with self._sf() as session:
-            return await session.get(ThreadCancelSignalRow, thread_id) is not None
-
-    async def clear_cancel_signal(self, thread_id: str) -> None:
-        async with self._sf() as session:
-            await session.execute(
-                delete(ThreadCancelSignalRow).where(ThreadCancelSignalRow.thread_id == thread_id)
-            )
-            await session.commit()
 
     # ── Idempotency ───────────────────────────────────────────────────────────
 
@@ -449,4 +531,3 @@ class RunRegistry:
             )
             await session.commit()
             return result.rowcount
-
