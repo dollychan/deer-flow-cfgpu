@@ -184,6 +184,73 @@ class TestRunFinalize:
         assert st.status == ThreadStatus.IDLE
 
 
+# ── LLM-failure fallback detection ────────────────────────────────────────────
+
+
+class _FallbackAgent:
+    """Fake agent that completes with an LLMErrorHandlingMiddleware fallback message as
+    its terminal output — no exception raised, no interrupt — mimicking a swallowed
+    provider failure. Exercises the real _execute fallback path."""
+
+    def __init__(self, *, reason="circuit_open", content="provider temporarily unavailable"):
+        self.astream_calls = []
+        self._snap = SimpleNamespace(
+            tasks=[],  # no interrupt → not paused
+            config={"configurable": {"checkpoint_id": "ck1"}},
+            values={
+                "messages": [
+                    SimpleNamespace(
+                        additional_kwargs={
+                            "deerflow_error_fallback": True,
+                            "error_type": "CircuitBreakerOpen",
+                            "error_reason": reason,
+                            "error_detail": "llm down",
+                        },
+                        content=content,
+                    )
+                ]
+            },
+        )
+
+    async def aget_state(self, config):
+        return self._snap
+
+    async def astream(self, stream_input, *, config, stream_mode):
+        self.astream_calls.append(stream_input)
+        if False:
+            yield  # make this an async generator
+        return
+
+
+class TestFallbackDetection:
+    @pytest.mark.anyio
+    async def test_fallback_finalizes_failed_not_phantom_success(self, reg, sf, monkeypatch):
+        await _enqueue(reg, "t1", "m1", 1)
+        claimed = await reg.claim_next_runnable("i1")
+        runner = _runner(reg)
+        monkeypatch.setattr(runner, "_build_graph", lambda cfg: _FallbackAgent(reason="circuit_open"))
+        await runner.run(claimed)
+        proc = await reg.check_processed("m1")
+        assert proc.status == ProcessedStatus.FAILED  # not COMPLETED
+        assert runner._bridge.results == []  # no phantom success envelope
+        code, _msg, ckpt = runner._bridge.errors[0]
+        assert code == "AGENT_BUSY"  # circuit_open → retriable AGENT_BUSY
+        assert ckpt == "ck1"  # fork anchor preserved
+        st = await reg.get_thread_state("t1")
+        assert st.status == ThreadStatus.IDLE
+
+    @pytest.mark.anyio
+    async def test_quota_fallback_maps_to_quota_exceeded(self, reg, sf, monkeypatch):
+        await _enqueue(reg, "t1", "m1", 1)
+        claimed = await reg.claim_next_runnable("i1")
+        runner = _runner(reg)
+        monkeypatch.setattr(runner, "_build_graph", lambda cfg: _FallbackAgent(reason="quota"))
+        await runner.run(claimed)
+        proc = await reg.check_processed("m1")
+        assert proc.status == ProcessedStatus.FAILED
+        assert runner._bridge.errors[0][0] == "QUOTA_EXCEEDED"  # non-retriable mapping
+
+
 # ── drain branch (§6.5) ───────────────────────────────────────────────────────
 
 

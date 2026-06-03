@@ -36,6 +36,20 @@ logger = logging.getLogger(__name__)
 _RESUME_CHANNEL = "__resume__"
 
 
+class _LLMFallbackError(Exception):
+    """Raised when a run terminates via an LLMErrorHandlingMiddleware fallback message
+    (provider failure swallowed into a terminal AIMessage) instead of a real completion.
+
+    Carries the MQ error-envelope fields so run() reports FAILED rather than a phantom
+    "success" that delivers only an apology text and no artifact.
+    """
+
+    def __init__(self, code: str, *, retriable: bool, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retriable = retriable
+
+
 class AgentRunner:
     """Executes one ClaimedRun per call, publishing events via MQStreamBridge.
 
@@ -142,6 +156,24 @@ class AgentRunner:
                 echo=message.downlink_echo(),
                 retriable=True,
                 message=timeout_msg,
+                checkpoint_id=checkpoint_id,
+            )
+            downlink_sent = True
+
+        except _LLMFallbackError as exc:
+            processed_status = ProcessedStatus.FAILED
+            logger.warning("Run %s: LLM provider fallback (%s, retriable=%s): %s", run_id, exc.code, exc.retriable, exc)
+            error_msg = str(exc)
+            checkpoint_id = await self._safe_checkpoint_id(agent, runnable_config)
+            result_cache = {
+                "error": {"code": exc.code, "retriable": exc.retriable, "message": error_msg},
+                "checkpoint_id": checkpoint_id,
+            }
+            await self._bridge.publish_error(
+                exc.code,
+                echo=message.downlink_echo(),
+                retriable=exc.retriable,
+                message=error_msg,
                 checkpoint_id=checkpoint_id,
             )
             downlink_sent = True
@@ -288,6 +320,16 @@ class AgentRunner:
             if tool_approval_payload is not None:
                 hil_cache["tool_approval_required"] = tool_approval_payload
             return True, hil_cache
+
+        # LLM-failure fallback: LLMErrorHandlingMiddleware swallows provider errors into a
+        # terminal AIMessage (no exception, no interrupt). Without this the run would be
+        # reported as a phantom "success" carrying only an apology and no artifact. Inspect
+        # ONLY this run's terminal message (the fallback has no tool_calls so it is always
+        # last) — never rescan persisted history, unlike the Gateway worker.py path.
+        fallback = _extract_fallback_error(final_state)
+        if fallback is not None:
+            code, retriable, fb_message = fallback
+            raise _LLMFallbackError(code, retriable=retriable, message=fb_message)
 
         # Only serialize final_state for non-streaming clients; streaming clients
         # already have all content via custom events.
@@ -598,6 +640,48 @@ def _checkpoint_id_of(state: Any) -> str | None:
         return (state.config or {}).get("configurable", {}).get("checkpoint_id")
     except Exception:
         return None
+
+
+# Map LLMErrorHandlingMiddleware fallback reasons to the MQ error vocabulary
+# (publish_error: AGENT_TIMEOUT | TOOL_FAILED | QUOTA_EXCEEDED | INTERNAL_ERROR |
+# AGENT_BUSY | INVALID_SCHEMA). (code, retriable). Unknown reasons → INTERNAL_ERROR.
+_FALLBACK_ERROR_CODES: dict[str, tuple[str, bool]] = {
+    "quota": ("QUOTA_EXCEEDED", False),
+    "auth": ("INTERNAL_ERROR", False),
+    "busy": ("AGENT_BUSY", True),
+    "transient": ("AGENT_BUSY", True),
+    "circuit_open": ("AGENT_BUSY", True),
+}
+
+
+def _extract_fallback_error(state: Any) -> tuple[str, bool, str] | None:
+    """Detect an LLMErrorHandlingMiddleware fallback as THIS run's terminal message.
+
+    Returns (error_code, retriable, message) when the final message carries the
+    ``deerflow_error_fallback`` marker, else None. Only the last message is inspected
+    — the fallback has no tool_calls so it is always terminal — which avoids the Gateway
+    worker.py pitfall of rescanning persisted history and mistaking an earlier turn's
+    fallback for the current run's outcome.
+    """
+    if state is None:
+        return None
+    try:
+        messages = (state.values or {}).get("messages")
+    except Exception:
+        return None
+    if not messages:
+        return None
+    last = messages[-1]
+    kwargs = getattr(last, "additional_kwargs", None)
+    if not isinstance(kwargs, dict) and isinstance(last, dict):
+        kwargs = last.get("additional_kwargs")
+    if not isinstance(kwargs, dict) or not kwargs.get("deerflow_error_fallback"):
+        return None
+    reason = kwargs.get("error_reason") or "unknown"
+    code, retriable = _FALLBACK_ERROR_CODES.get(reason, ("INTERNAL_ERROR", False))
+    content = last.get("content") if isinstance(last, dict) else getattr(last, "content", None)
+    message = content if isinstance(content, str) and content else (kwargs.get("error_detail") or "LLM provider failed")
+    return code, retriable, message
 
 
 def _is_empty_message_chunk(chunk: Any) -> bool:

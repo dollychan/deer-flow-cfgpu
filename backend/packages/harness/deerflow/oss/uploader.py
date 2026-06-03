@@ -140,6 +140,7 @@ def _content_type_category(content_type: str) -> str:
 # ── Singleton ──────────────────────────────────────────────────────────────────
 
 _uploader: OSSUploader | None = None
+_uploader_config: OSSConfig | None = None
 
 
 def get_oss_uploader() -> OSSUploader | None:
@@ -150,12 +151,19 @@ def get_oss_uploader() -> OSSUploader | None:
 def init_oss_uploader(config: OSSConfig) -> None:
     """Initialise (or reinitialise) the singleton.
 
-    Called by :func:`deerflow.config.app_config.AppConfig._apply_singleton_configs`.
-    No-ops when ``config.enabled`` is False.
+    Called by :func:`deerflow.config.app_config.AppConfig._apply_singleton_configs`
+    on every config hot-reload. No-ops when ``config.enabled`` is False, and skips
+    reconstruction when the OSS config is unchanged. The underlying OSSClient is only
+    rebuilt when its config changes (see :func:`deerflow.oss.client.init_oss_client`),
+    so an unchanged config means the existing uploader still wraps the current client.
     """
-    global _uploader
+    global _uploader, _uploader_config
     client = get_oss_client()
     if not config.enabled or client is None:
         _uploader = None
+        _uploader_config = None
+        return
+    if _uploader is not None and _uploader_config == config:
         return
     _uploader = OSSUploader(client, config)
+    _uploader_config = config

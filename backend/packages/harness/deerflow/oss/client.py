@@ -109,6 +109,7 @@ class OSSClient:
 # ── Singleton ──────────────────────────────────────────────────────────────────
 
 _client: OSSClient | None = None
+_client_config: OSSConfig | None = None
 
 
 def get_oss_client() -> OSSClient | None:
@@ -120,13 +121,20 @@ def init_oss_client(config: OSSConfig) -> None:
     """Initialise (or reinitialise) the singleton from the given config.
 
     Called by :func:`deerflow.config.app_config.AppConfig._apply_singleton_configs`
-    after config is loaded.  No-ops when ``config.enabled`` is False.
+    after config is loaded — i.e. on every config hot-reload. No-ops when
+    ``config.enabled`` is False, and skips reconstruction when the OSS config is
+    unchanged so a config.yaml mtime bump does not trigger a fresh ``oss.Client``
+    plus a ``_check_bucket()`` network round-trip on every reload.
     """
-    global _client
+    global _client, _client_config
     if not config.enabled:
         _client = None
+        _client_config = None
+        return
+    if _client is not None and _client_config == config:
         return
     _client = OSSClient(config)
+    _client_config = config
     logger.info(
         "OSSClient: initialised — region=%s bucket=%s",
         config.region or "(default)",
