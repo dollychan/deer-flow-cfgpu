@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 10
+config_version: 11
 
 # ============================================================================
 # Logging
@@ -545,6 +545,34 @@ tool_search:
   enabled: false
 
 # ============================================================================
+# Tool Output Budget Protection
+# ============================================================================
+# Prevents oversized tool results from blowing the model context window.
+# Outputs exceeding `externalize_min_chars` are persisted to disk and replaced
+# with a compact preview + file reference. The model can read the full output
+# via read_file.  When disk persistence is unavailable, outputs exceeding
+# `fallback_max_chars` are head+tail truncated instead.
+#
+# `exempt_tools` prevents persist→read→persist infinite loops for read tools.
+# `tool_overrides` allows per-tool threshold customization.
+
+tool_output:
+  enabled: true
+  externalize_min_chars: 12000
+  preview_head_chars: 2000
+  preview_tail_chars: 1000
+  fallback_max_chars: 30000
+  fallback_head_chars: 8000
+  fallback_tail_chars: 3000
+  storage_subdir: ".tool-results"
+  exempt_tools:
+    - read_file
+    - read_file_tool
+  # tool_overrides:
+  #   web_search: 8000
+  #   bash: 20000
+
+# ============================================================================
 # Loop Detection Configuration
 # ============================================================================
 # Detect and interrupt repeated identical tool-call loops.
@@ -587,41 +615,6 @@ loop_detection:
   #   "my_custom_draw":
   #     mode: fields
   #     fields: [prompt, style, aspect_ratio]
-
-# ============================================================================
-# Provider Safety Termination Configuration
-# ============================================================================
-# Intercept AIMessages where the provider stopped generation for safety reasons
-# (e.g. OpenAI finish_reason='content_filter', Anthropic stop_reason='refusal',
-# Gemini finish_reason='SAFETY') while still returning tool_calls. The
-# tool_calls in such responses are typically truncated/unreliable and must
-# not be executed. See issue #3028 for the full failure mode.
-#
-# Detectors are loaded by class path via reflection (same pattern as
-# guardrails / models / tools). The built-in set covers OpenAI-compatible
-# content_filter, Anthropic refusal, and Gemini SAFETY/BLOCKLIST/
-# PROHIBITED_CONTENT/SPII/RECITATION.
-
-safety_finish_reason:
-  enabled: true
-  # Leave `detectors` unset to use the built-in detector set. Set to a
-  # non-empty list to fully override (use `enabled: false` to disable instead
-  # of providing an empty list).
-  #
-  # Example — extend the OpenAI-compatible detector for a Chinese provider
-  # whose gateway uses a non-standard finish_reason token:
-  # detectors:
-  #   - use: deerflow.agents.middlewares.safety_termination_detectors:OpenAICompatibleContentFilterDetector
-  #     config:
-  #       finish_reasons: ["content_filter", "sensitive", "risk_control"]
-  #   - use: deerflow.agents.middlewares.safety_termination_detectors:AnthropicRefusalDetector
-  #   - use: deerflow.agents.middlewares.safety_termination_detectors:GeminiSafetyDetector
-  #
-  # Example — add a custom detector for an in-house provider:
-  # detectors:
-  #   - use: my_company.deerflow_ext:WenxinSafetyDetector
-  #     config:
-  #       error_codes: [336003, 17, 18]
 
 # ============================================================================
 # Provider Safety Termination Configuration

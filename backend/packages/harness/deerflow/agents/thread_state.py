@@ -72,6 +72,32 @@ def merge_todos(existing: list | None, new: list | None) -> list | None:
     return new
 
 
+class PromotedTools(TypedDict):
+    catalog_hash: str
+    names: list[str]
+
+
+def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) -> PromotedTools | None:
+    """Reducer for deferred-tool promotions, scoped by catalog hash.
+
+    - new None/empty -> preserve existing (node didn't touch promotions).
+    - catalog_hash changed -> replace wholesale, dropping stale names (prevents a
+      persisted bare name from exposing a different tool after catalog drift).
+    - same catalog_hash -> union names, dedupe, preserve order.
+    """
+    if not new:
+        return existing
+    if existing is None or existing.get("catalog_hash") != new["catalog_hash"]:
+        return {
+            "catalog_hash": new["catalog_hash"],
+            "names": list(dict.fromkeys(new["names"])),
+        }
+    return {
+        "catalog_hash": existing["catalog_hash"],
+        "names": list(dict.fromkeys(existing["names"] + new["names"])),
+    }
+
+
 class ThreadState(AgentState):
     sandbox: NotRequired[SandboxState | None]
     thread_data: NotRequired[ThreadDataState | None]
@@ -81,3 +107,4 @@ class ThreadState(AgentState):
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
     tool_approvals: Annotated[dict[str, Any], merge_tool_approvals]  # tool_call_id -> {status, args?, reason?}
+    promoted: Annotated[PromotedTools | None, merge_promoted]
