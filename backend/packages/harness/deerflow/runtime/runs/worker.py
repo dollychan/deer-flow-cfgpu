@@ -650,21 +650,23 @@ def _extract_llm_error_fallback_message(value: Any) -> str | None:
     to pass through LLM end callbacks, but they do appear in graph state chunks.
     """
     # Fast path: large state chunks produced by stream_mode="values" have a
-    # top-level "messages" list. Scanning only that list avoids expensive deep
-    # recursion into large state dicts.
+    # top-level "messages" list carrying the FULL persisted thread history.
     if isinstance(value, dict):
         messages = value.get("messages")
         if isinstance(messages, (list, tuple)):
-            for msg in messages:
-                result = _try_extract_from_message(msg)
-                if result is not None:
-                    return result
-            # Fallback marker is attached to an AI message in the messages
-            # channel; it will never appear elsewhere in a values chunk.
-            return None
-        # No top-level "messages" — this is likely an "updates" chunk (small
-        # dict keyed by node name). Fall through to deep walk, which is cheap
-        # for these payloads.
+            # Inspect ONLY the terminal message. A fallback AIMessage carries no
+            # tool_calls, so it always routes the agent to END — meaning a run that
+            # failed this way ends with the fallback as its last message. Scanning the
+            # whole list would re-detect a fallback left by an EARLIER turn on the same
+            # thread (values chunks replay all history) and misclassify the current run
+            # as failed — and, when the current run actually paused for HIL approval,
+            # strand the interrupt by marking it error instead of interrupted. The
+            # current run's input message / pending interrupt AIMessage shields any
+            # historical fallback from being terminal, so the terminal check is precise.
+            return _try_extract_from_message(messages[-1]) if messages else None
+        # No top-level "messages" — this is likely an "updates" chunk (small dict keyed
+        # by node name, carrying only THIS run's new messages, so it is not history-
+        # contaminated). Fall through to deep walk, which is cheap for these payloads.
 
     # Deep walk for updates / messages / tuple / list modes. Payloads are
     # small, so full recursion is acceptable here.

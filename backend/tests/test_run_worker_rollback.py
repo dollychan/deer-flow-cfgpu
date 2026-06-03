@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -149,6 +149,57 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
     assert fetched.status == RunStatus.error
     assert fetched.error == "Connection error."
     bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+def _fallback_ai(*, detail: str, reason: str = "transient") -> AIMessage:
+    return AIMessage(
+        content="provider unavailable",
+        additional_kwargs={
+            "deerflow_error_fallback": True,
+            "error_type": "APIConnectionError",
+            "error_reason": reason,
+            "error_detail": detail,
+        },
+    )
+
+
+def test_extract_fallback_detected_when_terminal():
+    # A run that failed via fallback ends with the fallback as its last message.
+    chunk = {"messages": [HumanMessage(content="hi"), _fallback_ai(detail="boom")]}
+    assert _extract_llm_error_fallback_message(chunk) == "boom"
+
+
+def test_extract_ignores_historical_fallback_before_new_human_message():
+    # Continued thread: a PRIOR turn left a fallback, this run appended a new human
+    # message after it. The fallback must NOT be re-detected (history contamination).
+    chunk = {"messages": [_fallback_ai(detail="old failure"), HumanMessage(content="continue")]}
+    assert _extract_llm_error_fallback_message(chunk) is None
+
+
+def test_extract_ignores_historical_fallback_before_success():
+    # A later successful turn must not inherit an earlier turn's fallback marker.
+    chunk = {"messages": [_fallback_ai(detail="old"), AIMessage(content="all good now")]}
+    assert _extract_llm_error_fallback_message(chunk) is None
+
+
+def test_extract_ignores_historical_fallback_before_pending_interrupt():
+    # A run that paused for HIL approval ends on a tool-call AIMessage, not a fallback.
+    # The historical fallback must not flip the run to error and strand the interrupt.
+    chunk = {
+        "messages": [
+            _fallback_ai(detail="old"),
+            HumanMessage(content="approve please"),
+            AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": "c1"}]),
+        ]
+    }
+    assert _extract_llm_error_fallback_message(chunk) is None
+
+
+def test_extract_detects_fallback_in_updates_chunk():
+    # updates-mode chunk (no top-level "messages") carries only this run's delta, so
+    # the deep-walk path still detects a freshly produced fallback.
+    chunk = {"agent": {"messages": [_fallback_ai(detail="boom")]}}
+    assert _extract_llm_error_fallback_message(chunk) == "boom"
 
 
 @pytest.mark.anyio
