@@ -645,12 +645,16 @@ def _checkpoint_id_of(state: Any) -> str | None:
 # Map LLMErrorHandlingMiddleware fallback reasons to the MQ error vocabulary
 # (publish_error: AGENT_TIMEOUT | TOOL_FAILED | QUOTA_EXCEEDED | INTERNAL_ERROR |
 # AGENT_BUSY | INVALID_SCHEMA). (code, retriable). Unknown reasons → INTERNAL_ERROR.
+# NOTE: AGENT_BUSY is reserved by the protocol for ingest-time reject (thread busy +
+# message_mode=reject), NOT a run-execution failure — so a provider being temporarily
+# unavailable maps to INTERNAL_ERROR with retriable=True, conveying retry-worthiness
+# via the flag rather than overloading AGENT_BUSY's meaning.
 _FALLBACK_ERROR_CODES: dict[str, tuple[str, bool]] = {
     "quota": ("QUOTA_EXCEEDED", False),
+    "transient": ("INTERNAL_ERROR", True),
+    "busy": ("INTERNAL_ERROR", True),
+    "circuit_open": ("INTERNAL_ERROR", True),
     "auth": ("INTERNAL_ERROR", False),
-    "busy": ("AGENT_BUSY", True),
-    "transient": ("AGENT_BUSY", True),
-    "circuit_open": ("AGENT_BUSY", True),
 }
 
 

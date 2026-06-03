@@ -67,7 +67,7 @@ class _FakeBridge:
         self.results.append((run_id, status, checkpoint_id))
 
     async def publish_error(self, code, *, echo, message="", retriable=False, node=None, checkpoint_id=None):
-        self.errors.append((code, message, checkpoint_id))
+        self.errors.append((code, message, checkpoint_id, retriable))
 
 
 def _runner(reg, *, checkpointer=None):
@@ -233,8 +233,9 @@ class TestFallbackDetection:
         proc = await reg.check_processed("m1")
         assert proc.status == ProcessedStatus.FAILED  # not COMPLETED
         assert runner._bridge.results == []  # no phantom success envelope
-        code, _msg, ckpt = runner._bridge.errors[0]
-        assert code == "AGENT_BUSY"  # circuit_open → retriable AGENT_BUSY
+        code, _msg, ckpt, retriable = runner._bridge.errors[0]
+        assert code == "INTERNAL_ERROR"  # circuit_open → INTERNAL_ERROR (AGENT_BUSY reserved for ingest reject)
+        assert retriable is True  # provider unavailable → worth retrying
         assert ckpt == "ck1"  # fork anchor preserved
         st = await reg.get_thread_state("t1")
         assert st.status == ThreadStatus.IDLE
