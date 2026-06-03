@@ -1,31 +1,32 @@
-"""TaskConsumer — routes incoming RocketMQ messages to AgentRunner.
+"""TaskConsumer — v2 PollAck / Ingest layer (design §2.6, D1).
 
-Implements the routing algorithm from Consumer运行管理设计 §4.3:
+The thin MQ→DB entry point. It only deserializes, schema-validates, lands rows,
+folds cancel watermarks, and pokes the Scheduler. It owns **no** claim / dispatch /
+run tasks — those belong to the Scheduler (§2.5).
+
+Per message type (§4.3/§5):
   - ping   → pong reply (optional instance_id targeting)
-  - cancel → insert cancel signal
-  - task   → idempotency check → atomic claim → run or enqueue/reject
+  - cancel → fold cancel_watermark (fire-and-forget, not enqueued) + poke
+  - task   → idempotency check → reject short-circuit → enqueue(policy) + poke
 
-One instance is shared per Consumer process.
+ACK happens after this returns (ack-at-ingest, §9.1): the DB commit inside each
+handler is the durability point, not Agent completion.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
+from typing import TYPE_CHECKING
 
-from app.consumer.agent_runner import AgentRunner
-from app.consumer.constants import (
-    ClaimResult,
-    MessageMode,
-    ProcessedStatus,
-    QueuePolicy,
-    ThreadStatus,
-)
+from app.consumer.constants import MessageMode, ThreadStatus
 from app.consumer.run_registry import RunRegistry
 from app.consumer.schemas import SchemaValidationError, TaskMessage
 from app.consumer.stream_bridge.mq import MQStreamBridge
+
+if TYPE_CHECKING:
+    from app.consumer.scheduler import Scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -36,53 +37,37 @@ _RESCUE_THREAD_ID_RE = re.compile(rb'"thread_id"\s*:\s*"([^"]{1,256})"')
 
 
 class TaskConsumer:
-    """Routes RocketMQ messages to the appropriate handler.
+    """Routes RocketMQ messages to ingest handlers (no execution, §2.6).
 
     Args:
         registry: Shared RunRegistry for all DB operations.
-        runner: AgentRunner that executes task messages.
-        bridge: MQStreamBridge for publishing replies (pong, error).
+        bridge: MQStreamBridge for publishing replies (pong, error, replay).
         instance_id: Stable identity for this Consumer process ("{hostname}-{pid}").
-        max_concurrent: Maximum simultaneous agent runs on this instance.
+        scheduler: Scheduler to poke after a commit lands new work (optional; when
+            None, ingest still lands rows and the Scheduler's periodic tick picks them up).
+        runner: Deprecated/ignored — accepted for backward-compatible construction only.
     """
 
     def __init__(
         self,
         registry: RunRegistry,
-        runner: AgentRunner,
         bridge: MQStreamBridge,
         instance_id: str,
-        max_concurrent: int = 10,
-        active_tasks: set[asyncio.Task] | None = None,
+        *,
+        scheduler: Scheduler | None = None,
+        runner: object | None = None,  # noqa: ARG002 — deprecated, ignored
     ) -> None:
         self._registry = registry
-        self._runner = runner
         self._bridge = bridge
         self._instance_id = instance_id
-        self._sem = asyncio.Semaphore(max_concurrent)
-        self._max_concurrent = max_concurrent
-        self._running_count = 0
-        self._active_tasks: set[asyncio.Task] = active_tasks if active_tasks is not None else set()
+        self._scheduler = scheduler
 
-    @property
-    def available_slots(self) -> int:
-        """Semaphore slots currently available (for poll-loop throttling)."""
-        return self._max_concurrent - self._running_count
+    def _poke(self) -> None:
+        if self._scheduler is not None:
+            self._scheduler.poke()
 
     async def shutdown(self, timeout: float = 30.0) -> None:
-        """Wait for all active agent run tasks to finish, then cancel stragglers.
-
-        Called during graceful shutdown before tearing down DB / MQ / checkpointer.
-        """
-        if not self._active_tasks:
-            return
-        logger.info("Waiting up to %.0fs for %d active agent run(s) to finish...", timeout, len(self._active_tasks))
-        _, pending = await asyncio.wait(self._active_tasks, timeout=timeout)
-        if pending:
-            logger.warning("Cancelling %d agent run(s) that did not finish in time", len(pending))
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+        """No-op in v2: ingest owns no in-flight runs (the Scheduler drains them, §2.6)."""
 
     # ── Public entry point ────────────────────────────────────────────────────
 
@@ -151,7 +136,7 @@ class TaskConsumer:
             if message.type == "ping":
                 await self._handle_ping(message)
             elif message.type == "cancel":
-                await self._handle_cancel(message, raw_envelope)
+                await self._handle_cancel(message)
             elif message.type == "task":
                 await self._handle_task(message, raw_envelope)
         except Exception as exc:
@@ -182,31 +167,28 @@ class TaskConsumer:
             await self._bridge.publish_pong(self._instance_id, echo=message.downlink_echo())
         logger.debug("Pong sent for ping message_id=%s target=%s", message.message_id, target)
 
-    async def _handle_cancel(self, message: TaskMessage, raw_envelope: dict) -> None:
-        """Enqueue a cancel row in thread_msg_queue with thread_msg_seq for ordering."""
-        inserted = await self._registry.enqueue_message(
-            message.thread_id,
-            message.message_id,
-            raw_envelope,
-            message.thread_msg_seq,
-            QueuePolicy.CANCEL,
+    async def _handle_cancel(self, message: TaskMessage) -> None:
+        """Fold cancel(seq=N) into cancel_watermark (fire-and-forget, not enqueued, §6.4/D2).
+
+        Idempotent: a redelivered cancel just re-folds GREATEST(watermark, same N). When the
+        fold clears a HIL gate, fold_cancel_watermark atomically synthesizes a drain row in
+        the same transaction (§6.5/I12), so we only need to poke afterwards.
+        """
+        synthesized = await self._registry.fold_cancel_watermark(
+            message.thread_id, message.thread_msg_seq
         )
-        if not inserted:
-            logger.info(
-                "Duplicate cancel message_id=%s already queued; skipping enqueue",
-                message.message_id,
-            )
-            return
+        self._poke()
         logger.info(
-            "Cancel enqueued thread=%s seq=%d message_id=%s",
+            "Cancel folded thread=%s watermark>=%d message_id=%s drain=%s",
             message.thread_id,
             message.thread_msg_seq,
             message.message_id,
+            synthesized,
         )
 
     async def _handle_task(self, message: TaskMessage, raw_envelope: dict) -> None:
-        """Main task routing: idempotency → reject-check → enqueue → try_dispatch."""
-        # ① Skip re-execution on duplicate delivery
+        """Idempotency → reject short-circuit → enqueue(derived policy) → poke (§5.3/§9.2)."""
+        # ① Skip re-execution on duplicate delivery; replay cached result if any.
         existing = await self._registry.check_processed(message.message_id)
         if existing is not None:
             logger.info(
@@ -218,7 +200,7 @@ class TaskConsumer:
                 await self._bridge.replay(existing.result_cache, echo=message.downlink_echo())
             return
 
-        # ② reject 模式快速短路：thread running + message_mode=reject → error + return
+        # ② reject mode fast short-circuit: thread running + message_mode=reject → AGENT_BUSY
         if message.message_mode == MessageMode.REJECT:
             state = await self._registry.get_thread_state(message.thread_id)
             if state and state.status == ThreadStatus.RUNNING:
@@ -235,130 +217,27 @@ class TaskConsumer:
                 )
                 return
 
-        # ③ steer degrades to followup for now
+        # ③ steer degrades to followup for now (§5.3)
         if message.message_mode == MessageMode.STEER:
             logger.info(
                 "Steer not yet implemented; degrading to followup for message_id=%s",
                 message.message_id,
             )
 
-        # ④ enqueue as followup (all task messages go to queue first)
+        # ④ enqueue with the policy derived once at ingest (fork > resume > collect > followup).
         inserted = await self._registry.enqueue_message(
             message.thread_id,
             message.message_id,
             raw_envelope,
             message.thread_msg_seq,
-            QueuePolicy.FOLLOWUP,
+            str(message.derived_policy),
         )
         if not inserted:
             logger.info(
-                "Duplicate message_id=%s already queued/current; skipping enqueue",
+                "Duplicate message_id=%s already queued; skipping enqueue (ACK only)",
                 message.message_id,
             )
             return
 
-        # ⑤ try to dispatch immediately if thread is idle and slots available
-        asyncio.create_task(
-            self._try_dispatch(message.thread_id),
-            name=f"dispatch-{message.message_id[:8]}",
-        )
-
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
-    async def _try_dispatch(self, thread_id: str) -> None:
-        """Attempt to dispatch the next queued task for a thread.
-
-        Called after every enqueue. Acquires a semaphore slot and claims the thread
-        only if the thread is idle; if running, _drain_and_release handles the chain.
-        """
-        if self._sem._value == 0:
-            return
-
-        pending = await self._registry.peek_thread_queue(
-            thread_id,
-            policies=(QueuePolicy.FOLLOWUP, QueuePolicy.CANCEL, QueuePolicy.PREFIX),
-        )
-        if not pending:
-            return
-
-        # cancel barrier: convert pre-cancel followups to prefix, notify upstream
-        cancel_idx = next(
-            (i for i, r in enumerate(pending) if r.policy == QueuePolicy.CANCEL), None
-        )
-        if cancel_idx is not None:
-            cancel_row = pending[cancel_idx]
-            tasks_before = [
-                r for r in pending[:cancel_idx]
-                if r.policy in (QueuePolicy.FOLLOWUP, QueuePolicy.PREFIX)
-            ]
-            if tasks_before:
-                await self._registry.convert_to_prefix(
-                    thread_id, [r.id for r in tasks_before]
-                )
-                for row in tasks_before:
-                    await self._bridge.publish_result(
-                        row.message_id,
-                        status=ProcessedStatus.CANCELLED,
-                        stream_events=False,
-                        echo={
-                            "message_id": row.message_id,
-                            "thread_id": thread_id,
-                            "thread_msg_seq": row.thread_msg_seq,
-                        },
-                    )
-            await self._registry.delete_queue_items(thread_id, [cancel_row.id])
-            asyncio.create_task(self._try_dispatch(thread_id))
-            return
-
-        followup_rows = [r for r in pending if r.policy == QueuePolicy.FOLLOWUP]
-        prefix_rows   = [r for r in pending if r.policy == QueuePolicy.PREFIX]
-        if not followup_rows:
-            return
-
-        next_row = followup_rows[0]
-
-        # Acquire slot, then claim the thread atomically
-        await self._sem.acquire()
-        self._running_count += 1
-        try:
-            result = await self._registry.claim_thread(
-                thread_id, self._instance_id, next_row.message_id, next_row.thread_msg_seq
-            )
-            if result == ClaimResult.RUNNING:
-                # Another instance or _drain_and_release already holds the thread
-                self._running_count -= 1
-                self._sem.release()
-                return
-            await self._registry.upsert_current_msg(
-                thread_id, next_row.message_id, next_row.body, next_row.thread_msg_seq
-            )
-            await self._registry.delete_queue_items(
-                thread_id, [next_row.id] + [r.id for r in prefix_rows]
-            )
-        except Exception:
-            self._running_count -= 1
-            self._sem.release()
-            raise
-
-        # TODO: merge prefix_rows messages into next_task input for full prefix context
-        next_task = TaskMessage.from_json(json.dumps(next_row.body))
-        task = asyncio.create_task(
-            self._run_and_release(next_task),
-            name=f"run-{next_row.message_id[:8]}",
-        )
-        self._active_tasks.add(task)
-        task.add_done_callback(self._active_tasks.discard)
-        logger.info(
-            "Dispatched thread=%s message_id=%s task=%s",
-            thread_id,
-            next_row.message_id,
-            task.get_name(),
-        )
-
-    async def _run_and_release(self, message: TaskMessage) -> None:
-        """Wrapper that releases the semaphore after the run finishes."""
-        try:
-            await self._runner.run(message)
-        finally:
-            self._running_count -= 1
-            self._sem.release()
+        # ⑤ poke the Scheduler so the new row is claimed without waiting for the next tick.
+        self._poke()

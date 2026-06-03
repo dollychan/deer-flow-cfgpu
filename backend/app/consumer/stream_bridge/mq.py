@@ -25,9 +25,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from deerflow.runtime.stream_bridge.base import StreamBridge, StreamEvent
-
 from app.consumer.schemas import ReplyConfig
+from deerflow.runtime.stream_bridge.base import StreamBridge, StreamEvent
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +50,7 @@ _SUPPRESSED_EVENTS = frozenset({"metadata", "end"})
 
 
 class MQStreamBridge(StreamBridge):
-    """Publishes LangGraph stream events as MQ protocol v2.3 messages.
+    """Publishes LangGraph stream events as MQ protocol v2.5 messages.
 
     Each publish call wraps the LangGraph event in a progress envelope and
     sends it to the result topic.  Result and error envelopes are sent via
@@ -88,7 +87,7 @@ class MQStreamBridge(StreamBridge):
     async def publish(self, run_id: str, event: str, data: Any) -> None:
         """Publish a single LangGraph stream event as a progress MQ message.
 
-        Filtering rules (per MQ protocol v2.3):
+        Filtering rules (per MQ protocol v2.5):
           - metadata and end events are suppressed.
           - All events are suppressed when reply_config.stream_events=False.
           - Events not in reply_config.stream_event_types are suppressed.
@@ -148,13 +147,16 @@ class MQStreamBridge(StreamBridge):
         *,
         status: str,
         stream_events: bool,
+        checkpoint_id: str | None = None,
         echo: dict | None = None,
         final_state: dict | None = None,
         usage: dict | None = None,
     ) -> None:
         """Publish the terminal result envelope for a task run.
 
-        Protocol rules:
+        Protocol rules (v2.5):
+          - checkpoint_id: this run's terminal LangGraph checkpoint, carried for *all*
+            statuses (success / cancelled / paused_for_approval) as the fork anchor.
           - stream_events=True: omit final_state (client already has full stream).
           - stream_events=False: include final_state in the payload.
           - echo: explicit echo dict for tasks that were never registered via register_run.
@@ -162,7 +164,7 @@ class MQStreamBridge(StreamBridge):
         ctx = self._runs.get(run_id)
         _echo = echo if echo is not None else (ctx.echo if ctx else {})
 
-        payload: dict[str, Any] = {"status": status}
+        payload: dict[str, Any] = {"status": status, "checkpoint_id": checkpoint_id}
         if usage:
             payload["usage"] = usage
         if not stream_events and final_state is not None:
@@ -183,11 +185,15 @@ class MQStreamBridge(StreamBridge):
         message: str = "",
         retriable: bool = False,
         node: str | None = None,
+        checkpoint_id: str | None = None,
     ) -> None:
         """Publish an error envelope for a task run.
 
         Error codes: AGENT_TIMEOUT | TOOL_FAILED | QUOTA_EXCEEDED |
                      INTERNAL_ERROR | AGENT_BUSY | INVALID_SCHEMA
+
+        checkpoint_id (when the run produced a checkpoint before failing) is carried at
+        payload level — same anchor as result — so a failed run can still be forked from.
         """
         ctx = self._runs.get(echo.get("message_id", ""))
 
@@ -197,9 +203,13 @@ class MQStreamBridge(StreamBridge):
         if node:
             error["node"] = node
 
+        payload: dict[str, Any] = {"error": error}
+        if checkpoint_id is not None:
+            payload["checkpoint_id"] = checkpoint_id
+
         await self._send(self._build_envelope(
             type="error",
-            payload={"error": error},
+            payload=payload,
             seq=ctx.seq if ctx else 0,
             echo=echo,
         ))
@@ -237,12 +247,19 @@ class MQStreamBridge(StreamBridge):
             ))
             seq += 1
 
-        # Terminal envelope: error or result.
+        # Terminal envelope: error or result. checkpoint_id (fork anchor) rides along
+        # for both — result always carries it (v2.5), error only when one was captured.
+        checkpoint_id = result_cache.get("checkpoint_id")
         if "error" in result_cache:
             terminal_payload: dict[str, Any] = {"error": result_cache["error"]}
+            if checkpoint_id is not None:
+                terminal_payload["checkpoint_id"] = checkpoint_id
             terminal_type = "error"
         else:
-            terminal_payload = {"status": result_cache.get("status", "success")}
+            terminal_payload = {
+                "status": result_cache.get("status", "success"),
+                "checkpoint_id": checkpoint_id,
+            }
             if "usage" in result_cache:
                 terminal_payload["usage"] = result_cache["usage"]
             if not result_cache.get("stream_events", True) and "final_state" in result_cache:
@@ -287,7 +304,7 @@ class MQStreamBridge(StreamBridge):
         dt = datetime.now(UTC)
         timestamp = dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
         envelope: dict = {
-            "schema_version": "2.4",
+            "schema_version": "2.5",
             "message_id": echo.get("message_id", ""),
             "message_seq": seq,
             "thread_msg_seq": echo.get("thread_msg_seq", 0),
@@ -298,6 +315,7 @@ class MQStreamBridge(StreamBridge):
         for key in ("agent_name", "user_id", "project_id"):
             if echo.get(key):
                 envelope[key] = echo[key]
+        envelope["bizType"] = echo.get("bizType") or "agent_task"
         envelope["payload"] = payload
         return envelope
 

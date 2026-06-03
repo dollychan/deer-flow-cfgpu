@@ -10,8 +10,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.consumer.constants import QueuePolicy
 from app.consumer.schemas import SchemaValidationError, TaskMessage
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -84,6 +84,31 @@ def _resume_envelope(**overrides) -> dict:
     return base
 
 
+def _fork_envelope(*, command: bool = False, **fork_fields) -> dict:
+    """A fork-init task: config.fork set; messages (default) or command payload."""
+    fork = {"parent_thread_id": "t_parent", "fork_checkpoint_id": "ckpt-1"}
+    fork.update(fork_fields)
+    if command:
+        payload = {
+            "messages": None,
+            "command": {"update": {"tool_approvals": {"call_x": {"status": "approved"}}}},
+            "config": {"ask": True, "fork": fork},
+        }
+    else:
+        payload = {
+            "messages": [{"role": "user", "content": "继续"}],
+            "command": None,
+            "config": {"fork": fork},
+        }
+    return {
+        "schema_version": "2.5",
+        "message_id": "msg-fork-1",
+        "type": "task",
+        "thread_id": "t_branch",
+        "payload": payload,
+    }
+
+
 # ---------------------------------------------------------------------------
 # TaskMessage._validate_raw — valid envelopes
 # ---------------------------------------------------------------------------
@@ -124,6 +149,35 @@ class TestValidEnvelopes:
         ]
         msg = TaskMessage.from_dict(env)
         assert isinstance(msg.messages[0].content, list)
+
+
+# ---------------------------------------------------------------------------
+# bizType — envelope-level global message type (v2.5)
+# ---------------------------------------------------------------------------
+
+
+class TestBizType:
+    def test_parsed_from_envelope(self):
+        msg = TaskMessage.from_dict(_task_envelope(bizType="custom_biz"))
+        assert msg.biz_type == "custom_biz"
+
+    def test_defaults_to_agent_task_when_absent(self):
+        env = _task_envelope()
+        env.pop("bizType", None)
+        assert TaskMessage.from_dict(env).biz_type == "agent_task"
+
+    def test_empty_string_defaults_to_agent_task(self):
+        assert TaskMessage.from_dict(_task_envelope(bizType="")).biz_type == "agent_task"
+
+    def test_echoed_to_downlink(self):
+        echo = TaskMessage.from_dict(_task_envelope(bizType="custom_biz")).downlink_echo()
+        assert echo["bizType"] == "custom_biz"
+
+    def test_downlink_echo_default(self):
+        env = _task_envelope()
+        env.pop("bizType", None)
+        echo = TaskMessage.from_dict(env).downlink_echo()
+        assert echo["bizType"] == "agent_task"
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +303,95 @@ class TestTaskPayloadValidationErrors:
             },
             "tool_approvals",
         )
+
+
+# ---------------------------------------------------------------------------
+# config.fork parsing (§7.4)
+# ---------------------------------------------------------------------------
+
+
+class TestForkParsing:
+    def test_normal_task_is_not_fork(self):
+        msg = TaskMessage.from_dict(_task_envelope())
+        assert msg.is_fork is False
+        assert msg.fork is None
+        assert msg.parent_thread_id is None
+        assert msg.fork_checkpoint_id is None
+
+    def test_fork_fields_exposed(self):
+        msg = TaskMessage.from_dict(_fork_envelope())
+        assert msg.is_fork is True
+        assert msg.parent_thread_id == "t_parent"
+        assert msg.fork_checkpoint_id == "ckpt-1"
+
+    def test_fork_checkpoint_optional(self):
+        env = _fork_envelope()
+        del env["payload"]["config"]["fork"]["fork_checkpoint_id"]
+        msg = TaskMessage.from_dict(env)
+        assert msg.parent_thread_id == "t_parent"
+        assert msg.fork_checkpoint_id is None  # None = parent latest leaf
+
+
+# ---------------------------------------------------------------------------
+# derived_policy precedence: fork > command(resume) > collect > followup (§4.3/§5.3)
+# ---------------------------------------------------------------------------
+
+
+class TestDerivedPolicy:
+    def test_plain_task_is_followup(self):
+        assert TaskMessage.from_dict(_task_envelope()).derived_policy == QueuePolicy.FOLLOWUP
+
+    def test_collect_mode(self):
+        env = _task_envelope()
+        env["payload"]["config"] = {"message_mode": "collect"}
+        assert TaskMessage.from_dict(env).derived_policy == QueuePolicy.COLLECT
+
+    def test_steer_degrades_to_followup(self):
+        # §5.3: steer maps to followup until InjectMiddleware lands.
+        env = _task_envelope()
+        env["payload"]["config"] = {"message_mode": "steer"}
+        assert TaskMessage.from_dict(env).derived_policy == QueuePolicy.FOLLOWUP
+
+    def test_resume_command(self):
+        assert TaskMessage.from_dict(_resume_envelope()).derived_policy == QueuePolicy.RESUME
+
+    def test_fork_beats_command(self):
+        # Hard constraint: HIL multi-branch fork-init carries both fork and command;
+        # fork must win or orphan-resume would kill it (§4.3).
+        msg = TaskMessage.from_dict(_fork_envelope(command=True))
+        assert msg.is_resume is True  # command present
+        assert msg.derived_policy == QueuePolicy.FORK
+
+    def test_fork_with_messages(self):
+        assert TaskMessage.from_dict(_fork_envelope()).derived_policy == QueuePolicy.FORK
+
+
+# ---------------------------------------------------------------------------
+# fork validation
+# ---------------------------------------------------------------------------
+
+
+class TestForkValidation:
+    def test_fork_missing_parent_thread_id(self):
+        env = _fork_envelope()
+        del env["payload"]["config"]["fork"]["parent_thread_id"]
+        with pytest.raises(SchemaValidationError) as exc:
+            TaskMessage.from_dict(env)
+        assert "parent_thread_id" in exc.value.reason
+
+    def test_fork_not_object(self):
+        env = _task_envelope()
+        env["payload"]["config"] = {"fork": "bad"}
+        with pytest.raises(SchemaValidationError) as exc:
+            TaskMessage.from_dict(env)
+        assert "fork" in exc.value.reason
+
+    def test_config_not_object(self):
+        env = _task_envelope()
+        env["payload"]["config"] = "bad"
+        with pytest.raises(SchemaValidationError) as exc:
+            TaskMessage.from_dict(env)
+        assert "config" in exc.value.reason
 
 
 # ---------------------------------------------------------------------------

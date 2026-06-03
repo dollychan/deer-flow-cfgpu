@@ -366,7 +366,8 @@ def _build_middlewares(
     # after_model ordering below.
     from deerflow.agents.middlewares.message_stream_middleware import MessageStreamMiddleware
 
-    middlewares.append(MessageStreamMiddleware())
+    visibility_patterns = list(agent_config.tool_visibility.items()) if agent_config and agent_config.tool_visibility else None
+    middlewares.append(MessageStreamMiddleware(visibility_patterns=visibility_patterns))
 
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider
     # safety-terminated the response. Appended after HumanApprovalMiddleware so

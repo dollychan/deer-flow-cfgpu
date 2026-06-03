@@ -66,21 +66,39 @@ async def present_urls_tool(
     thread_id = _get_thread_id(runtime) or "unknown"
 
     resolved: list[str] = []
+    items: list[dict] = []
     for url, expires_str in zip(urls, expires_at_list):
         if uploader is None:
             resolved.append(url)
+            items.append({"ref": url, "kind": "url", "expires_at": expires_str})
             continue
         try:
             expires_at = datetime.fromisoformat(expires_str) if expires_str else None
             final_url = await uploader.handle_remote_url(url, expires_at, thread_id)
             resolved.append(final_url)
+            # When re-uploaded to OSS, the original expiry no longer applies and the
+            # new presigned expiry is not returned by handle_remote_url, so report null.
+            reuploaded = final_url != url
+            items.append({"ref": final_url, "kind": "url", "expires_at": None if reuploaded else expires_str})
         except Exception:
             logger.warning("present_urls: failed to handle %s, using original URL", url, exc_info=True)
             resolved.append(url)
+            items.append({"ref": url, "kind": "url", "expires_at": expires_str})
 
     return Command(
         update={
             "artifacts": resolved,
-            "messages": [ToolMessage("Successfully presented URLs", tool_call_id=tool_call_id)],
+            "messages": [
+                ToolMessage(
+                    "Successfully presented URLs",
+                    tool_call_id=tool_call_id,
+                    artifact={"items": items},
+                )
+            ],
         },
     )
+
+
+# Client-facing visibility for MessageStreamMiddleware: this tool's output is a
+# final deliverable, emitted as an `artifact` event (carrying ToolMessage.artifact).
+present_urls_tool.metadata = {"visibility": "artifact"}

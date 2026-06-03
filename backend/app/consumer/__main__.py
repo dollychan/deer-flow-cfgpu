@@ -32,7 +32,6 @@ Requirements:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import signal
@@ -45,16 +44,16 @@ from typing import Any
 # thread_msg_queue, processed_messages) into Base.metadata so that create_all()
 # creates them alongside the core deerflow tables.
 import app.consumer.models  # noqa: F401
-
+from app.consumer.agent_runner import AgentRunner
+from app.consumer.constants import ProcessedStatus
+from app.consumer.outbox import OutboxProducer
+from app.consumer.run_registry import RunRegistry
+from app.consumer.scheduler import Scheduler
+from app.consumer.stream_bridge.mq import MQStreamBridge
+from app.consumer.task_consumer import TaskConsumer
 from deerflow.config.app_config import get_app_config
 from deerflow.persistence import close_engine, get_session_factory, init_engine_from_config
 from deerflow.runtime.checkpointer import make_checkpointer
-
-from app.consumer.agent_runner import AgentRunner
-from app.consumer.run_registry import RunRegistry
-from app.consumer.schemas import TaskMessage
-from app.consumer.stream_bridge.mq import MQStreamBridge
-from app.consumer.task_consumer import TaskConsumer
 
 logger = logging.getLogger(__name__)
 
@@ -171,19 +170,21 @@ async def _instance_heartbeat_loop(registry: RunRegistry, instance_id: str, inte
 
 async def _stale_run_watchdog(
     registry: RunRegistry,
-    runner: AgentRunner,
+    scheduler: Scheduler,
     instance_id: str,
     interval: int = 30,
     timeout_seconds: int = 60,
     max_retries: int = 3,
 ) -> None:
-    """Detect and recover stale running threads from dead Consumer instances.
+    """Detect and recover stale running threads from dead Consumer instances (design §8).
 
+    The watchdog only resets state — it never runs the graph itself; a normal sem-gated
+    Scheduler claim picks the reset thread up and LangGraph resumes from its checkpoint.
     For each stale run (both run heartbeat and owning instance heartbeat expired):
-      - If already in processed_messages → trigger drain (followup) or mark idle.
-      - If retry_count < max_retries → claim_stale_run + AgentRunner.run() from
-        LangGraph checkpoint; LangGraph resumes from the exact breakpoint.
-      - If retry_count >= max_retries → publish FATAL error and mark thread idle.
+      - already in processed_messages → finalize_run closes out the batch idempotently;
+      - retry_count >= max_retries → finalize_run(failed) (FATAL goes to the outbox, §8);
+      - otherwise → requeue_stale_run flips the batch back to pending + thread idle.
+    All paths poke the Scheduler so an idle peer re-claims promptly.
     """
     while True:
         await asyncio.sleep(interval)
@@ -198,73 +199,40 @@ async def _stale_run_watchdog(
                     row.retry_count,
                 )
 
-                # Already completed before crash — clean up and drain followups
+                # Completed before crash — idempotent batch close-out (deletes rows + idle).
                 processed = await registry.check_processed(row.message_id)
                 if processed is not None:
-                    logger.info(
-                        "Stale run already completed (status=%s) thread=%s; triggering drain",
-                        processed.status,
-                        row.thread_id,
-                    )
-                    await runner.trigger_drain(row.thread_id)
+                    await registry.finalize_run(row.message_id, None, processed.status)
+                    scheduler.poke()
                     continue
 
-                # Exceeded retry budget — publish fatal and abandon
+                # Exceeded retry budget — FATAL terminal via outbox (§8), never direct publish.
                 if row.retry_count >= max_retries:
                     logger.error(
-                        "Stale run exceeded max_retries=%d thread=%s; publishing FATAL error",
+                        "Stale run exceeded max_retries=%d thread=%s; FATAL via outbox",
                         max_retries,
                         row.thread_id,
                     )
-                    await runner.publish_fatal_error(
-                        row.message_id,
-                        row.thread_id,
-                        f"Agent crashed repeatedly; giving up after {max_retries} retries",
-                    )
-                    await registry.mark_thread_idle(row.thread_id)
+                    fatal = {
+                        "error": {
+                            "code": "INTERNAL_ERROR",
+                            "retriable": False,
+                            "message": f"Agent crashed repeatedly; giving up after {max_retries} retries",
+                        }
+                    }
+                    await registry.finalize_run(row.message_id, fatal, str(ProcessedStatus.FAILED))
+                    scheduler.poke()
                     continue
 
-                # Compete for ownership (multi-Consumer: only one watchdog wins)
-                claimed = await registry.claim_stale_run(row.thread_id, instance_id)
-                if not claimed:
+                # Reset back into the claim pool (multi-instance: only one watchdog wins).
+                if await registry.requeue_stale_run(row.thread_id):
                     logger.info(
-                        "Stale run already reclaimed by another instance: thread=%s",
+                        "Stale run reset to pending thread=%s (attempt %d/%d)",
                         row.thread_id,
+                        row.retry_count + 1,
+                        max_retries,
                     )
-                    continue
-
-                current = await registry.get_current_msg(row.thread_id)
-                if current is None:
-                    logger.warning(
-                        "No current msg for stale run thread=%s; marking idle",
-                        row.thread_id,
-                    )
-                    await registry.mark_thread_idle(row.thread_id)
-                    continue
-
-                await registry.increment_retry_count(row.thread_id)
-                try:
-                    message = TaskMessage.from_json(json.dumps(current.body))
-                except Exception as exc:
-                    logger.error(
-                        "Failed to reconstruct TaskMessage for stale retry thread=%s: %s",
-                        row.thread_id,
-                        exc,
-                    )
-                    await registry.mark_thread_idle(row.thread_id)
-                    continue
-
-                logger.info(
-                    "Retrying stale run thread=%s message=%s (attempt %d/%d)",
-                    row.thread_id,
-                    row.message_id,
-                    row.retry_count + 1,
-                    max_retries,
-                )
-                asyncio.create_task(
-                    runner.run(message),
-                    name=f"stale-retry-{row.message_id[:8]}",
-                )
+                    scheduler.poke()
         except Exception:
             logger.debug("Stale run watchdog error", exc_info=True)
 
@@ -344,14 +312,23 @@ async def main() -> None:
         bridge = MQStreamBridge(producer_adapter, result_topic=consumer_cfg.result_topic)
         active_tasks: set[asyncio.Task] = set()
         runner = AgentRunner(registry, bridge, checkpointer, config, task_registry=active_tasks)
-        task_consumer = TaskConsumer(
+        # v2 layering (§2.5/§2.6): Scheduler owns claim + dispatch; ingest only lands + pokes.
+        scheduler = Scheduler(
             registry,
             runner,
+            instance_id,
+            max_concurrent_runs=consumer_cfg.max_concurrent_runs,
+            task_registry=active_tasks,
+        )
+        task_consumer = TaskConsumer(
+            registry,
             bridge,
             instance_id,
-            max_concurrent=consumer_cfg.max_concurrent_runs,
-            active_tasks=active_tasks,
+            scheduler=scheduler,
         )
+        # Transactional outbox producer (§9.3): re-publishes undelivered terminal rows
+        # (crash-before-publish, MQ outage, cancel-barrier cancelled) with at-least-once.
+        outbox = OutboxProducer(registry, bridge)
 
         # 7. Build single RocketMQ consumer (all message types on one topic)
         def _make_filter(tag: str) -> FilterExpression:
@@ -379,30 +356,38 @@ async def main() -> None:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, stop_event.set)
 
-        # 9. Start background tasks
-        bg_tasks = [
-            asyncio.create_task(
-                _instance_heartbeat_loop(registry, instance_id),
-                name="instance-heartbeat",
+        # 9. Start background tasks (kept as named handles so shutdown can stop them in
+        #    the draining-first order of §4.1/#4 — not all-at-once).
+        heartbeat_task = asyncio.create_task(
+            _instance_heartbeat_loop(registry, instance_id),
+            name="instance-heartbeat",
+        )
+        watchdog_task = asyncio.create_task(
+            _stale_run_watchdog(registry, scheduler, instance_id),
+            name="stale-run-watchdog",
+        )
+        scheduler_task = asyncio.create_task(
+            scheduler.run_loop(stop_event),
+            name="scheduler",
+        )
+        poll_task = asyncio.create_task(
+            _poll_loop(
+                mq_task_consumer,
+                task_consumer,
+                executor,
+                batch_size=consumer_cfg.poll_batch_size,
+                invisible_duration=consumer_cfg.invisible_duration_seconds,
+                stop_event=stop_event,
             ),
-            asyncio.create_task(
-                _stale_run_watchdog(registry, runner, instance_id),
-                name="stale-run-watchdog",
-            ),
-            asyncio.create_task(
-                _poll_loop(
-                    mq_task_consumer,
-                    task_consumer,
-                    executor,
-                    batch_size=consumer_cfg.poll_batch_size,
-                    invisible_duration=consumer_cfg.invisible_duration_seconds,
-                    stop_event=stop_event,
-                ),
-                name="poll-loop",
-            ),
-        ]
+            name="poll-loop",
+        )
+        outbox_task = asyncio.create_task(
+            outbox.run_loop(stop_event),
+            name="outbox-producer",
+        )
+        maintenance_tasks = [heartbeat_task, watchdog_task, outbox_task]
         if consumer_cfg.processed_messages_ttl_days > 0:
-            bg_tasks.append(
+            maintenance_tasks.append(
                 asyncio.create_task(
                     _processed_messages_cleanup(registry, consumer_cfg.processed_messages_ttl_days),
                     name="processed-messages-cleanup",
@@ -419,25 +404,46 @@ async def main() -> None:
 
         # 10. Block until SIGTERM / SIGINT
         await stop_event.wait()
-        logger.info("Shutdown signal received, stopping poll loop...")
+        logger.info("Shutdown signal received; entering draining-first shutdown (§4.1/#4)")
 
-        # 11. Graceful shutdown — stop polls, then wait for in-flight agent runs
-        for task in bg_tasks:
+        # 11. Graceful shutdown — draining-first ordering (§4.1/#4):
+        #   ① mark draining BEFORE draining so the instance status reflects reality early;
+        #   ② stop accepting new work: poll-loop (ingest) + scheduler claim loop;
+        #   ③ drain in-flight runs (bounded) — heartbeat stays alive so a peer watchdog
+        #      does not false-positive our still-running runs as stale (§2.9);
+        #   ④ final outbox flush, then stop maintenance loops, then close MQ/producer;
+        #   ⑤ delete the instance row last.
+
+        # ① draining marker (proactive, before any teardown)
+        await registry.mark_instance_draining(instance_id)
+
+        # ② stop accepting new work (both already observe stop_event; cancel for promptness)
+        poll_task.cancel()
+        scheduler_task.cancel()
+        await asyncio.gather(poll_task, scheduler_task, return_exceptions=True)
+
+        # ③ drain in-flight runs (heartbeat + outbox still running)
+        await scheduler.drain_tasks(timeout=30.0)
+
+        # ④ flush any results the drained runs could not publish inline, then stop the
+        #    maintenance loops while the producer is still up.
+        try:
+            await outbox.drain_once()
+        except Exception:
+            logger.debug("final outbox flush failed", exc_info=True)
+        for task in maintenance_tasks:
             task.cancel()
-        await asyncio.gather(*bg_tasks, return_exceptions=True)
-
-        await task_consumer.shutdown(timeout=30.0)
+        await asyncio.gather(*maintenance_tasks, return_exceptions=True)
 
         mq_task_consumer.shutdown()
         logger.info("RocketMQ consumer shut down")
-
-        await registry.mark_instance_draining(instance_id)
-        await registry.delete_instance(instance_id)
-
         mq_producer.shutdown()
         logger.info("RocketMQ producer shut down")
-
         executor.shutdown(wait=False)
+
+        # ⑤ delete the instance row last (residual running rows, if any, are recovered by
+        #    a peer watchdog via ~instance_alive, §8).
+        await registry.delete_instance(instance_id)
 
     await close_engine()
     logger.info("Consumer %s shutdown complete", instance_id)

@@ -1,6 +1,6 @@
 """RocketMQ message schemas for the Consumer layer.
 
-Deserializes the MQ protocol envelope (v2.4) into typed dataclasses.
+Deserializes the MQ protocol envelope (v2.5) into typed dataclasses.
 All fields map 1-to-1 to the protocol spec in cfgpu-docs/MQ消息协议.md.
 """
 
@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+
+from app.consumer.constants import MessageMode, QueuePolicy
 
 # Uplink message types accepted from upstream (task topic + signals topic).
 UPLINK_TYPES: frozenset[str] = frozenset({"task", "cancel", "ping"})
@@ -78,7 +80,7 @@ class ReplyConfig:
 
 @dataclass
 class TaskMessage:
-    """Parsed MQ message envelope (schema_version 2.4).
+    """Parsed MQ message envelope (schema_version 2.5).
 
     Covers all three upstream message types: task, cancel, ping.
     For non-task types, payload fields (messages, command, config, reply_config)
@@ -104,6 +106,7 @@ class TaskMessage:
     user_id: str | None = None
     project_id: str | None = None
     thread_msg_seq: int = 0  # monotonic sequence within a thread; echoed to downlink
+    biz_type: str = "agent_task"  # global message type for the frontend; echoed to downlink
 
     # ── derived helpers ───────────────────────────────────────────────────────
 
@@ -113,6 +116,7 @@ class TaskMessage:
             "message_id": self.message_id,
             "thread_id": self.thread_id,
             "thread_msg_seq": self.thread_msg_seq,
+            "bizType": self.biz_type,
         }
         if self.agent_name and self.agent_name != "lead_agent":
             echo["agent_name"] = self.agent_name
@@ -131,6 +135,55 @@ class TaskMessage:
     def is_resume(self) -> bool:
         """True when this is a HIL resume message (command non-null)."""
         return self.command is not None
+
+    # ── fork (branch-init, §7.4) ───────────────────────────────────────────────
+
+    @property
+    def fork(self) -> dict | None:
+        """The ``config.fork`` object for branch-init, or None for a normal task.
+
+        Presence of ``parent_thread_id`` marks this task as fork-init: it does not
+        start a run on its own thread but first copies a checkpoint from the parent
+        thread onto this envelope's (new) thread_id, then executes (§7.4).
+        """
+        f = self.config.get("fork")
+        return f if isinstance(f, dict) else None
+
+    @property
+    def is_fork(self) -> bool:
+        """True when this task carries ``config.fork`` (branch-init)."""
+        return self.fork is not None
+
+    @property
+    def parent_thread_id(self) -> str | None:
+        """Source thread to fork from (``config.fork.parent_thread_id``)."""
+        f = self.fork
+        return f.get("parent_thread_id") if f else None
+
+    @property
+    def fork_checkpoint_id(self) -> str | None:
+        """Fork-point checkpoint in the parent thread; None = parent's latest leaf."""
+        f = self.fork
+        return f.get("fork_checkpoint_id") if f else None
+
+    @property
+    def derived_policy(self) -> QueuePolicy:
+        """Queue policy derived once at ingest (design §4.3/§5.3).
+
+        Precedence is a hard constraint: fork > command(resume) > message_mode.
+        fork must win over command because a HIL multi-branch fork-init carries
+        *both* ``config.fork`` and ``payload.command`` (the branch's approval
+        decision); judging command first would mis-route it to resume and the
+        orphan-resume path would kill it (§4.3). steer is currently degraded to
+        followup until InjectMiddleware lands (§5.3); reject is not enqueued.
+        """
+        if self.is_fork:
+            return QueuePolicy.FORK
+        if self.is_resume:
+            return QueuePolicy.RESUME
+        if self.message_mode == MessageMode.COLLECT:
+            return QueuePolicy.COLLECT
+        return QueuePolicy.FOLLOWUP
 
     @property
     def timeout_seconds(self) -> int | None:
@@ -233,6 +286,23 @@ class TaskMessage:
                     "payload.command.update.tool_approvals must be an object"
                 )
 
+        # config.fork — optional; when present must be an object with parent_thread_id.
+        # fork is orthogonal to the messages/command exclusion above: a HIL multi-branch
+        # fork-init legitimately carries fork *and* command (§7.4).
+        config = payload.get("config")
+        if config is not None and not isinstance(config, dict):
+            raise SchemaValidationError(
+                f"payload.config must be an object, got {type(config).__name__}"
+            )
+        fork = config.get("fork") if isinstance(config, dict) else None
+        if fork is not None:
+            if not isinstance(fork, dict):
+                raise SchemaValidationError("payload.config.fork must be an object")
+            if not fork.get("parent_thread_id"):
+                raise SchemaValidationError(
+                    "payload.config.fork.parent_thread_id is required for fork-init"
+                )
+
     # ── factory ───────────────────────────────────────────────────────────────
 
     @classmethod
@@ -251,7 +321,7 @@ class TaskMessage:
         if data.get("type") == "ping" and "instance_id" in payload:
             config["instance_id"] = payload["instance_id"]
         return cls(
-            schema_version=data.get("schema_version", "2.4"),
+            schema_version=data.get("schema_version", "2.5"),
             message_id=data["message_id"],
             message_seq=data.get("message_seq", 0),
             timestamp=data.get("timestamp", ""),
@@ -265,6 +335,7 @@ class TaskMessage:
             user_id=data.get("user_id"),
             project_id=data.get("project_id"),
             thread_msg_seq=data.get("thread_msg_seq", 0),
+            biz_type=data.get("bizType") or "agent_task",
         )
 
     @classmethod

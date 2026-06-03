@@ -14,20 +14,45 @@ from enum import StrEnum
 class ThreadStatus(StrEnum):
     IDLE = "idle"
     RUNNING = "running"
+    PAUSED = "paused"  # v2 (D3): HIL approval gate folded into thread_run_state.status (§4.2/4.5)
 
 
 class InstanceStatus(StrEnum):
     ACTIVE = "active"
     DRAINING = "draining"
-    DEAD = "dead"
+    DEAD = "dead"  # placeholder only; never written — "dead" is inferred from heartbeat timeout (§4.1/§8)
 
 
 class QueuePolicy(StrEnum):
-    CURRENT = "current"
+    """Scheduling role of a thread_msg_queue row (design §4.3).
+
+    v2 set: followup | collect | resume | prefix | steer | fork | drain.
+    Derived once at ingest from (config.fork, payload.command, message_mode),
+    fork taking precedence over command (§5.3); claim then routes by policy alone.
+    """
+
     FOLLOWUP = "followup"
-    CANCEL = "cancel"
-    PREFIX = "prefix"
-    STEER = "steer"
+    COLLECT = "collect"  # v2 (D5): trailing-edge debounce batch, claim-time strategy (§6.2.2)
+    RESUME = "resume"  # v2 (D5): HIL resume; claimable past earlier followups under paused (§6.3)
+    PREFIX = "prefix"  # cancel-covered pending kept as history context, merged into next run (§6.4)
+    STEER = "steer"  # reserved for InjectMiddleware; currently ingest maps steer→followup (§5.3)
+    FORK = "fork"  # v2 (fork): branch-init on a new thread; copy parent checkpoint first (§7.4)
+    DRAIN = "drain"  # v2 (drain): synthesized by cancel clearing a HIL gate; reject-resume to clean terminal (§6.5)
+
+    # ── deprecated (v1 only) — removed in Phase C once their readers are rewritten ──
+    CURRENT = "current"  # v1 crash-recovery anchor; v2 uses status='running' row instead (§4.3)
+    CANCEL = "cancel"  # v1 queued cancel signal; v2 cancel is a control message folded into cancel_watermark (§6.4)
+
+
+class QueueRowStatus(StrEnum):
+    """Lifecycle of a thread_msg_queue row (design §4.3, D5).
+
+    Replaces v1's consumed_at-NULL + policy='current' conventions.
+    """
+
+    PENDING = "pending"  # awaiting claim
+    RUNNING = "running"  # claimed and executing; holds the crash-recovery envelope
+    MERGED = "merged"  # folded into a sibling running row (collect batch / prefix history)
 
 
 class ProcessedStatus(StrEnum):
@@ -45,5 +70,7 @@ class MessageMode(StrEnum):
 
 
 class ClaimResult(StrEnum):
-    CLAIMED = "claimed"
-    RUNNING = "running"
+    CLAIMED = "claimed"  # candidate claimed; thread flipped to running
+    RUNNING = "running"  # thread already running on this/another instance
+    PAUSED_BLOCKED = "paused_blocked"  # v2: thread paused, candidate is not a resume → left queued (§6.3)
+    EMPTY = "empty"  # v2: no runnable candidate for this thread right now (§6.2)

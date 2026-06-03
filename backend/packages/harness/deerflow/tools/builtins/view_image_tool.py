@@ -3,6 +3,7 @@ import mimetypes
 from pathlib import Path
 from typing import Annotated
 
+from deerflow.tools.builtins.present_urls_tool import present_urls_tool
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
@@ -160,3 +161,7 @@ def view_image_tool(
     return Command(
         update={"viewed_images": new_viewed_images, "messages": [ToolMessage("Successfully read image", tool_call_id=tool_call_id)]},
     )
+
+# Client-facing visibility for MessageStreamMiddleware: this tool's output is a
+# final deliverable, emitted as an `artifact` event (carrying ToolMessage.artifact).
+view_image_tool.metadata = {"visibility": "artifact"}

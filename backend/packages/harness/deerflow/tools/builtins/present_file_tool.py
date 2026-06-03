@@ -91,6 +91,16 @@ def _virtual_to_physical(virtual_path: str, outputs_path: str) -> str:
     return str(Path(outputs_path).resolve() / relative)
 
 
+def _artifact_item(ref: str) -> dict:
+    """Build an artifact item, classifying ref as a fetchable URL or virtual path.
+
+    `kind="url"` (OSS presigned link) is fetched directly by the client;
+    `kind="path"` (virtual outputs path) is fetched via the artifacts API route.
+    """
+    kind = "url" if ref.startswith(("http://", "https://")) else "path"
+    return {"ref": ref, "kind": kind, "expires_at": None}
+
+
 @tool("present_files", parse_docstring=True)
 async def present_file_tool(
     runtime: Runtime,
@@ -131,7 +141,13 @@ async def present_file_tool(
         return Command(
             update={
                 "artifacts": normalized_paths,
-                "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)],
+                "messages": [
+                    ToolMessage(
+                        "Successfully presented files",
+                        tool_call_id=tool_call_id,
+                        artifact={"items": [_artifact_item(p) for p in normalized_paths]},
+                    )
+                ],
             },
         )
 
@@ -153,6 +169,17 @@ async def present_file_tool(
     return Command(
         update={
             "artifacts": resolved,
-            "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)],
+            "messages": [
+                ToolMessage(
+                    "Successfully presented files",
+                    tool_call_id=tool_call_id,
+                    artifact={"items": [_artifact_item(r) for r in resolved]},
+                )
+            ],
         },
     )
+
+
+# Client-facing visibility for MessageStreamMiddleware: presented files are final
+# deliverables, emitted as an `artifact` event (carrying ToolMessage.artifact).
+present_file_tool.metadata = {"visibility": "artifact"}

@@ -1,10 +1,15 @@
-"""AgentRunner — drives LangGraph execution and publishes events to MQ.
+"""AgentRunner — drives LangGraph execution and publishes events to MQ (v2, design §7).
 
 Replaces deerflow's run_agent / worker.py in Consumer mode:
-  - Input  : TaskMessage from RocketMQ (not an HTTP RunRecord)
-  - Output : MQStreamBridge → $AGENT_RESULTS topic
-  - Cancel : DB-polled cancel watcher (same asyncio.Task.cancel() mechanism)
-  - Drain  : _drain_and_release chains followup runs without polling
+  - Input  : ClaimedRun from the Scheduler (not an HTTP RunRecord, not a raw TaskMessage)
+  - Output : MQStreamBridge → $AGENT_RESULTS topic (progress best-effort)
+  - Terminal: finalize_run / finalize_paused close out the whole batch (§7.3/§6.5)
+  - Cancel : cancel_watcher reads thread_run_state.cancel_watermark (§7.1)
+  - Fork   : fork_init copies the parent checkpoint before building the graph (§7.4)
+  - Drain  : reject-resume a cancel-orphaned interrupt to a clean terminal (§6.5)
+
+The AgentRunner never claims and never folds watermarks — the Scheduler claims, the
+ingest layer folds. It only executes one ClaimedRun end-to-end.
 """
 
 from __future__ import annotations
@@ -12,23 +17,27 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import defaultdict
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from app.consumer.constants import ProcessedStatus, QueuePolicy
+from app.consumer.run_registry import ClaimedRun, RunRegistry
+from app.consumer.schemas import ContentItem, TaskMessage, UserMessage
+from app.consumer.stream_bridge.mq import MQStreamBridge
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
 
-from app.consumer.constants import ProcessedStatus, QueuePolicy
-from app.consumer.run_registry import RunRegistry
-from app.consumer.schemas import ContentItem, TaskMessage, UserMessage
-from app.consumer.stream_bridge.mq import MQStreamBridge
-
 logger = logging.getLogger(__name__)
+
+# LangGraph's RESUME pending-write channel (== langgraph.constants.RESUME). Hardcoded to
+# the stable channel name so fork_init does not import the now-private constant (§7.4).
+_RESUME_CHANNEL = "__resume__"
 
 
 class AgentRunner:
-    """Executes one agent run per TaskMessage, publishing events via MQStreamBridge.
+    """Executes one ClaimedRun per call, publishing events via MQStreamBridge.
 
     One instance is shared per Consumer process; concurrent runs are separate
     asyncio Tasks, each with their own local state.
@@ -46,112 +55,148 @@ class AgentRunner:
         self._bridge = bridge
         self._checkpointer = checkpointer
         self._app_config = app_config
-        self._task_registry = task_registry  # shared with TaskConsumer._active_tasks
+        self._task_registry = task_registry  # shared with the Scheduler's in-flight set
 
     # ── Public entry point ────────────────────────────────────────────────────
 
-    async def run(self, message: TaskMessage) -> None:
-        """Execute a task message end-to-end.
+    async def run(self, claimed: ClaimedRun) -> None:
+        """Execute a claimed run end-to-end (design §7).
 
-        Designed to be fired as asyncio.create_task() — does not raise.
-        All exceptions are caught, logged, and published as MQ error messages.
+        Designed to be fired as asyncio.create_task() — does not raise. All exceptions
+        are caught, logged, published as MQ error messages, and closed out via finalize.
         """
-        thread_id = message.thread_id
-        run_id = message.message_id
-        current_task_seq = message.thread_msg_seq
+        # drain is internal housekeeping: no register_run, no downlink, no message_seq (§6.5).
+        if claimed.policy == QueuePolicy.DRAIN.value:
+            await self._run_drain(claimed)
+            return
+
+        thread_id = claimed.thread_id
+        run_id = claimed.message_id
+        seq = claimed.seq
         runner_task = asyncio.current_task()
 
-        self._bridge.register_run(run_id, message.reply_config, echo=message.downlink_echo())
+        message = self._build_run_message(claimed)
 
+        self._bridge.register_run(run_id, message.reply_config, echo=message.downlink_echo())
         heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(thread_id, interval=10),
             name=f"heartbeat-{run_id[:8]}",
         )
         cancel_watcher_task = asyncio.create_task(
-            self._cancel_watcher(thread_id, current_task_seq, runner_task, poll_interval=2),
+            self._cancel_watcher(thread_id, seq, runner_task, poll_interval=2),
             name=f"cancel-watcher-{run_id[:8]}",
         )
 
+        agent: Any = None
+        runnable_config: RunnableConfig | None = None
         processed_status = ProcessedStatus.COMPLETED
         result_cache: dict | None = None
+        # Whether the inline (best-effort fast-path) terminal envelope was published.
+        # True ⟹ the run row can be marked delivered after finalize; False leaves it in
+        # the outbox for the producer loop to retry (§2.8/§9.3, E1).
+        downlink_sent = False
         try:
-            coro = self._execute(message, run_id)
+            # fork-init sentinel: copy the parent checkpoint before the graph runs (§7.4).
+            if claimed.policy == QueuePolicy.FORK.value:
+                await self._fork_init(message)
+
+            runnable_config = self._build_config(message, run_id)
+            agent = self._build_graph(runnable_config)
+
+            coro = self._execute(message, run_id, agent, runnable_config)
             if message.timeout_seconds:
                 is_paused, result_cache = await asyncio.wait_for(coro, timeout=message.timeout_seconds)
             else:
                 is_paused, result_cache = await coro
+            # _execute published the terminal envelope inline before returning (every
+            # return path is preceded by publish_result); a publish failure would have
+            # raised instead of returning, so a normal return ⟹ inline delivery ok.
+            downlink_sent = True
 
             if is_paused:
                 processed_status = ProcessedStatus.PAUSED_FOR_APPROVAL
 
         except asyncio.CancelledError:
             processed_status = ProcessedStatus.CANCELLED
-            # cancel barrier: convert any pending followups before this cancel to prefix,
-            # notify upstream, then delete the cancel row
-            cancel_row = await self._registry.find_cancel_after_seq(thread_id, current_task_seq)
-            if cancel_row:
-                followup_before = await self._registry.get_followup_before_seq(
-                    thread_id, cancel_row.thread_msg_seq
-                )
-                if followup_before:
-                    await self._registry.convert_to_prefix(
-                        thread_id, [r.id for r in followup_before]
-                    )
-                    for row in followup_before:
-                        await self._bridge.publish_result(
-                            row.message_id,
-                            status=ProcessedStatus.CANCELLED,
-                            stream_events=False,
-                            echo={
-                                "message_id": row.message_id,
-                                "thread_id": thread_id,
-                                "thread_msg_seq": row.thread_msg_seq,
-                            },
-                        )
-                await self._registry.delete_queue_items(thread_id, [cancel_row.id])
+            # cancelled runs still need a checkpoint_id (fork anchor, §7.4)
+            checkpoint_id = await self._safe_checkpoint_id(agent, runnable_config)
+            result_cache = {"status": ProcessedStatus.CANCELLED.value, "checkpoint_id": checkpoint_id}
             await self._bridge.publish_result(
                 run_id,
                 status=ProcessedStatus.CANCELLED,
                 stream_events=message.reply_config.stream_events,
+                checkpoint_id=checkpoint_id,
             )
-            result_cache = {"status": ProcessedStatus.CANCELLED}
+            downlink_sent = True  # set only after a successful publish (else producer retries)
 
-        except (asyncio.TimeoutError, TimeoutError):
+        except TimeoutError:
             processed_status = ProcessedStatus.FAILED
             timeout_msg = f"Agent execution timed out after {message.timeout_seconds}s"
+            checkpoint_id = await self._safe_checkpoint_id(agent, runnable_config)
+            result_cache = {
+                "error": {"code": "AGENT_TIMEOUT", "retriable": True, "message": timeout_msg},
+                "checkpoint_id": checkpoint_id,
+            }
             await self._bridge.publish_error(
                 "AGENT_TIMEOUT",
                 echo=message.downlink_echo(),
                 retriable=True,
                 message=timeout_msg,
+                checkpoint_id=checkpoint_id,
             )
-            result_cache = {"error": {"code": "AGENT_TIMEOUT", "retriable": True, "message": timeout_msg}}
+            downlink_sent = True
 
         except Exception as exc:
             processed_status = ProcessedStatus.FAILED
             logger.exception("Run %s failed: %s", run_id, exc)
             error_msg = str(exc)
+            checkpoint_id = await self._safe_checkpoint_id(agent, runnable_config)
+            result_cache = {
+                "error": {"code": "INTERNAL_ERROR", "retriable": False, "message": error_msg},
+                "checkpoint_id": checkpoint_id,
+            }
             await self._bridge.publish_error(
                 "INTERNAL_ERROR",
                 echo=message.downlink_echo(),
                 retriable=False,
                 message=error_msg,
+                checkpoint_id=checkpoint_id,
             )
-            result_cache = {"error": {"code": "INTERNAL_ERROR", "retriable": False, "message": error_msg}}
+            downlink_sent = True
 
         finally:
             cancel_watcher_task.cancel()
             heartbeat_task.cancel()
             self._bridge.unregister_run(run_id)
-            await self._registry.mark_processed(run_id, thread_id, processed_status, result_cache)
-            await self._registry.reset_retry_count(thread_id)
-            await self._drain_and_release(thread_id)
+            # Terminal close-out across the whole batch (§7.3/§6.5). finalize writes the
+            # outbox row (delivered=false); the inline publish above is the best-effort
+            # fast path. Carry the echo in result_cache so the outbox producer can rebuild
+            # a faithful downlink envelope from the persisted row alone (§2.8, E1).
+            if result_cache is not None:
+                result_cache.setdefault("echo", message.downlink_echo())
+            if processed_status == ProcessedStatus.PAUSED_FOR_APPROVAL:
+                closed = await self._registry.finalize_paused(run_id, result_cache)
+            else:
+                closed = await self._registry.finalize_run(run_id, result_cache, str(processed_status))
+            # Reconcile inline success → mark the outbox row delivered so the producer loop
+            # does not re-send (at-least-once; a missed mark just double-sends, deduped).
+            if closed and downlink_sent:
+                await self._registry.mark_delivered(run_id)
 
     # ── Core execution ────────────────────────────────────────────────────────
 
-    async def _execute(self, message: TaskMessage, run_id: str) -> tuple[bool, dict]:
-        """Run the agent graph; returns (is_paused, result_payload) where result_payload
-        mirrors the payload sent via publish_result for use as result_cache."""
+    async def _execute(
+        self,
+        message: TaskMessage,
+        run_id: str,
+        agent: Any,
+        runnable_config: RunnableConfig,
+    ) -> tuple[bool, dict]:
+        """Run the agent graph; returns (is_paused, result_cache).
+
+        result_cache mirrors the payload sent via publish_result and always carries
+        checkpoint_id for terminal states (fork anchor, §7.3/§7.4).
+        """
         # Auto-correct missing ask=True on HIL resume messages
         if message.is_resume and not message.config.get("ask"):
             await self._bridge.publish(
@@ -164,21 +209,31 @@ class AgentRunner:
                 },
             )
 
-        runnable_config = self._build_config(message, run_id)
-        agent = self._build_graph(runnable_config)
-
         if message.is_resume:
             from langgraph.types import Command as LGCommand
 
+            # Orphan resume (§6.5): resume landed on a thread with no pending interrupt
+            # (run already finished / late resume). Discard — do not feed Command(resume=).
+            if not await self._has_pending_interrupt(agent, runnable_config):
+                logger.info("Run %s: orphan resume (no pending approval); discarding", run_id)
+                checkpoint_id = await self._safe_checkpoint_id(agent, runnable_config)
+                await self._bridge.publish_result(
+                    run_id,
+                    status="success",
+                    stream_events=message.reply_config.stream_events,
+                    checkpoint_id=checkpoint_id,
+                )
+                return False, {
+                    "status": "success",
+                    "stream_events": message.reply_config.stream_events,
+                    "checkpoint_id": checkpoint_id,
+                    "warning": "no pending approval to resume; resume discarded",
+                }
             stream_input: Any = LGCommand(**message.command)
             logger.info("Run %s: HIL resume (command keys: %s)", run_id, list(message.command.keys()))
         else:
             stream_input = _normalize_messages(message.messages or [])
 
-        # Use client-requested event types as stream_mode so LangGraph only
-        # generates events that will actually be forwarded. When stream_events
-        # is disabled, use "values" as a minimal mode to drive graph execution
-        # without emitting any published events.
         rc = message.reply_config
         stream_mode: list[str] = (
             rc.stream_event_types if rc.stream_events and rc.stream_event_types else ["values"]
@@ -201,17 +256,17 @@ class AgentRunner:
             logger.debug("Run %s: could not inspect final state", run_id, exc_info=True)
             final_state = None
 
+        checkpoint_id = _checkpoint_id_of(final_state)
+
         if is_paused:
-            # Collect tool_approval_required payload for result_cache so that
-            # duplicate deliveries can replay the approval prompt to the client.
+            # Collect tool_approval_required payload for result_cache so duplicate
+            # deliveries / the approval audit can replay the prompt (§6.5).
             tool_approval_payload: dict | None = None
             for task in final_state.tasks or []:
                 for intr in task.interrupts or []:
                     v = getattr(intr, "value", None)
                     if isinstance(v, dict) and v.get("type") == "tool_approval_required":
                         tool_approval_payload = v
-                        # Ensure the event reaches upstream if the middleware
-                        # stream_writer dropped it before astream() yielded it.
                         if not v.get("sse_emitted"):
                             logger.info(
                                 "Run %s: re-publishing tool_approval_required (%d calls)",
@@ -224,18 +279,18 @@ class AgentRunner:
                 run_id,
                 status=ProcessedStatus.PAUSED_FOR_APPROVAL,
                 stream_events=message.reply_config.stream_events,
+                checkpoint_id=checkpoint_id,
             )
-            # Thread goes idle — HIL interrupt stored in LangGraph checkpoint.
-            # Resume message arrives as a new task and is claimed normally.
-            hil_cache: dict = {"status": ProcessedStatus.PAUSED_FOR_APPROVAL}
+            hil_cache: dict = {
+                "status": ProcessedStatus.PAUSED_FOR_APPROVAL.value,
+                "checkpoint_id": checkpoint_id,
+            }
             if tool_approval_payload is not None:
                 hil_cache["tool_approval_required"] = tool_approval_payload
             return True, hil_cache
 
-        rc = message.reply_config
-
         # Only serialize final_state for non-streaming clients; streaming clients
-        # already have all content via custom events and don't need the state dump.
+        # already have all content via custom events.
         final_state_data = None
         if final_state is not None and not rc.stream_events:
             from deerflow.runtime.serialization import serialize_channel_values
@@ -249,16 +304,101 @@ class AgentRunner:
             run_id,
             status="success",
             stream_events=rc.stream_events,
+            checkpoint_id=checkpoint_id,
             final_state=final_state_data,
         )
 
-        result_payload: dict = {"status": "success", "stream_events": rc.stream_events}
+        result_payload: dict = {
+            "status": "success",
+            "stream_events": rc.stream_events,
+            "checkpoint_id": checkpoint_id,
+        }
         if rc.stream_events:
-            # Store buffered custom events so duplicate deliveries can replay the stream.
             result_payload["events"] = self._bridge.get_buffered_events(run_id)
         elif final_state_data is not None:
             result_payload["final_state"] = final_state_data
         return False, result_payload
+
+    # ── Drain branch (§6.5) ────────────────────────────────────────────────────
+
+    async def _run_drain(self, claimed: ClaimedRun) -> None:
+        """Reject-resume a cancel-orphaned interrupt to a clean terminal (§6.5).
+
+        Produces no downlink and does not advance message_seq. aget_state reads the
+        interrupt's pending tool_call ids, then astream(Command(update={tool_approvals:
+        all rejected})) replays HumanApprovalMiddleware's reject path with no LLM call,
+        landing the checkpoint on a normal completed super-step. finalize_run's drain
+        branch then only deletes the drain row and returns the thread to idle.
+
+        Crash-idempotent: if the checkpoint already has no pending interrupt (already
+        drained on a prior attempt), finalize still just deletes the row + idle.
+        """
+        thread_id = claimed.thread_id
+        drain_id = claimed.message_id
+        try:
+            message = self._build_run_message(claimed)
+            runnable_config = self._build_config(message, drain_id)
+            agent = self._build_graph(runnable_config)
+            pending_ids = await self._pending_approval_ids(agent, runnable_config)
+            if pending_ids:
+                from langgraph.types import Command as LGCommand
+
+                approvals = {
+                    tid: {"status": "rejected", "reason": "cancelled"} for tid in pending_ids
+                }
+                async for _mode, _chunk in agent.astream(
+                    LGCommand(update={"tool_approvals": approvals}),
+                    config=runnable_config,
+                    stream_mode=["values"],
+                ):
+                    pass
+            else:
+                logger.info("Drain %s: no pending interrupt; already drained", thread_id)
+        except Exception:
+            logger.exception("Drain reject-resume failed thread=%s; finalizing anyway", thread_id)
+        await self._registry.finalize_run(drain_id, None, QueuePolicy.DRAIN.value)
+
+    # ── Thread Fork (§7.4) ──────────────────────────────────────────────────────
+
+    async def _fork_init(self, message: TaskMessage) -> None:
+        """Copy the parent checkpoint onto this (new) thread before the graph runs (§7.4).
+
+        Idempotent (I11): skips the copy when the new thread already has a checkpoint
+        (MQ redelivery / stale rerun). Strips RESUME pending-writes but keeps __interrupt__
+        so Command(resume=this branch's approvals) applies the branch decision freshly.
+        """
+        if self._checkpointer is None:
+            return
+        parent = message.parent_thread_id
+        if not parent:
+            return
+        new_tid = message.thread_id
+        new_cfg = {"configurable": {"thread_id": new_tid, "checkpoint_ns": ""}}
+
+        existing = await self._checkpointer.aget_tuple(new_cfg)
+        if existing is not None:
+            logger.info("fork_init: thread=%s already has checkpoint; skipping copy (I11)", new_tid)
+            return
+
+        src_cfg: dict = {"configurable": {"thread_id": parent, "checkpoint_ns": ""}}
+        if message.fork_checkpoint_id:
+            src_cfg["configurable"]["checkpoint_id"] = message.fork_checkpoint_id
+        src = await self._checkpointer.aget_tuple(src_cfg)
+        if src is None:
+            raise RuntimeError(
+                f"fork parent checkpoint not found: {parent}@{message.fork_checkpoint_id}"
+            )
+
+        clean = [w for w in (src.pending_writes or []) if w[1] != _RESUME_CHANNEL]
+        await self._checkpointer.aput(new_cfg, src.checkpoint, src.metadata, {})
+        by_task: dict[str, list[tuple[str, Any]]] = defaultdict(list)
+        for task_id, channel, value in clean:
+            by_task[task_id].append((channel, value))
+        for task_id, writes in by_task.items():
+            await self._checkpointer.aput_writes(new_cfg, writes, task_id)
+
+        if (message.fork or {}).get("copy_sandbox"):
+            logger.info("fork_init: copy_sandbox requested but not yet implemented (deferred)")
 
     # ── Public error publishing ───────────────────────────────────────────────
 
@@ -306,148 +446,103 @@ class AgentRunner:
         # Optional pass-through fields
         if task_cfg.get("model_name"):
             configurable["model_name"] = task_cfg["model_name"]
-        # subagent_enabled and reasoning_effort have no config.yaml global default;
-        # pass through only when the MQ message explicitly sets them.
         if task_cfg.get("subagent_enabled") is not None:
             configurable["subagent_enabled"] = task_cfg["subagent_enabled"]
         if task_cfg.get("reasoning_effort") is not None:
             configurable["reasoning_effort"] = task_cfg["reasoning_effort"]
 
-        # HIL resume: ensure ask=True so approval interrupts are active
+        # HIL resume / fork: ensure ask=True so approval interrupts are active
         if message.is_resume:
             configurable["ask"] = True
 
-        # Build runtime context — mirrors what worker.py's _build_runtime_context does for the
-        # Gateway path. Consumer bypasses worker.py entirely, so we must populate config["context"]
-        # ourselves. Without this, runtime.context is None/empty for all middleware and tool calls:
-        #   - sandbox_middleware.py  reads thread_id → per-thread sandbox
-        #   - memory_middleware.py   reads thread_id → correct memory association
-        #   - thread_data_middleware reads thread_id + run_id
-        #   - present_file_tool      reads thread_id
-        #   - resolve_runtime_user_id reads user_id  → per-user file isolation
-        #   - setup/update_agent     reads agent_name, user_id
         context: dict[str, Any] = {
-            # Always required — infrastructure keys
-            "thread_id":  message.thread_id,
-            "run_id":     run_id,
+            "thread_id": message.thread_id,
+            "run_id": run_id,
             "app_config": self._app_config,
         }
-        # Per-user isolation (memory, sandbox path, custom agents)
         if message.user_id:
             context["user_id"] = message.user_id
         if message.project_id:
             context["project_id"] = message.project_id
-        # Mirror all configurable keys that _CONTEXT_CONFIGURABLE_KEYS defines in services.py,
-        # so tools/middleware that read runtime.context see the same values as Gateway runs.
         for key in ("agent_name", "thinking_enabled", "is_plan_mode", "ask",
                     "web_search_enabled", "model_name", "subagent_enabled", "reasoning_effort"):
             if configurable.get(key) is not None:
                 context[key] = configurable[key]
-        # Per-request model preferences for cfgpu image/video tools
         if task_cfg.get("models"):
             context["models"] = task_cfg["models"]
 
-        # Inject Runtime so middleware/tools see runtime.context (reads from
-        # configurable["__pregel_runtime"], NOT from RunnableConfig(context=...)).
         from langgraph.runtime import Runtime
 
         configurable["__pregel_runtime"] = Runtime(context=context)
 
         return RunnableConfig(configurable=configurable)
 
-    # ── Drain-before-Idle ─────────────────────────────────────────────────────
+    # ── Run input reconstruction ────────────────────────────────────────────────
 
-    async def _drain_and_release(self, thread_id: str) -> None:
-        """After a run ends, drive the next queued followup or mark thread idle.
+    def _build_run_message(self, claimed: ClaimedRun) -> TaskMessage:
+        """Reconstruct the run's TaskMessage from a ClaimedRun's input bodies (§6.2.2/§6.4).
 
-        Processes cancel barriers before dispatching: followup rows before a cancel
-        are converted to prefix (preserving LLM context) and upstream is notified.
-        Naturally chains via each followup run's own finally block.
+        input_bodies = prefix history (cancel-covered) first, then the collect batch by seq
+        (candidate first). The candidate body is the run envelope template; for messages-based
+        runs the merged input is the flattened messages of prefix + entire batch.
         """
-        pending = await self._registry.peek_thread_queue(
-            thread_id,
-            policies=(QueuePolicy.FOLLOWUP, QueuePolicy.CANCEL, QueuePolicy.PREFIX),
-        )
+        prefix_count = len(claimed.prefix_message_ids)
+        bodies = claimed.input_bodies
+        prefix_bodies = bodies[:prefix_count]
+        batch_bodies = bodies[prefix_count:]
+        candidate_body = batch_bodies[0] if batch_bodies else bodies[-1]
+        message = TaskMessage.from_json(json.dumps(candidate_body))
 
-        # ── cancel barrier ────────────────────────────────────────────────────
-        cancel_idx = next(
-            (i for i, r in enumerate(pending) if r.policy == QueuePolicy.CANCEL), None
-        )
-        if cancel_idx is not None:
-            cancel_row = pending[cancel_idx]
-            tasks_before = [
-                r for r in pending[:cancel_idx]
-                if r.policy in (QueuePolicy.FOLLOWUP, QueuePolicy.PREFIX)
-            ]
-            if tasks_before:
-                await self._registry.convert_to_prefix(
-                    thread_id, [r.id for r in tasks_before]
-                )
-                for row in tasks_before:
-                    await self._bridge.publish_result(
-                        row.message_id,
-                        status=ProcessedStatus.CANCELLED,
-                        stream_events=False,
-                        echo={
-                            "message_id": row.message_id,
-                            "thread_id": thread_id,
-                            "thread_msg_seq": row.thread_msg_seq,
-                        },
-                    )
-            await self._registry.delete_queue_items(thread_id, [cancel_row.id])
-            await self._drain_and_release(thread_id)
-            return
-
-        # ── normal drain ──────────────────────────────────────────────────────
-        followup_rows = [r for r in pending if r.policy == QueuePolicy.FOLLOWUP]
-        prefix_rows   = [r for r in pending if r.policy == QueuePolicy.PREFIX]
-
-        if not followup_rows:
-            await self._registry.mark_thread_idle(thread_id)
-            return
-
-        drain_mode = await self._registry.get_drain_mode(thread_id)
-
-        if drain_mode != "followup":
-            # collect mode — not yet implemented; fall back to followup
-            logger.info("Thread %s: collect drain_mode not implemented; using followup", thread_id)
-
-        next_row = followup_rows[0]
-        next_task = TaskMessage.from_json(json.dumps(next_row.body))
-
-        if prefix_rows and next_task.messages is not None:
-            prefix_messages: list[UserMessage] = []
-            for row in prefix_rows:
+        if message.messages is not None and (prefix_bodies or len(batch_bodies) > 1):
+            merged: list[UserMessage] = []
+            for body in prefix_bodies + batch_bodies:
                 try:
-                    prefix_msg = TaskMessage.from_json(json.dumps(row.body))
-                    if prefix_msg.messages:
-                        prefix_messages.extend(prefix_msg.messages)
+                    m = TaskMessage.from_json(json.dumps(body))
+                    if m.messages:
+                        merged.extend(m.messages)
                 except Exception:
-                    logger.warning("Prefix row %s parse failed; skipping", row.id)
-            if prefix_messages:
-                next_task.messages = prefix_messages + next_task.messages
+                    logger.warning("Run %s: failed to parse merged body; skipping", claimed.message_id)
+            if merged:
+                message.messages = merged
+        return message
 
-        await self._registry.transition_thread_followup(
-            thread_id,
-            next_row.id,
-            next_row.message_id,
-            next_row.body,
-            next_row.thread_msg_seq,
-            prefix_ids=[r.id for r in prefix_rows],
-        )
+    # ── Checkpoint helpers ──────────────────────────────────────────────────────
 
-        logger.info("Thread %s: draining followup message_id=%s", thread_id, next_row.message_id)
-        task = asyncio.create_task(
-            self.run(next_task),
-            name=f"followup-{next_row.message_id[:8]}",
-        )
-        if self._task_registry is not None:
-            self._task_registry.add(task)
-            task.add_done_callback(self._task_registry.discard)
+    async def _safe_checkpoint_id(self, agent: Any, runnable_config: RunnableConfig | None) -> str | None:
+        """Best-effort aget_state → checkpoint_id; None if unavailable (e.g. pre-graph cancel)."""
+        if agent is None or runnable_config is None:
+            return None
+        try:
+            return _checkpoint_id_of(await agent.aget_state(runnable_config))
+        except Exception:
+            logger.debug("could not fetch checkpoint_id", exc_info=True)
+            return None
 
-    async def trigger_drain(self, thread_id: str) -> None:
-        """Trigger drain from outside a run context (e.g., stale-run-watchdog)."""
-        await self._drain_and_release(thread_id)
+    async def _has_pending_interrupt(self, agent: Any, runnable_config: RunnableConfig) -> bool:
+        try:
+            state = await agent.aget_state(runnable_config)
+            return bool(state and any(t.interrupts for t in (state.tasks or [])))
+        except Exception:
+            logger.debug("could not inspect pending interrupt", exc_info=True)
+            return False
+
+    async def _pending_approval_ids(self, agent: Any, runnable_config: RunnableConfig) -> list[str]:
+        """Read pending tool_approval_required tool_call ids from the interrupt checkpoint."""
+        ids: list[str] = []
+        try:
+            state = await agent.aget_state(runnable_config)
+        except Exception:
+            logger.debug("drain: could not aget_state", exc_info=True)
+            return ids
+        for task in (state.tasks if state else []) or []:
+            for intr in task.interrupts or []:
+                v = getattr(intr, "value", None)
+                if isinstance(v, dict) and v.get("type") == "tool_approval_required":
+                    for tc in v.get("tool_calls", []):
+                        tid = tc.get("id")
+                        if tid:
+                            ids.append(tid)
+        return ids
 
     # ── Background coroutines ─────────────────────────────────────────────────
 
@@ -466,21 +561,28 @@ class AgentRunner:
         runner_task: asyncio.Task,
         poll_interval: int = 2,
     ) -> None:
-        """Poll thread_msg_queue for cancel rows with seq > current_task_seq."""
+        """Poll thread_run_state.cancel_watermark; cancel the run when it covers this seq (§7.1).
+
+        Pure interrupter — touches no DB writes. cancel persistence already lives in the
+        folded watermark, so the watcher just translates ``seq < watermark`` into one
+        runner_task.cancel(); the signalled-watermark guard de-dupes repeat signals.
+        """
+        signalled = -1
         while True:
             await asyncio.sleep(poll_interval)
             try:
-                cancel_row = await self._registry.find_cancel_after_seq(
-                    thread_id, current_task_seq
-                )
-                if cancel_row:
+                state = await self._registry.get_thread_state(thread_id)
+                watermark = (state.cancel_watermark or 0) if state else 0
+                if watermark > current_task_seq and watermark > signalled:
                     logger.info(
-                        "Cancel signal detected for thread %s seq=%d — cancelling task",
+                        "Cancel watermark=%d covers run seq=%d thread=%s — cancelling",
+                        watermark,
+                        current_task_seq,
                         thread_id,
-                        cancel_row.thread_msg_seq,
                     )
+                    signalled = watermark
                     runner_task.cancel()
-                    return  # cancel row preserved; except CancelledError handles cleanup
+                    return
             except Exception:
                 logger.debug("Cancel watcher error for thread %s", thread_id, exc_info=True)
 
@@ -488,13 +590,18 @@ class AgentRunner:
 # ── Module-level helpers ──────────────────────────────────────────────────────
 
 
-def _is_empty_message_chunk(chunk: Any) -> bool:
-    """Return True if a messages-mode chunk carries no meaningful content.
+def _checkpoint_id_of(state: Any) -> str | None:
+    """Extract checkpoint_id from a StateSnapshot's config, or None."""
+    if state is None:
+        return None
+    try:
+        return (state.config or {}).get("configurable", {}).get("checkpoint_id")
+    except Exception:
+        return None
 
-    LangGraph messages mode yields (AIMessageChunk, metadata) tuples. Chunks
-    with empty content and no tool call data are start/end bookkeeping events
-    that add no value to the upstream consumer.
-    """
+
+def _is_empty_message_chunk(chunk: Any) -> bool:
+    """Return True if a messages-mode chunk carries no meaningful content."""
     msg = chunk[0] if isinstance(chunk, tuple) else chunk
     content = getattr(msg, "content", None)
     if content:
@@ -531,9 +638,6 @@ def _append_content_block(blocks: list[dict], item: ContentItem) -> None:
     elif item.type == "image_url" and item.url:
         blocks.append({"type": "image_url", "image_url": {"url": item.url[0]}})
     elif item.type in ("document_url", "audio_url", "video_url") and item.url:
-        # Non-image URL types: pass through as text so the agent sees the URL
         blocks.append({"type": "text", "text": f"[{item.type}: {item.url[0]}]"})
     elif item.text:
         blocks.append({"type": "text", "text": item.text})
-
-

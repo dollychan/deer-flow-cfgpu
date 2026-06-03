@@ -52,6 +52,13 @@ class AgentConfig(BaseModel):
     # LangGraph interrupt() until the client sends Command(resume={...}).
     # e.g. ["cfgpu__generate_image", "cfgpu__generate_video", "*generate*"]
     approval_required_tools: list[str] | None = None
+    # tool_visibility: maps tool-name fnmatch patterns to the client-facing
+    # visibility used by MessageStreamMiddleware ("internal" | "progress" |
+    # "artifact"). First matching pattern wins; unmatched tools fall back to
+    # the middleware default ("internal"). Built-in tools that declare
+    # metadata={"visibility": ...} take precedence over these patterns.
+    # e.g. {"cfgpu_generate_*": "progress", "web_search": "progress"}
+    tool_visibility: dict[str, str] | None = None
 
 
 def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:

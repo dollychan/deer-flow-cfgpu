@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,7 +14,6 @@ from deerflow.agents.middlewares.message_stream_middleware import (
     _truncate,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helper factories
 # ---------------------------------------------------------------------------
@@ -24,22 +24,30 @@ def _ai_msg(content: str = "", tool_calls: list[dict] | None = None, msg_id: str
     return AIMessage(content=content, tool_calls=calls, id=msg_id)
 
 
-def _tool_msg(content: str = "ok", tool_call_id: str = "tc_1", name: str = "bash", status: str = "success", msg_id: str = "tmsg_001") -> ToolMessage:
-    return ToolMessage(content=content, tool_call_id=tool_call_id, name=name, status=status, id=msg_id)
+def _tool_msg(content: str = "ok", tool_call_id: str = "tc_1", name: str = "bash", status: str = "success", msg_id: str = "tmsg_001", artifact=None) -> ToolMessage:
+    return ToolMessage(content=content, tool_call_id=tool_call_id, name=name, status=status, id=msg_id, artifact=artifact)
 
 
-def _middleware(max_content_chars: int = 4096) -> MessageStreamMiddleware:
-    return MessageStreamMiddleware(max_content_chars=max_content_chars)
+def _tool(name: str, visibility: str | None = None) -> SimpleNamespace:
+    """A minimal BaseTool stand-in exposing .name and .metadata."""
+    metadata = {"visibility": visibility} if visibility is not None else None
+    return SimpleNamespace(name=name, metadata=metadata)
 
 
-def _mock_request() -> MagicMock:
-    """Return a minimal ModelRequest mock."""
-    return MagicMock()
+def _model_request(tools: list | None = None) -> SimpleNamespace:
+    return SimpleNamespace(tools=list(tools or []))
 
 
-def _mock_tool_request() -> MagicMock:
-    """Return a minimal ToolCallRequest mock."""
-    return MagicMock()
+def _tool_request(tool: SimpleNamespace | None = None) -> SimpleNamespace:
+    return SimpleNamespace(tool=tool)
+
+
+def _middleware(max_content_chars: int = 4096, visibility_patterns=None, default_visibility: str = "internal") -> MessageStreamMiddleware:
+    return MessageStreamMiddleware(
+        max_content_chars=max_content_chars,
+        visibility_patterns=visibility_patterns,
+        default_visibility=default_visibility,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -86,8 +94,70 @@ class TestTruncate:
 
 
 # ---------------------------------------------------------------------------
+# Visibility resolution
+# ---------------------------------------------------------------------------
+
+class TestResolveVisibility:
+    def test_metadata_wins(self):
+        mw = _middleware(visibility_patterns=[("present_urls", "progress")])
+        # metadata says artifact, pattern says progress → metadata wins
+        assert mw._resolve_visibility(_tool("present_urls", "artifact"), "present_urls") == "artifact"
+
+    def test_pattern_fallback_when_no_metadata(self):
+        mw = _middleware(visibility_patterns=[("cfgpu_generate_*", "progress")])
+        assert mw._resolve_visibility(_tool("cfgpu_generate_image"), "cfgpu_generate_image") == "progress"
+
+    def test_first_pattern_wins(self):
+        mw = _middleware(visibility_patterns=[("web_*", "progress"), ("*", "artifact")])
+        assert mw._resolve_visibility(None, "web_search") == "progress"
+
+    def test_default_internal_when_unmatched(self):
+        mw = _middleware()
+        assert mw._resolve_visibility(_tool("bash"), "bash") == "internal"
+
+    def test_custom_default(self):
+        mw = _middleware(default_visibility="progress")
+        assert mw._resolve_visibility(_tool("bash"), "bash") == "progress"
+
+    def test_invalid_metadata_visibility_falls_through(self):
+        mw = _middleware(visibility_patterns=[("*", "progress")])
+        assert mw._resolve_visibility(_tool("x", "bogus"), "x") == "progress"
+
+    def test_none_tool_uses_patterns(self):
+        mw = _middleware(visibility_patterns=[("present_*", "artifact")])
+        assert mw._resolve_visibility(None, "present_files") == "artifact"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_tool_message — unwraps bare ToolMessage or Command
+# ---------------------------------------------------------------------------
+
+class TestResolveToolMessage:
+    def test_bare_tool_message(self):
+        tm = _tool_msg()
+        assert MessageStreamMiddleware._resolve_tool_message(tm) is tm
+
+    def test_command_with_tool_message(self):
+        from langgraph.types import Command
+        tm = _tool_msg()
+        cmd = Command(update={"messages": [tm], "artifacts": ["x"]})
+        assert MessageStreamMiddleware._resolve_tool_message(cmd) is tm
+
+    def test_command_without_messages(self):
+        from langgraph.types import Command
+        assert MessageStreamMiddleware._resolve_tool_message(Command(update={})) is None
+
+    def test_command_messages_without_tool_message(self):
+        from langgraph.types import Command
+        cmd = Command(update={"messages": [AIMessage(content="x")]})
+        assert MessageStreamMiddleware._resolve_tool_message(cmd) is None
+
+    def test_other_returns_none(self):
+        assert MessageStreamMiddleware._resolve_tool_message("nope") is None
+
+
+# ---------------------------------------------------------------------------
 # wrap_model_call — sync
-# Handler returns AIMessage directly (a valid ModelCallResult variant).
 # ---------------------------------------------------------------------------
 
 class TestWrapModelCallSync:
@@ -98,7 +168,7 @@ class TestWrapModelCallSync:
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = captured.append
-            result = mw.wrap_model_call(_mock_request(), MagicMock(return_value=ai))
+            result = mw.wrap_model_call(_model_request(), MagicMock(return_value=ai))
 
         assert result is ai
         assert len(captured) == 1
@@ -108,17 +178,48 @@ class TestWrapModelCallSync:
         assert evt["content"] == "Hello there"
         assert evt["tool_calls"] == []
 
-    def test_emits_ai_message_with_tool_calls(self):
+    def test_emits_visible_tool_calls(self):
         mw = _middleware()
-        ai = _ai_msg(tool_calls=[{"id": "tc_1", "name": "bash", "args": {"command": "ls"}}])
+        ai = _ai_msg(tool_calls=[{"id": "tc_1", "name": "web_search", "args": {"q": "x"}}])
+        req = _model_request(tools=[_tool("web_search", "progress")])
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = captured.append
-            mw.wrap_model_call(_mock_request(), MagicMock(return_value=ai))
+            mw.wrap_model_call(req, MagicMock(return_value=ai))
 
-        evt = captured[0]
-        assert evt["tool_calls"] == [{"id": "tc_1", "name": "bash", "args": {"command": "ls"}}]
+        assert captured[0]["tool_calls"] == [{"id": "tc_1", "name": "web_search", "args": {"q": "x"}}]
+
+    def test_filters_internal_tool_calls(self):
+        """An internal tool's call is dropped; a sibling visible call is kept."""
+        mw = _middleware()
+        ai = _ai_msg(
+            content="working",
+            tool_calls=[
+                {"id": "tc_1", "name": "bash", "args": {}},          # internal (default)
+                {"id": "tc_2", "name": "present_urls", "args": {}},  # artifact (metadata)
+            ],
+        )
+        req = _model_request(tools=[_tool("bash"), _tool("present_urls", "artifact")])
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_model_call(req, MagicMock(return_value=ai))
+
+        assert [tc["id"] for tc in captured[0]["tool_calls"]] == ["tc_2"]
+
+    def test_skips_when_only_internal_tool_calls_and_no_content(self):
+        mw = _middleware()
+        ai = _ai_msg(content="", tool_calls=[{"id": "tc_1", "name": "bash", "args": {}}])
+        req = _model_request(tools=[_tool("bash")])
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_model_call(req, MagicMock(return_value=ai))
+
+        assert captured == []
 
     def test_skips_empty_ai_message(self):
         mw = _middleware()
@@ -127,7 +228,7 @@ class TestWrapModelCallSync:
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = captured.append
-            mw.wrap_model_call(_mock_request(), MagicMock(return_value=ai))
+            mw.wrap_model_call(_model_request(), MagicMock(return_value=ai))
 
         assert captured == []
 
@@ -136,7 +237,7 @@ class TestWrapModelCallSync:
         ai = _ai_msg(content="test")
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = lambda _: None
-            result = mw.wrap_model_call(_mock_request(), MagicMock(return_value=ai))
+            result = mw.wrap_model_call(_model_request(), MagicMock(return_value=ai))
 
         assert result is ai
 
@@ -144,7 +245,7 @@ class TestWrapModelCallSync:
         mw = _middleware()
         ai = _ai_msg(content="hello")
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer", side_effect=RuntimeError("no writer")):
-            result = mw.wrap_model_call(_mock_request(), MagicMock(return_value=ai))
+            result = mw.wrap_model_call(_model_request(), MagicMock(return_value=ai))
 
         assert result is ai  # no exception propagated
 
@@ -155,7 +256,7 @@ class TestWrapModelCallSync:
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = captured.append
-            mw.wrap_model_call(_mock_request(), MagicMock(return_value=ai))
+            mw.wrap_model_call(_model_request(), MagicMock(return_value=ai))
 
         assert captured[0]["content"] == "block reply"
 
@@ -164,8 +265,6 @@ class TestWrapModelCallSync:
         mw = _middleware()
         ai = _ai_msg(content="from model response")
 
-        # Use a plain stub with only .result — avoids MagicMock's dynamic attribute creation
-        # which would cause hasattr(mock, "model_response") to always return True.
         class _FakeModelResponse:
             result = [ai]
 
@@ -174,7 +273,7 @@ class TestWrapModelCallSync:
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = captured.append
-            result = mw.wrap_model_call(_mock_request(), MagicMock(return_value=model_response))
+            result = mw.wrap_model_call(_model_request(), MagicMock(return_value=model_response))
 
         assert result is model_response
         assert len(captured) == 1
@@ -194,7 +293,7 @@ class TestWrapModelCallAsync:
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = captured.append
-            result = await mw.awrap_model_call(_mock_request(), AsyncMock(return_value=ai))
+            result = await mw.awrap_model_call(_model_request(), AsyncMock(return_value=ai))
 
         assert result is ai
         assert len(captured) == 1
@@ -202,14 +301,15 @@ class TestWrapModelCallAsync:
         assert captured[0]["content"] == "async reply"
 
     @pytest.mark.asyncio
-    async def test_async_skips_empty(self):
+    async def test_async_filters_internal_tool_calls(self):
         mw = _middleware()
-        ai = _ai_msg(content="", tool_calls=[])
+        ai = _ai_msg(content="", tool_calls=[{"id": "tc_1", "name": "bash", "args": {}}])
+        req = _model_request(tools=[_tool("bash")])
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = captured.append
-            await mw.awrap_model_call(_mock_request(), AsyncMock(return_value=ai))
+            await mw.awrap_model_call(req, AsyncMock(return_value=ai))
 
         assert captured == []
 
@@ -219,88 +319,143 @@ class TestWrapModelCallAsync:
 # ---------------------------------------------------------------------------
 
 class TestWrapToolCallSync:
-    def test_emits_tool_result_success(self):
+    def test_progress_emits_tool_result(self):
         mw = _middleware()
-        tm = _tool_msg(content="file1.py\nfile2.py", status="success")
+        tm = _tool_msg(content="file1.py\nfile2.py", name="web_search", status="success")
+        req = _tool_request(_tool("web_search", "progress"))
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = captured.append
-            result = mw.wrap_tool_call(_mock_tool_request(), MagicMock(return_value=tm))
+            result = mw.wrap_tool_call(req, MagicMock(return_value=tm))
 
         assert result is tm
         assert len(captured) == 1
         evt = captured[0]
         assert evt["type"] == "tool_result"
         assert evt["tool_call_id"] == "tc_1"
-        assert evt["name"] == "bash"
+        assert evt["name"] == "web_search"
         assert evt["content"] == "file1.py\nfile2.py"
         assert evt["status"] == "success"
 
-    def test_emits_tool_result_error(self):
+    def test_internal_tool_emits_nothing(self):
         mw = _middleware()
-        tm = _tool_msg(content="Permission denied", status="error")
+        tm = _tool_msg(name="bash")
+        req = _tool_request(_tool("bash"))  # default internal
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = captured.append
-            mw.wrap_tool_call(_mock_tool_request(), MagicMock(return_value=tm))
+            result = mw.wrap_tool_call(req, MagicMock(return_value=tm))
+
+        assert result is tm
+        assert captured == []
+
+    def test_artifact_tool_emits_artifact_event(self):
+        from langgraph.types import Command
+        mw = _middleware()
+        items = [{"ref": "https://cdn.cfgpu.com/gen/hero.png", "kind": "url", "expires_at": None}]
+        tm = _tool_msg(content="Successfully presented URLs", name="present_urls", tool_call_id="tc_p", artifact={"items": items})
+        cmd = Command(update={"artifacts": ["https://cdn.cfgpu.com/gen/hero.png"], "messages": [tm]})
+        req = _tool_request(_tool("present_urls", "artifact"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            result = mw.wrap_tool_call(req, MagicMock(return_value=cmd))
+
+        assert result is cmd
+        assert len(captured) == 1
+        evt = captured[0]
+        assert evt["type"] == "artifact"
+        assert evt["name"] == "present_urls"
+        assert evt["tool_call_id"] == "tc_p"
+        assert evt["items"] == items
+        assert evt["status"] == "success"
+
+    def test_artifact_tool_error_falls_back_to_tool_result(self):
+        """An artifact tool that errors (no artifact payload) surfaces as tool_result."""
+        from langgraph.types import Command
+        mw = _middleware()
+        tm = _tool_msg(content="Error: urls and expires_at_list must have the same length", name="present_urls", status="success")
+        cmd = Command(update={"messages": [tm]})
+        req = _tool_request(_tool("present_urls", "artifact"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=cmd))
+
+        assert len(captured) == 1
+        assert captured[0]["type"] == "tool_result"
+        assert "Error" in captured[0]["content"]
+
+    def test_emits_tool_result_error_status(self):
+        mw = _middleware()
+        tm = _tool_msg(content="Permission denied", name="web_search", status="error")
+        req = _tool_request(_tool("web_search", "progress"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=tm))
 
         assert captured[0]["status"] == "error"
 
     def test_truncates_large_content(self):
         mw = _middleware(max_content_chars=10)
-        long_output = "x" * 100
-        tm = _tool_msg(content=long_output)
+        tm = _tool_msg(content="x" * 100, name="web_search")
+        req = _tool_request(_tool("web_search", "progress"))
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = captured.append
-            mw.wrap_tool_call(_mock_tool_request(), MagicMock(return_value=tm))
+            mw.wrap_tool_call(req, MagicMock(return_value=tm))
 
         content = captured[0]["content"]
         assert content.startswith("x" * 10)
         assert "truncated" in content
         assert "90 chars omitted" in content
 
-    def test_returns_original_tool_message_unchanged(self):
-        mw = _middleware()
+    def test_returns_original_result_unchanged(self):
+        mw = _middleware(default_visibility="progress")
         tm = _tool_msg()
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = lambda _: None
-            result = mw.wrap_tool_call(_mock_tool_request(), MagicMock(return_value=tm))
+            result = mw.wrap_tool_call(_tool_request(_tool("bash")), MagicMock(return_value=tm))
 
         assert result is tm
 
     def test_survives_stream_writer_failure(self):
-        mw = _middleware()
+        mw = _middleware(default_visibility="progress")
         tm = _tool_msg()
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer", side_effect=RuntimeError("no writer")):
-            result = mw.wrap_tool_call(_mock_tool_request(), MagicMock(return_value=tm))
+            result = mw.wrap_tool_call(_tool_request(_tool("bash")), MagicMock(return_value=tm))
 
         assert result is tm
 
     def test_message_id_included(self):
         mw = _middleware()
-        tm = _tool_msg(msg_id="tmsg_999")
+        tm = _tool_msg(msg_id="tmsg_999", name="web_search")
+        req = _tool_request(_tool("web_search", "progress"))
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = captured.append
-            mw.wrap_tool_call(_mock_tool_request(), MagicMock(return_value=tm))
+            mw.wrap_tool_call(req, MagicMock(return_value=tm))
 
         assert captured[0]["message_id"] == "tmsg_999"
 
-    def test_skips_emit_for_command_result(self):
-        """wrap_tool_call must not emit when handler returns a Command (not ToolMessage)."""
+    def test_skips_emit_for_empty_command(self):
+        """A Command with no ToolMessage in its update emits nothing."""
         from langgraph.types import Command
-        mw = _middleware()
+        mw = _middleware(default_visibility="progress")
         cmd = Command(update={})
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = captured.append
-            result = mw.wrap_tool_call(_mock_tool_request(), MagicMock(return_value=cmd))
+            result = mw.wrap_tool_call(_tool_request(_tool("x")), MagicMock(return_value=cmd))
 
         assert result is cmd
         assert captured == []
@@ -312,28 +467,45 @@ class TestWrapToolCallSync:
 
 class TestWrapToolCallAsync:
     @pytest.mark.asyncio
-    async def test_async_emits_tool_result(self):
+    async def test_async_progress_emits_tool_result(self):
         mw = _middleware()
-        tm = _tool_msg(content="async result", status="success")
+        tm = _tool_msg(content="async result", name="web_search", status="success")
+        req = _tool_request(_tool("web_search", "progress"))
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = captured.append
-            result = await mw.awrap_tool_call(_mock_tool_request(), AsyncMock(return_value=tm))
+            result = await mw.awrap_tool_call(req, AsyncMock(return_value=tm))
 
         assert result is tm
         assert captured[0]["type"] == "tool_result"
         assert captured[0]["content"] == "async result"
 
     @pytest.mark.asyncio
-    async def test_async_truncates_large_content(self):
-        mw = _middleware(max_content_chars=5)
-        tm = _tool_msg(content="hello world")
+    async def test_async_artifact_command(self):
+        from langgraph.types import Command
+        mw = _middleware()
+        items = [{"ref": "/mnt/user-data/outputs/report.md", "kind": "path", "expires_at": None}]
+        tm = _tool_msg(content="Successfully presented files", name="present_files", tool_call_id="tc_f", artifact={"items": items})
+        cmd = Command(update={"artifacts": ["/mnt/user-data/outputs/report.md"], "messages": [tm]})
+        req = _tool_request(_tool("present_files", "artifact"))
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
             mock_writer.return_value = captured.append
-            await mw.awrap_tool_call(_mock_tool_request(), AsyncMock(return_value=tm))
+            await mw.awrap_tool_call(req, AsyncMock(return_value=cmd))
 
-        assert captured[0]["content"].startswith("hello")
-        assert "truncated" in captured[0]["content"]
+        assert captured[0]["type"] == "artifact"
+        assert captured[0]["items"] == items
+
+    @pytest.mark.asyncio
+    async def test_async_internal_emits_nothing(self):
+        mw = _middleware()
+        tm = _tool_msg(name="bash")
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            await mw.awrap_tool_call(_tool_request(_tool("bash")), AsyncMock(return_value=tm))
+
+        assert captured == []
