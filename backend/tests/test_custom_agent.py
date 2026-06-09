@@ -634,3 +634,110 @@ class TestAgentsApiDisabled:
 
         assert get_response.status_code == 403
         assert put_response.status_code == 403
+
+
+# ===========================================================================
+# Shared (agent-level) agents — resolve_agent_dir bypasses per-user layout
+# ===========================================================================
+
+
+def _write_user_agent(base_dir: Path, user_id: str, name: str, config: dict, soul: str = "per-user soul") -> None:
+    """Write a per-user agent copy at {base_dir}/users/{user_id}/agents/{name}/."""
+    agent_dir = base_dir / "users" / user_id / "agents" / name
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    config_copy = dict(config)
+    config_copy.setdefault("name", name)
+    with open(agent_dir / "config.yaml", "w") as f:
+        yaml.dump(config_copy, f)
+    (agent_dir / "SOUL.md").write_text(soul, encoding="utf-8")
+
+
+class _StubAppConfig:
+    def __init__(self, shared_agents: list[str]):
+        self.shared_agents = shared_agents
+
+
+def _patch_resolution(tmp_path: Path, shared_agents: list[str]):
+    """Patch get_paths (agents_config) and get_app_config (app_config) for resolution tests."""
+    from types import SimpleNamespace
+
+    return (
+        patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)),
+        patch("deerflow.config.app_config.get_app_config", return_value=SimpleNamespace(shared_agents=shared_agents)),
+    )
+
+
+class TestSharedAgentResolution:
+    def test_shared_agent_resolves_global_even_with_per_user_shadow(self, tmp_path):
+        # Global (shared) definition + a per-user copy that would normally shadow it.
+        _write_agent(tmp_path, "director", {"description": "shared director"})
+        _write_user_agent(tmp_path, "u1", "director", {"description": "per-user shadow"})
+
+        get_paths_patch, get_app_config_patch = _patch_resolution(tmp_path, ["director"])
+        with get_paths_patch, get_app_config_patch:
+            from deerflow.config.agents_config import load_agent_config, resolve_agent_dir
+
+            resolved = resolve_agent_dir("director", user_id="u1")
+            cfg = load_agent_config("director", user_id="u1")
+
+        assert resolved == tmp_path / "agents" / "director"
+        assert cfg.description == "shared director"
+
+    def test_shared_match_is_case_insensitive(self, tmp_path):
+        _write_agent(tmp_path, "director", {"description": "shared director"})
+
+        get_paths_patch, get_app_config_patch = _patch_resolution(tmp_path, ["Director"])
+        with get_paths_patch, get_app_config_patch:
+            from deerflow.config.agents_config import resolve_agent_dir
+
+            resolved = resolve_agent_dir("director", user_id="u1")
+
+        assert resolved == tmp_path / "agents" / "director"
+
+    def test_non_shared_agent_prefers_per_user_copy(self, tmp_path):
+        _write_agent(tmp_path, "code-reviewer", {"description": "global"})
+        _write_user_agent(tmp_path, "u1", "code-reviewer", {"description": "per-user"})
+
+        get_paths_patch, get_app_config_patch = _patch_resolution(tmp_path, [])
+        with get_paths_patch, get_app_config_patch:
+            from deerflow.config.agents_config import load_agent_config, resolve_agent_dir
+
+            resolved = resolve_agent_dir("code-reviewer", user_id="u1")
+            cfg = load_agent_config("code-reviewer", user_id="u1")
+
+        assert resolved == tmp_path / "users" / "u1" / "agents" / "code-reviewer"
+        assert cfg.description == "per-user"
+
+
+class TestSharedAgentUpdateGuard:
+    def test_update_agent_blocked_for_shared_agent(self):
+        from types import SimpleNamespace
+
+        from deerflow.tools.builtins.update_agent_tool import update_agent
+
+        runtime = SimpleNamespace(tool_call_id="call_1", context={"agent_name": "director", "user_id": "u1"})
+        with patch("deerflow.config.app_config.get_app_config", return_value=SimpleNamespace(shared_agents=["director"])):
+            result = update_agent.func(runtime=runtime, soul="new soul")
+
+        content = result.update["messages"][0].content.lower()
+        assert "shared agent" in content
+        assert "cannot be modified" in content
+
+    def test_update_agent_not_blocked_for_non_shared_agent(self, tmp_path):
+        from types import SimpleNamespace
+
+        from deerflow.tools.builtins.update_agent_tool import update_agent
+
+        runtime = SimpleNamespace(tool_call_id="call_2", context={"agent_name": "code-reviewer", "user_id": "u1"})
+        with (
+            patch("deerflow.config.app_config.get_app_config", return_value=SimpleNamespace(shared_agents=[])),
+            patch("deerflow.tools.builtins.update_agent_tool.get_paths", return_value=_make_paths(tmp_path)),
+            patch("deerflow.config.agents_config.get_paths", return_value=_make_paths(tmp_path)),
+            patch("deerflow.tools.builtins.update_agent_tool.resolve_runtime_user_id", return_value="u1"),
+        ):
+            result = update_agent.func(runtime=runtime, soul="new soul")
+
+        # Guard did not fire: it proceeds and fails later with a different (not-found) error.
+        content = result.update["messages"][0].content.lower()
+        assert "shared agent" not in content
+        assert "does not exist" in content

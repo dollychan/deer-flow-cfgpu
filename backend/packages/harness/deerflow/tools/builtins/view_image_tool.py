@@ -162,6 +162,10 @@ def view_image_tool(
         update={"viewed_images": new_viewed_images, "messages": [ToolMessage("Successfully read image", tool_call_id=tool_call_id)]},
     )
 
-# Client-facing visibility for MessageStreamMiddleware: this tool's output is a
-# final deliverable, emitted as an `artifact` event (carrying ToolMessage.artifact).
-view_image_tool.metadata = {"visibility": "artifact"}
+# Client-facing visibility for MessageStreamMiddleware: view_image is an INPUT
+# step — it reads a local image into `state["viewed_images"]` for the LLM (vision)
+# and returns only a tiny "Successfully read image" ToolMessage (no artifact payload).
+# The client already holds the image (it was uploaded or generated), so nothing here
+# is a client-facing deliverable; mark internal so no tool_result/artifact event is
+# emitted. (Output-side image delivery is handled by present_files / present_urls.)
+view_image_tool.metadata = {"visibility": "internal"}

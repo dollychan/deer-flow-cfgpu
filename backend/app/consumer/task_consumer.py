@@ -24,6 +24,7 @@ from app.consumer.constants import MessageMode, ThreadStatus
 from app.consumer.run_registry import RunRegistry
 from app.consumer.schemas import SchemaValidationError, TaskMessage
 from app.consumer.stream_bridge.mq import MQStreamBridge
+from app.consumer.timeutil import format_beijing
 
 if TYPE_CHECKING:
     from app.consumer.scheduler import Scheduler
@@ -155,7 +156,8 @@ class TaskConsumer:
         if target:
             row = await self._registry.get_instance(target)
             target_status = "not_found" if row is None else row.status
-            last_heartbeat = None if row is None else row.last_heartbeat.isoformat()
+            # Frontend reads timestamps in Beijing wall-clock; the DB column is UTC.
+            last_heartbeat = None if row is None else format_beijing(row.last_heartbeat)
             await self._bridge.publish_pong(
                 self._instance_id,
                 echo=message.downlink_echo(),

@@ -53,3 +53,5 @@ def ask_clarification_tool(
     # The actual logic is handled by ClarificationMiddleware which intercepts this tool call
     # and interrupts execution to present the question to the user
     return "Clarification request processed by middleware"
+
+ask_clarification_tool.metadata = {"visibility": "progress"}

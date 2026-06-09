@@ -17,7 +17,7 @@ from typing import Any
 from deerflow.agents.memory.prompt import format_conversation_for_update
 from deerflow.agents.memory.skill_resolver import MissingSkillError, get_extraction_skill
 from deerflow.agents.memory.updater import _extract_text  # shared text normalizer
-from deerflow.config.memory_config import get_memory_config
+from deerflow.config.mlm_config import get_mlm_config
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class ExtractionResult:
 
 
 def _get_model():
-    name = get_memory_config().model_name
+    name = get_mlm_config().model_name
     if name not in _model_cache:
         _model_cache[name] = create_chat_model(name=name, thinking_enabled=False)
     return _model_cache[name]

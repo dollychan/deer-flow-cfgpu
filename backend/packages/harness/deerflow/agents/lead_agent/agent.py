@@ -121,7 +121,7 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     hooks: list[BeforeSummarizationHook] = []
     if resolved_app_config.memory.enabled:
         hooks.append(memory_flush_hook)
-    if resolved_app_config.memory.mlm_enabled:
+    if resolved_app_config.mlm.enabled:
         hooks.append(mlm_flush_hook)
 
     # The logic below relies on two assumptions holding true: this factory is
@@ -298,7 +298,7 @@ def _build_middlewares(
 
     # Inject multi-level DB memory as a <system-reminder> on the first turn,
     # and queue extraction after each turn.
-    if resolved_app_config.memory.mlm_enabled:
+    if resolved_app_config.mlm.enabled:
         middlewares.append(MlmMiddleware(agent_name=agent_name))
 
     # Add summarization middleware if enabled
@@ -320,8 +320,11 @@ def _build_middlewares(
     # Add TitleMiddleware
     middlewares.append(TitleMiddleware(app_config=resolved_app_config))
 
-    # Add MemoryMiddleware (after TitleMiddleware)
-    middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
+    # Add MemoryMiddleware (after TitleMiddleware) only when the legacy file-based
+    # memory mechanism is enabled. Agents that rely on multi-level memory set
+    # memory.enabled=false (+ mlm.enabled=true) so this middleware is not loaded.
+    if resolved_app_config.memory.enabled:
+        middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
@@ -361,6 +364,21 @@ def _build_middlewares(
         from deerflow.agents.middlewares.human_approval_middleware import HumanApprovalMiddleware
 
         middlewares.append(HumanApprovalMiddleware(set(agent_config.approval_required_tools)))
+
+    # Apply per-run client runtime config: eager-inject config.skills (Model B, before_agent) and
+    # constrain cfgpu generate model selection to config.models (方案 3, after_model). No-op when
+    # neither is set. Registered AFTER HumanApprovalMiddleware on purpose: after_model dispatches in
+    # reverse registration order, so this clamps the model BEFORE HAM builds its approval payload —
+    # the human approves the already-constrained model and human edits are final (no second clamp).
+    # See cfgpu-docs/config.md "config.skills — Model B" / "config.models — 方案 3".
+    from deerflow.agents.middlewares.runtime_config_middleware import RuntimeConfigMiddleware
+
+    middlewares.append(
+        RuntimeConfigMiddleware(
+            app_config=resolved_app_config,
+            model_bindings=agent_config.model_bindings if agent_config else None,
+        )
+    )
 
     # MessageStreamMiddleware: emit ai_message / tool_result custom events via
     # wrap_model_call and wrap_tool_call so the MQ consumer receives semantic

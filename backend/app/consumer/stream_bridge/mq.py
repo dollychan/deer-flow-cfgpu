@@ -3,8 +3,11 @@
 Write-only StreamBridge implementation for the Consumer layer.
 Subscribing is unsupported; upstream reads results directly from MQ.
 
+The MQProducer adapter is responsible for topic routing; the bridge only
+constructs envelopes and delegates sending.
+
 Usage pattern:
-    bridge = MQStreamBridge(producer, result_topic="$AGENT_RESULTS")
+    bridge = MQStreamBridge(producer)
 
     # AgentRunner: before streaming starts
     bridge.register_run(run_id, thread_id, reply_config)
@@ -22,10 +25,10 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from app.consumer.schemas import ReplyConfig
+from app.consumer.timeutil import now_beijing_str
 from deerflow.runtime.stream_bridge.base import StreamBridge, StreamEvent
 
 logger = logging.getLogger(__name__)
@@ -61,9 +64,8 @@ class MQStreamBridge(StreamBridge):
     are safe because dict operations on CPython are GIL-protected.
     """
 
-    def __init__(self, producer: MQProducer, *, result_topic: str = "$AGENT_RESULTS") -> None:
+    def __init__(self, producer: MQProducer) -> None:
         self._producer = producer
-        self._result_topic = result_topic
         self._runs: dict[str, _RunContext] = {}
 
     # ── Run context ───────────────────────────────────────────────────────────
@@ -185,15 +187,14 @@ class MQStreamBridge(StreamBridge):
         message: str = "",
         retriable: bool = False,
         node: str | None = None,
-        checkpoint_id: str | None = None,
     ) -> None:
         """Publish an error envelope for a task run.
 
         Error codes: AGENT_TIMEOUT | TOOL_FAILED | QUOTA_EXCEEDED |
                      INTERNAL_ERROR | AGENT_BUSY | INVALID_SCHEMA
 
-        checkpoint_id (when the run produced a checkpoint before failing) is carried at
-        payload level — same anchor as result — so a failed run can still be forked from.
+        Error envelopes never carry checkpoint_id: fork anchors come only from result
+        (success / cancelled / paused_for_approval), §7.4 / prerequisites P0.2.
         """
         ctx = self._runs.get(echo.get("message_id", ""))
 
@@ -204,8 +205,6 @@ class MQStreamBridge(StreamBridge):
             error["node"] = node
 
         payload: dict[str, Any] = {"error": error}
-        if checkpoint_id is not None:
-            payload["checkpoint_id"] = checkpoint_id
 
         await self._send(self._build_envelope(
             type="error",
@@ -248,17 +247,15 @@ class MQStreamBridge(StreamBridge):
             seq += 1
 
         # Terminal envelope: error or result. checkpoint_id (fork anchor) rides along
-        # for both — result always carries it (v2.5), error only when one was captured.
-        checkpoint_id = result_cache.get("checkpoint_id")
+        # only on result (v2.5: success / cancelled / paused_for_approval); error never
+        # carries it (§7.4 / prerequisites P0.2).
         if "error" in result_cache:
             terminal_payload: dict[str, Any] = {"error": result_cache["error"]}
-            if checkpoint_id is not None:
-                terminal_payload["checkpoint_id"] = checkpoint_id
             terminal_type = "error"
         else:
             terminal_payload = {
                 "status": result_cache.get("status", "success"),
-                "checkpoint_id": checkpoint_id,
+                "checkpoint_id": result_cache.get("checkpoint_id"),
             }
             if "usage" in result_cache:
                 terminal_payload["usage"] = result_cache["usage"]
@@ -301,8 +298,8 @@ class MQStreamBridge(StreamBridge):
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _build_envelope(self, *, type: str, payload: dict, seq: int, echo: dict) -> dict:
-        dt = datetime.now(UTC)
-        timestamp = dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+        # Frontend reads timestamps in Beijing wall-clock (UTC+8); match its format.
+        timestamp = now_beijing_str()
         envelope: dict = {
             "schema_version": "2.5",
             "message_id": echo.get("message_id", ""),

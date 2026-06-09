@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
@@ -28,8 +29,24 @@ from app.consumer.schemas import ContentItem, TaskMessage, UserMessage
 from app.consumer.stream_bridge.mq import MQStreamBridge
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.serialization import serialize
+from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _ConsumerUser:
+    """Minimal ``CurrentUser`` (the Protocol needs only ``.id``) for consumer runs.
+
+    The consumer has no auth middleware, so ``_current_user`` is never set and
+    ``get_effective_user_id()`` would resolve to ``"default"`` — splitting the
+    in-graph user bucket from ``resolve_runtime_user_id`` (which reads the real
+    ``user_id`` off ``runtime.context``). ``AgentRunner.run`` sets this for the
+    duration of the run so sandbox/uploads/acp/present all resolve to the same
+    real bucket (see cfgpu-docs/bugs-todo.md BUG-008).
+    """
+
+    id: str
 
 # LangGraph's RESUME pending-write channel (== langgraph.constants.RESUME). Hardcoded to
 # the stable channel name so fork_init does not import the now-private constant (§7.4).
@@ -79,17 +96,33 @@ class AgentRunner:
         Designed to be fired as asyncio.create_task() — does not raise. All exceptions
         are caught, logged, published as MQ error messages, and closed out via finalize.
         """
+        message = self._build_run_message(claimed)
+        # Set the run's real user_id on the _current_user contextvar so the in-graph
+        # stack (sandbox path mappings, uploads, acp, present_files) resolves
+        # get_effective_user_id() to the right bucket instead of "default". The
+        # consumer has no auth middleware to do this; runtime.context already carries
+        # user_id for resolve_runtime_user_id, but the contextvar channel covers the
+        # call sites that still use get_effective_user_id() (BUG-008). Task-local:
+        # each run is its own asyncio task (scheduler.py), so concurrent runs for
+        # different users do not cross-contaminate.
+        user_token = set_current_user(_ConsumerUser(id=message.user_id)) if message.user_id else None
+        try:
+            await self._run(claimed, message)
+        finally:
+            if user_token is not None:
+                reset_current_user(user_token)
+
+    async def _run(self, claimed: ClaimedRun, message: TaskMessage) -> None:
+        """Execute one claimed run under the established user context (see ``run``)."""
         # drain is internal housekeeping: no register_run, no downlink, no message_seq (§6.5).
         if claimed.policy == QueuePolicy.DRAIN.value:
-            await self._run_drain(claimed)
+            await self._run_drain(claimed, message)
             return
 
         thread_id = claimed.thread_id
         run_id = claimed.message_id
         seq = claimed.seq
         runner_task = asyncio.current_task()
-
-        message = self._build_run_message(claimed)
 
         self._bridge.register_run(run_id, message.reply_config, echo=message.downlink_echo())
         heartbeat_task = asyncio.create_task(
@@ -146,17 +179,16 @@ class AgentRunner:
         except TimeoutError:
             processed_status = ProcessedStatus.FAILED
             timeout_msg = f"Agent execution timed out after {message.timeout_seconds}s"
-            checkpoint_id = await self._safe_checkpoint_id(agent, runnable_config)
+            # error envelopes never carry checkpoint_id: fork anchors come only from
+            # result (success / cancelled / paused_for_approval), §7.4 / prerequisites P0.2.
             result_cache = {
                 "error": {"code": "AGENT_TIMEOUT", "retriable": True, "message": timeout_msg},
-                "checkpoint_id": checkpoint_id,
             }
             await self._bridge.publish_error(
                 "AGENT_TIMEOUT",
                 echo=message.downlink_echo(),
                 retriable=True,
                 message=timeout_msg,
-                checkpoint_id=checkpoint_id,
             )
             downlink_sent = True
 
@@ -164,17 +196,14 @@ class AgentRunner:
             processed_status = ProcessedStatus.FAILED
             logger.warning("Run %s: LLM provider fallback (%s, retriable=%s): %s", run_id, exc.code, exc.retriable, exc)
             error_msg = str(exc)
-            checkpoint_id = await self._safe_checkpoint_id(agent, runnable_config)
             result_cache = {
                 "error": {"code": exc.code, "retriable": exc.retriable, "message": error_msg},
-                "checkpoint_id": checkpoint_id,
             }
             await self._bridge.publish_error(
                 exc.code,
                 echo=message.downlink_echo(),
                 retriable=exc.retriable,
                 message=error_msg,
-                checkpoint_id=checkpoint_id,
             )
             downlink_sent = True
 
@@ -182,17 +211,14 @@ class AgentRunner:
             processed_status = ProcessedStatus.FAILED
             logger.exception("Run %s failed: %s", run_id, exc)
             error_msg = str(exc)
-            checkpoint_id = await self._safe_checkpoint_id(agent, runnable_config)
             result_cache = {
                 "error": {"code": "INTERNAL_ERROR", "retriable": False, "message": error_msg},
-                "checkpoint_id": checkpoint_id,
             }
             await self._bridge.publish_error(
                 "INTERNAL_ERROR",
                 echo=message.downlink_echo(),
                 retriable=False,
                 message=error_msg,
-                checkpoint_id=checkpoint_id,
             )
             downlink_sent = True
 
@@ -268,7 +294,7 @@ class AgentRunner:
 
         rc = message.reply_config
         stream_mode: list[str] = (
-            rc.stream_event_types if rc.stream_events and rc.stream_event_types else ["values"]
+            rc.stream_event_types if rc.stream_events and rc.stream_event_types else ["custom"]
         )
         async for mode, chunk in agent.astream(
             stream_input,
@@ -363,7 +389,7 @@ class AgentRunner:
 
     # ── Drain branch (§6.5) ────────────────────────────────────────────────────
 
-    async def _run_drain(self, claimed: ClaimedRun) -> None:
+    async def _run_drain(self, claimed: ClaimedRun, message: TaskMessage) -> None:
         """Reject-resume a cancel-orphaned interrupt to a clean terminal (§6.5).
 
         Produces no downlink and does not advance message_seq. aget_state reads the
@@ -378,7 +404,6 @@ class AgentRunner:
         thread_id = claimed.thread_id
         drain_id = claimed.message_id
         try:
-            message = self._build_run_message(claimed)
             runnable_config = self._build_config(message, drain_id)
             agent = self._build_graph(runnable_config)
             pending_ids = await self._pending_approval_ids(agent, runnable_config)
@@ -391,7 +416,7 @@ class AgentRunner:
                 async for _mode, _chunk in agent.astream(
                     LGCommand(update={"tool_approvals": approvals}),
                     config=runnable_config,
-                    stream_mode=["values"],
+                    stream_mode=["custom"],
                 ):
                     pass
             else:
@@ -471,7 +496,7 @@ class AgentRunner:
         # agent_name="lead_agent" (default) is treated as no custom agent
         agent_name = message.agent_name if message.agent_name != "lead_agent" else None
 
-        thinking_enabled = task_cfg.get("thinking_enabled", True)
+        thinking_enabled = task_cfg.get("thinking_enabled", False)
         configurable: dict[str, Any] = {
             "thread_id": message.thread_id,
             "run_id": run_id,
@@ -479,7 +504,7 @@ class AgentRunner:
             "thinking_enabled": thinking_enabled,
             # MQ protocol uses thinking_enabled as the plan-mode switch
             "is_plan_mode": thinking_enabled,
-            "ask": task_cfg.get("ask", False),
+            "ask": task_cfg.get("ask", True),
             "app_config": self._app_config,
             # Controls whether web-group tools (web_search, web_fetch) are loaded
             "web_search_enabled": task_cfg.get("web_search_enabled", True),
@@ -510,8 +535,12 @@ class AgentRunner:
                     "web_search_enabled", "model_name", "subagent_enabled", "reasoning_effort"):
             if configurable.get(key) is not None:
                 context[key] = configurable[key]
+        # Consumed per-run by RuntimeConfigMiddleware: config.models constrains cfgpu generate
+        # model selection (方案 3 whitelist); config.skills is eager-injected (Model B).
         if task_cfg.get("models"):
             context["models"] = task_cfg["models"]
+        if task_cfg.get("skills"):
+            context["skills"] = task_cfg["skills"]
 
         from langgraph.runtime import Runtime
 

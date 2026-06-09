@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from app.consumer.constants import MessageMode, QueuePolicy
+from app.consumer.timeutil import parse_beijing_to_utc
 
 # Uplink message types accepted from upstream (task topic + signals topic).
 UPLINK_TYPES: frozenset[str] = frozenset({"task", "cancel", "ping"})
@@ -127,6 +129,17 @@ class TaskMessage:
         return echo
 
     @property
+    def timestamp_utc(self) -> datetime | None:
+        """The envelope ``timestamp`` (Beijing wall-clock) converted to UTC.
+
+        Canonical conversion point for the inbound timestamp. Returns None if the
+        field is empty or unparseable. Not used by scheduling/ordering — those use
+        the integer ``message_seq`` / ``thread_msg_seq`` — so this is for logging
+        and future use only.
+        """
+        return parse_beijing_to_utc(self.timestamp)
+
+    @property
     def message_mode(self) -> str:
         """Concurrent-task policy declared by upstream. Defaults to 'followup'."""
         return self.config.get("message_mode", "followup")
@@ -221,8 +234,11 @@ class TaskMessage:
                 f"Unknown message type={msg_type!r}; expected one of {sorted(UPLINK_TYPES)}"
             )
 
-        # thread_id — required, non-empty
-        if not data.get("thread_id"):
+        # thread_id — required for task/cancel; ping is exempt.
+        # Per protocol (MQ消息协议.md field table note): ping carries no thread_id —
+        # it is a stateless health check answerable by any instance. _handle_ping
+        # never reads thread_id, so an absent value is harmless.
+        if msg_type != "ping" and not data.get("thread_id"):
             raise SchemaValidationError("Missing required field: thread_id")
 
         # payload — required, must be an object
@@ -326,7 +342,7 @@ class TaskMessage:
             message_seq=data.get("message_seq", 0),
             timestamp=data.get("timestamp", ""),
             type=data["type"],
-            thread_id=data["thread_id"],
+            thread_id=data.get("thread_id", ""),  # ping may omit thread_id; default to "" (see _validate_raw)
             agent_name=data.get("agent_name") or "lead_agent",
             messages=messages,
             command=payload.get("command"),

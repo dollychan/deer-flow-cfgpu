@@ -26,6 +26,7 @@ Naturally excluded (do not pass through wrap hooks):
 from __future__ import annotations
 
 import fnmatch
+import json
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, override
@@ -209,8 +210,37 @@ class MessageStreamMiddleware(AgentMiddleware):
             len(tool_calls),
         )
 
+    def _structure_content(self, text: str) -> dict:
+        """Normalise a tool's text output into a JSON object for a uniform client contract.
+
+        The on-wire ``content`` is *always* an object so the client never has to guess
+        whether to parse it:
+          - JSON object  → used as-is (e.g. cfgpu generate_*/task_* flat result, error dict).
+          - JSON array   → wrapped as ``{"items": [...]}`` (e.g. list_models).
+          - anything else (prose, markdown, non-JSON) → ``{"message": <text>}``.
+
+        ``max_content_chars`` stays the size gate: structured parsing only applies when the
+        raw JSON text fits the limit, otherwise the result degrades to a truncated
+        ``{"message": ...}``. This keeps the MQ message-size guard intact while still
+        delivering structure for the common (small) case — cfgpu media results are tiny.
+
+        A tool that needs to report token cost adds a ``usage`` key inside its own result
+        payload (it lands in the JSON object here); the middleware does not synthesise one.
+        """
+        stripped = text.strip()
+        if stripped[:1] in ("{", "[") and len(stripped) <= self._max_content_chars:
+            try:
+                parsed = json.loads(stripped)
+            except (ValueError, TypeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list):
+                return {"items": parsed}
+        return {"message": _truncate(text, self._max_content_chars)}
+
     def _emit_tool_result(self, tool_msg: ToolMessage) -> None:
-        content = _truncate(_extract_text_content(tool_msg.content), self._max_content_chars)
+        content = self._structure_content(_extract_text_content(tool_msg.content))
         status = getattr(tool_msg, "status", None) or "success"
 
         self._emit({

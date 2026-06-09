@@ -59,12 +59,42 @@ class AgentConfig(BaseModel):
     # metadata={"visibility": ...} take precedence over these patterns.
     # e.g. {"cfgpu_generate_*": "progress", "web_search": "progress"}
     tool_visibility: dict[str, str] | None = None
+    # model_bindings: maps tool-name fnmatch patterns to the config.models task-type
+    # slice ("image" | "video") whose model_names constrain that tool's `model` arg.
+    # Consumed by RuntimeConfigMiddleware (after_model). First matching pattern wins.
+    # - None (or omitted): use the built-in default
+    #   {"*generate_image": "image", "*generate_video": "video"}
+    # - explicit dict: replaces the default entirely (config wins)
+    # e.g. {"*generate_image": "image", "*generate_video": "video"}
+    model_bindings: dict[str, str] | None = None
+
+
+def _is_shared_agent(name: str) -> bool:
+    """Return whether *name* is configured as an agent-level shared agent.
+
+    Shared agents (``config.yaml: shared_agents``) are served to all users from a
+    single ``{base_dir}/agents/{name}/`` definition. The decision is read from the
+    app-level config — never from the agent's own ``config.yaml`` — so it cannot be
+    shadowed by a per-user copy (which is exactly the dir we are about to resolve).
+    """
+    try:
+        from deerflow.config.app_config import get_app_config
+
+        shared = get_app_config().shared_agents or []
+    except Exception:
+        return False
+    lowered = name.lower()
+    return any(isinstance(s, str) and s.lower() == lowered for s in shared)
 
 
 def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
-    """Return the on-disk directory for an agent, preferring the per-user layout.
+    """Return the on-disk directory for an agent.
 
-    Resolution order:
+    Shared agents (``config.shared_agents``) always resolve to the agent-level
+    shared directory ``{base_dir}/agents/{name}/``, bypassing the per-user layout
+    so no per-user copy can shadow them.
+
+    Otherwise, resolution prefers the per-user layout:
     1. ``{base_dir}/users/{user_id}/agents/{name}/`` (per-user, current layout).
     2. ``{base_dir}/agents/{name}/`` (legacy shared layout — read-only fallback).
 
@@ -77,6 +107,8 @@ def resolve_agent_dir(name: str, *, user_id: str | None = None) -> Path:
             request context (or ``"default"`` in no-auth mode).
     """
     paths = get_paths()
+    if _is_shared_agent(name):
+        return paths.agent_dir(name)
     effective_user = user_id or get_effective_user_id()
     user_path = paths.user_agent_dir(effective_user, name)
     if user_path.exists() and (user_path / "config.yaml").exists():

@@ -43,11 +43,11 @@ def _state(*messages) -> dict:
 
 
 def _enabled_config():
-    return SimpleNamespace(mlm_enabled=True, debounce_seconds=30)
+    return SimpleNamespace(enabled=True, debounce_seconds=30)
 
 
 def _disabled_config():
-    return SimpleNamespace(mlm_enabled=False, debounce_seconds=30)
+    return SimpleNamespace(enabled=False, debounce_seconds=30)
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +87,7 @@ class TestAbforeAgent:
     @pytest.mark.anyio
     async def test_returns_none_when_memory_disabled(self):
         mw = MlmMiddleware(agent_name="director")
-        with patch("deerflow.agents.middlewares.mlm_middleware.get_memory_config", _disabled_config):
+        with patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _disabled_config):
             result = await mw.abefore_agent(_state(_human("hi")), _runtime())
         assert result is None
 
@@ -95,7 +95,7 @@ class TestAbforeAgent:
     async def test_returns_none_when_already_injected(self):
         mw = MlmMiddleware(agent_name="director")
         messages = [_human("existing reminder", injected=True), _human("user msg")]
-        with patch("deerflow.agents.middlewares.mlm_middleware.get_memory_config", _enabled_config):
+        with patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config):
             result = await mw.abefore_agent(_state(*messages), _runtime())
         assert result is None
 
@@ -103,7 +103,7 @@ class TestAbforeAgent:
     async def test_returns_none_when_no_human_messages(self):
         mw = MlmMiddleware(agent_name="director")
         with (
-            patch("deerflow.agents.middlewares.mlm_middleware.get_memory_config", _enabled_config),
+            patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
             patch("deerflow.agents.middlewares.mlm_middleware.build_injection", new=AsyncMock(return_value="some content")),
         ):
             result = await mw.abefore_agent(_state(_ai("hi")), _runtime())
@@ -113,7 +113,7 @@ class TestAbforeAgent:
     async def test_returns_none_when_injection_is_empty(self):
         mw = MlmMiddleware(agent_name="director")
         with (
-            patch("deerflow.agents.middlewares.mlm_middleware.get_memory_config", _enabled_config),
+            patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
             patch("deerflow.agents.middlewares.mlm_middleware.build_injection", new=AsyncMock(return_value="")),
         ):
             result = await mw.abefore_agent(_state(_human("hi")), _runtime())
@@ -124,7 +124,7 @@ class TestAbforeAgent:
         mw = MlmMiddleware(agent_name="director")
         user_msg = _human("hello")
         with (
-            patch("deerflow.agents.middlewares.mlm_middleware.get_memory_config", _enabled_config),
+            patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
             patch("deerflow.agents.middlewares.mlm_middleware.build_injection", new=AsyncMock(return_value="## User Knowledge\n- fact A")),
             patch("deerflow.agents.middlewares.mlm_middleware.resolve_runtime_user_id", return_value="u1"),
         ):
@@ -146,7 +146,7 @@ class TestAbforeAgent:
         mw = MlmMiddleware(agent_name="director")
         user_msg = HumanMessage(content="hi", id="msg-abc-123")
         with (
-            patch("deerflow.agents.middlewares.mlm_middleware.get_memory_config", _enabled_config),
+            patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
             patch("deerflow.agents.middlewares.mlm_middleware.build_injection", new=AsyncMock(return_value="memory")),
             patch("deerflow.agents.middlewares.mlm_middleware.resolve_runtime_user_id", return_value="u1"),
         ):
@@ -162,7 +162,7 @@ class TestAbforeAgent:
         mock_build = AsyncMock(return_value="content")
         runtime = _runtime(user_id="alice", project_id="proj-1")
         with (
-            patch("deerflow.agents.middlewares.mlm_middleware.get_memory_config", _enabled_config),
+            patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
             patch("deerflow.agents.middlewares.mlm_middleware.build_injection", mock_build),
             patch("deerflow.agents.middlewares.mlm_middleware.resolve_runtime_user_id", return_value="alice"),
         ):
@@ -179,7 +179,7 @@ class TestAbforeAgent:
         first_human = _human("real message")
         messages = [_human("existing reminder", injected=True), first_human]
         with (
-            patch("deerflow.agents.middlewares.mlm_middleware.get_memory_config", _enabled_config),
+            patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
             patch("deerflow.agents.middlewares.mlm_middleware.build_injection", new=AsyncMock(return_value="memory")),
             patch("deerflow.agents.middlewares.mlm_middleware.resolve_runtime_user_id", return_value="u1"),
         ):
@@ -197,7 +197,7 @@ class TestAbforeAgent:
 class TestAfterAgent:
     def test_returns_none_when_memory_disabled(self):
         mw = MlmMiddleware(agent_name="director")
-        with patch("deerflow.agents.middlewares.mlm_middleware.get_memory_config", _disabled_config):
+        with patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _disabled_config):
             result = mw.after_agent(_state(_human("hi"), _ai("ok")), _runtime())
         assert result is None
 
@@ -206,7 +206,7 @@ class TestAfterAgent:
         runtime = MagicMock()
         runtime.context = {}  # no thread_id
         with (
-            patch("deerflow.agents.middlewares.mlm_middleware.get_memory_config", _enabled_config),
+            patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
             patch("deerflow.agents.middlewares.mlm_middleware.get_config", return_value={"configurable": {}}),
         ):
             result = mw.after_agent(_state(_human("hi"), _ai("ok")), runtime)
@@ -216,7 +216,7 @@ class TestAfterAgent:
         mw = MlmMiddleware(agent_name="director")
         mock_queue = MagicMock()
         with (
-            patch("deerflow.agents.middlewares.mlm_middleware.get_memory_config", _enabled_config),
+            patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
             patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_queue", return_value=mock_queue),
             patch("deerflow.agents.middlewares.mlm_middleware.resolve_runtime_user_id", return_value="u1"),
         ):
@@ -233,7 +233,7 @@ class TestAfterAgent:
         mw = MlmMiddleware(agent_name="director")
         mock_queue = MagicMock()
         with (
-            patch("deerflow.agents.middlewares.mlm_middleware.get_memory_config", _enabled_config),
+            patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
             patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_queue", return_value=mock_queue),
         ):
             # Only AI messages, no human → filter returns nothing useful

@@ -7,6 +7,7 @@ from deerflow.agents.memory.mlm_queue import get_mlm_queue
 from deerflow.agents.memory.queue import get_memory_queue
 from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
 from deerflow.config.memory_config import get_memory_config
+from deerflow.config.mlm_config import get_mlm_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
 
 
@@ -17,7 +18,7 @@ def mlm_flush_hook(event: SummarizationEvent) -> None:
     queue instead of the legacy file-based queue.  Registered alongside
     ``memory_flush_hook`` in ``_build_hooks()`` of the lead agent.
     """
-    if not get_memory_config().mlm_enabled or not event.thread_id:
+    if not get_mlm_config().enabled or not event.thread_id:
         return
 
     filtered = filter_messages_for_memory(list(event.messages_to_summarize))

@@ -50,10 +50,6 @@ class MemoryConfig(BaseModel):
         le=1.0,
         description="Minimum confidence threshold for storing facts",
     )
-    mlm_enabled: bool = Field(
-        default=False,
-        description="Whether to enable multi-level memory (DB-backed extraction and injection). Independent of `enabled`.",
-    )
     injection_enabled: bool = Field(
         default=True,
         description="Whether to inject memory into system prompt",

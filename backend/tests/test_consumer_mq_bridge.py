@@ -8,11 +8,15 @@ across the inline publish path and the outbox replay path.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
 from app.consumer.schemas import ReplyConfig
 from app.consumer.stream_bridge.mq import MQStreamBridge
+
+# Beijing wall-clock: "2026-06-04 14:58:19.097" — space sep, 3-digit millis, no tz suffix.
+_BEIJING_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$")
 
 
 class _FakeProducer:
@@ -43,6 +47,9 @@ async def test_envelope_schema_version_and_biztype():
     env = producer.bodies[-1]
     assert env["schema_version"] == "2.5"
     assert env["bizType"] == "agent_task"
+    # Downlink timestamp must be Beijing wall-clock for the frontend (no 'Z'/UTC).
+    assert _BEIJING_TS_RE.match(env["timestamp"])
+    assert "Z" not in env["timestamp"]
 
 
 @pytest.mark.anyio
@@ -81,18 +88,20 @@ async def test_result_checkpoint_id_present_even_when_none():
     assert producer.bodies[-1]["payload"]["checkpoint_id"] is None
 
 
-# ── checkpoint_id on error ─────────────────────────────────────────────────────
+# ── error never carries checkpoint_id (fork anchor is result-only) ─────────────
 
 
 @pytest.mark.anyio
-async def test_error_carries_checkpoint_id_when_provided():
+async def test_error_never_carries_checkpoint_id():
+    # Even a mid-run failure that produced a checkpoint must not expose it on the error
+    # envelope: fork anchors come only from result (success/cancelled/paused). P0.2.
     bridge, producer = _bridge()
     await bridge.publish_error(
-        "AGENT_TIMEOUT", echo=_ECHO, retriable=True, message="boom", checkpoint_id="ck-err",
+        "AGENT_TIMEOUT", echo=_ECHO, retriable=True, message="boom",
     )
     payload = producer.bodies[-1]["payload"]
     assert payload["error"]["code"] == "AGENT_TIMEOUT"
-    assert payload["checkpoint_id"] == "ck-err"
+    assert "checkpoint_id" not in payload
 
 
 @pytest.mark.anyio
@@ -118,7 +127,9 @@ async def test_replay_result_carries_checkpoint_id():
 
 
 @pytest.mark.anyio
-async def test_replay_error_carries_checkpoint_id():
+async def test_replay_error_never_carries_checkpoint_id():
+    # A stray checkpoint_id in the error result_cache must not leak onto the replayed
+    # error envelope — error is never a fork anchor (P0.2).
     bridge, producer = _bridge()
     await bridge.replay(
         {"error": {"code": "INTERNAL_ERROR", "retriable": False}, "checkpoint_id": "ck-replay"},
@@ -126,4 +137,4 @@ async def test_replay_error_carries_checkpoint_id():
     )
     terminal = producer.bodies[-1]
     assert terminal["type"] == "error"
-    assert terminal["payload"]["checkpoint_id"] == "ck-replay"
+    assert "checkpoint_id" not in terminal["payload"]

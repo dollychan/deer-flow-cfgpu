@@ -29,7 +29,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.memory.injector import build_injection
 from deerflow.agents.memory.message_processing import filter_messages_for_memory
 from deerflow.agents.memory.mlm_queue import get_mlm_queue
-from deerflow.config.memory_config import get_memory_config
+from deerflow.config.mlm_config import get_mlm_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
 
 logger = logging.getLogger(__name__)
@@ -108,7 +108,7 @@ class MlmMiddleware(AgentMiddleware):
 
     @override
     async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
-        if not get_memory_config().mlm_enabled:
+        if not get_mlm_config().enabled:
             return None
 
         messages = list(state.get("messages", []))
@@ -152,7 +152,7 @@ class MlmMiddleware(AgentMiddleware):
 
     @override
     def after_agent(self, state, runtime: Runtime) -> dict | None:
-        if not get_memory_config().mlm_enabled:
+        if not get_mlm_config().enabled:
             return None
 
         thread_id = _get_thread_id(runtime)

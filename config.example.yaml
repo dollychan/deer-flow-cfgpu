@@ -930,7 +930,7 @@ summarization:
 # Global memory mechanism
 # Stores user context and conversation history for personalized responses
 memory:
-  enabled: true
+  enabled: true # Legacy file-based memory (MemoryMiddleware). Set false to not load it.
   storage_path: memory.json # Path relative to backend directory
   debounce_seconds: 30 # Wait time before processing queued updates
   model_name: null # Use default model
@@ -940,12 +940,35 @@ memory:
   max_injection_tokens: 2000 # Maximum tokens for memory injection
 
 # ============================================================================
+# Multi-Level Memory (MLM) Configuration
+# ============================================================================
+# DB-backed user / agent / project memory with scope_key (see
+# cfgpu-docs/multi-level-memory设计.md). Independent of the `memory` block above:
+# an agent runs one or the other. For agents that use MLM (e.g. the director),
+# prefer: memory.enabled=false + mlm.enabled=true so only MlmMiddleware is loaded.
+# Requires database.backend = sqlite|postgres (memory backend = no persistence).
+mlm:
+  enabled: false # Enable MlmMiddleware (multi-level DB memory)
+  model_name: null # LLM for knowledge extraction (null = default model)
+  debounce_seconds: 30 # Wait time before processing queued MLM extractions
+
+# ============================================================================
 # Custom Agent Management API
 # ============================================================================
 # Controls whether the HTTP gateway exposes custom-agent SOUL/USER.md management.
 # Keep this disabled unless the gateway is behind a trusted authenticated admin boundary.
 agents_api:
-  enabled: false
+  enabled: true
+
+# ============================================================================
+# Shared (agent-level) Agents
+# ============================================================================
+# Names of agents served to ALL users from a single shared definition at
+# {base_dir}/agents/{name}/ (config.yaml + SOUL.md). These bypass the per-user
+# agent layout: resolve_agent_dir always returns the shared directory, so no
+# per-user copy can shadow them. Leave empty for default per-user custom agents.
+# Example: shared_agents: [director]
+shared_agents: []
 
 # ============================================================================
 # Skill Self-Evolution Configuration

@@ -124,6 +124,19 @@ class TestValidEnvelopes:
     def test_valid_ping(self):
         TaskMessage.from_dict(_ping_envelope())
 
+    def test_valid_ping_without_thread_id(self):
+        # Protocol exempts ping from thread_id (MQ消息协议.md field-table note).
+        env = _ping_envelope()
+        env.pop("thread_id")
+        msg = TaskMessage.from_dict(env)
+        assert msg.thread_id == ""
+        # downlink echo (used by pong) must tolerate the empty thread_id.
+        assert msg.downlink_echo()["thread_id"] == ""
+
+    def test_valid_ping_empty_thread_id(self):
+        msg = TaskMessage.from_dict(_ping_envelope(thread_id=""))
+        assert msg.thread_id == ""
+
     def test_valid_hil_resume(self):
         TaskMessage.from_dict(_resume_envelope())
 
@@ -217,6 +230,11 @@ class TestEnvelopeValidationErrors:
 
     def test_empty_thread_id(self):
         self._check(_task_envelope(thread_id=""), "thread_id")
+
+    def test_cancel_missing_thread_id_still_rejected(self):
+        env = _cancel_envelope()
+        env.pop("thread_id")
+        self._check(env, "thread_id")
 
     def test_missing_payload(self):
         env = _task_envelope()

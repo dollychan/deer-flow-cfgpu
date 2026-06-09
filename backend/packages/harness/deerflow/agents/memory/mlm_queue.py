@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from deerflow.agents.memory.extractor import extract_agent_knowledge, extract_project_knowledge, extract_user_knowledge
-from deerflow.config.memory_config import get_memory_config
+from deerflow.config.mlm_config import get_mlm_config
 from deerflow.persistence.memory.repository import get_memory_repository
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,7 @@ class MlmUpdateQueue:
         project_id: str | None = None,
     ) -> None:
         """Enqueue a context and (re)start the debounce timer."""
-        if not get_memory_config().mlm_enabled:
+        if not get_mlm_config().enabled:
             return
         with self._lock:
             self._enqueue_locked(thread_id, messages, user_id, agent_name, project_id)
@@ -101,7 +101,7 @@ class MlmUpdateQueue:
         project_id: str | None = None,
     ) -> None:
         """Enqueue a context and flush immediately in a background thread."""
-        if not get_memory_config().mlm_enabled:
+        if not get_mlm_config().enabled:
             return
         with self._lock:
             self._enqueue_locked(thread_id, messages, user_id, agent_name, project_id)

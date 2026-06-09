@@ -24,7 +24,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
 
-from deerflow.config.agents_config import load_agent_config, validate_agent_name
+from deerflow.config.agents_config import _is_shared_agent, load_agent_config, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
@@ -116,6 +116,14 @@ def update_agent(
 
     if not agent_name:
         return _err("update_agent is only available inside a custom agent's chat. There is no agent_name in the current runtime context, so there is nothing to update. If you are inside the bootstrap flow, use setup_agent instead.")
+
+    # Shared (agent-level) agents are served to all users from a single central
+    # definition under {base_dir}/agents/{name}/. update_agent only ever writes the
+    # per-user layout, which resolve_agent_dir ignores for shared agents — so a
+    # self-update would silently write a dead per-user copy. Block it: shared agents
+    # are operator-managed (edit their config.yaml/SOUL.md directly).
+    if _is_shared_agent(agent_name):
+        return _err(f"Agent '{agent_name}' is a shared agent managed centrally for all users and cannot be modified via update_agent. Its SOUL.md / config.yaml must be edited directly by an operator.")
 
     # Resolve the active user so that updates only affect this user's agent.
     # ``resolve_runtime_user_id`` prefers ``runtime.context["user_id"]`` (set by

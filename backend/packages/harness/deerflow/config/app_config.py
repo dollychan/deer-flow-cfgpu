@@ -17,6 +17,7 @@ from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
+from deerflow.config.mlm_config import MlmConfig, load_mlm_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.run_events_config import RunEventsConfig
 from deerflow.config.runtime_paths import existing_project_file
@@ -100,8 +101,18 @@ class AppConfig(BaseModel):
     tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig, description="Tool search / deferred loading configuration")
     title: TitleConfig = Field(default_factory=TitleConfig, description="Automatic title generation configuration")
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig, description="Conversation summarization configuration")
-    memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
+    memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Legacy file-based memory subsystem configuration")
+    mlm: MlmConfig = Field(default_factory=MlmConfig, description="Multi-level memory (DB-backed) subsystem configuration")
     agents_api: AgentsApiConfig = Field(default_factory=AgentsApiConfig, description="Custom-agent management API configuration")
+    shared_agents: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of agent-level shared agents (e.g. the director) served to all users from a single "
+            "definition at {base_dir}/agents/{name}/. These bypass the per-user agent layout entirely: "
+            "resolve_agent_dir returns the shared directory regardless of user, so no per-user copy can "
+            "shadow them. Leave empty for the default per-user custom-agent behavior."
+        ),
+    )
     acp_agents: dict[str, ACPAgentConfig] = Field(default_factory=dict, description="ACP-compatible agent configuration")
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
@@ -199,6 +210,7 @@ class AppConfig(BaseModel):
         load_title_config_from_dict(config.title.model_dump())
         load_summarization_config_from_dict(config.summarization.model_dump())
         load_memory_config_from_dict(config.memory.model_dump())
+        load_mlm_config_from_dict(config.mlm.model_dump())
         load_agents_api_config_from_dict(config.agents_api.model_dump())
         load_subagents_config_from_dict(config.subagents.model_dump())
         load_tool_search_config_from_dict(config.tool_search.model_dump())

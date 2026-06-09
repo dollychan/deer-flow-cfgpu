@@ -2,6 +2,7 @@ from .app_config import get_app_config
 from .extensions_config import ExtensionsConfig, get_extensions_config
 from .loop_detection_config import LoopDetectionConfig
 from .memory_config import MemoryConfig, get_memory_config
+from .mlm_config import MlmConfig, get_mlm_config
 from .paths import Paths, get_paths
 from .skill_evolution_config import SkillEvolutionConfig
 from .skills_config import SkillsConfig
@@ -24,6 +25,8 @@ __all__ = [
     "LoopDetectionConfig",
     "MemoryConfig",
     "get_memory_config",
+    "MlmConfig",
+    "get_mlm_config",
     "get_tracing_config",
     "get_explicitly_enabled_tracing_providers",
     "get_enabled_tracing_providers",

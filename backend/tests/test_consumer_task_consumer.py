@@ -91,6 +91,18 @@ def _task(mid, tid="t1", seq=1, *, mode=None, command=None, fork=None):
     }
 
 
+def _ping(mid, *, target=None):
+    payload: dict = {"instance_id": "host-1"}
+    if target is not None:
+        payload["instance_id"] = target  # targeted ping nests instance_id under payload
+    return {
+        "schema_version": "2.5",
+        "message_id": mid,
+        "type": "ping",
+        "payload": payload,
+    }
+
+
 def _cancel(mid, tid="t1", seq=5):
     return {
         "schema_version": "2.5",
@@ -172,6 +184,20 @@ class TestIngestCancel:
             rows = (await session.execute(ThreadMsgQueueRow.__table__.select())).all()
         assert rows == []  # cancel is fire-and-forget, not enqueued (D2)
         assert sched.pokes == 1
+
+    @pytest.mark.anyio
+    async def test_targeted_pong_last_heartbeat_is_beijing_format(self, consumer):
+        import re
+
+        tc, reg, _, bridge = consumer
+        await reg.register_instance("inst-2", "host", 123)  # writes last_heartbeat=now(UTC)
+        await tc.handle_message(json.dumps(_ping("p1", target="inst-2")).encode())
+
+        assert len(bridge.pongs) == 1
+        _, kw = bridge.pongs[0]
+        # Beijing wall-clock: space sep, 3-digit millis, no 'Z'/offset suffix.
+        assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$", kw["last_heartbeat"])
+        assert kw["target_status"] == "active"
 
     @pytest.mark.anyio
     async def test_cancel_clearing_gate_synthesizes_drain(self, consumer, sf):

@@ -309,7 +309,7 @@ async def main() -> None:
         await registry.register_instance(instance_id, socket.gethostname(), os.getpid())
         logger.info("Consumer instance registered: %s", instance_id)
 
-        bridge = MQStreamBridge(producer_adapter, result_topic=consumer_cfg.result_topic)
+        bridge = MQStreamBridge(producer_adapter)
         active_tasks: set[asyncio.Task] = set()
         runner = AgentRunner(registry, bridge, checkpointer, config, task_registry=active_tasks)
         # v2 layering (§2.5/§2.6): Scheduler owns claim + dispatch; ingest only lands + pokes.

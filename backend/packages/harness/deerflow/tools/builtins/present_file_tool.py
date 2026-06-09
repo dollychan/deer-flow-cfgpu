@@ -10,7 +10,7 @@ from langgraph.config import get_config
 from langgraph.types import Command
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
@@ -70,8 +70,14 @@ def _normalize_presented_filepath(
     virtual_prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
 
     if stripped == virtual_prefix or stripped.startswith(virtual_prefix + "/"):
+        # Resolve the user bucket from runtime.context first (resolve_runtime_user_id),
+        # not get_effective_user_id(): the consumer has no auth middleware, so the
+        # _current_user contextvar is unset and get_effective_user_id() would resolve
+        # to "default" while ThreadDataMiddleware/cfgpu write under the real user_id
+        # (e.g. "34"). Using the contextvar here split the bucket and made
+        # relative_to(outputs_dir) fail (see bugs-todo BUG-008).
         try:
-            actual_path = get_paths().resolve_virtual_path(thread_id, filepath, user_id=get_effective_user_id())
+            actual_path = get_paths().resolve_virtual_path(thread_id, filepath, user_id=resolve_runtime_user_id(runtime))
         except TypeError:
             actual_path = get_paths().resolve_virtual_path(thread_id, filepath)
     else:

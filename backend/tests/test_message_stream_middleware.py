@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -335,7 +336,8 @@ class TestWrapToolCallSync:
         assert evt["type"] == "tool_result"
         assert evt["tool_call_id"] == "tc_1"
         assert evt["name"] == "web_search"
-        assert evt["content"] == "file1.py\nfile2.py"
+        # Non-JSON prose is wrapped so content is always an object.
+        assert evt["content"] == {"message": "file1.py\nfile2.py"}
         assert evt["status"] == "success"
 
     def test_internal_tool_emits_nothing(self):
@@ -388,7 +390,50 @@ class TestWrapToolCallSync:
 
         assert len(captured) == 1
         assert captured[0]["type"] == "tool_result"
-        assert "Error" in captured[0]["content"]
+        assert "Error" in captured[0]["content"]["message"]
+
+    def test_json_object_content_passes_through(self):
+        """A tool whose content is a JSON object (e.g. cfgpu generate_image) is emitted as-is."""
+        mw = _middleware()
+        payload = {"urls": ["https://cdn.cfgpu.com/img-abc.png"], "task_id": "task-1", "cost_tokens": 100, "artifact": True}
+        tm = _tool_msg(content=json.dumps(payload), name="cfgpu_generate_image", tool_call_id="tc_g")
+        req = _tool_request(_tool("cfgpu_generate_image", "progress"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=tm))
+
+        assert captured[0]["content"] == payload
+
+    def test_json_array_content_wrapped_in_items(self):
+        """A tool whose content is a JSON array (e.g. list_models) is wrapped as {"items": [...]}."""
+        mw = _middleware()
+        models = [{"adapter_id": "wan-2-0-fast"}, {"adapter_id": "doubao-seedream"}]
+        tm = _tool_msg(content=json.dumps(models), name="cfgpu_list_models", tool_call_id="tc_l")
+        req = _tool_request(_tool("cfgpu_list_models", "progress"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=tm))
+
+        assert captured[0]["content"] == {"items": models}
+
+    def test_oversized_json_degrades_to_message(self):
+        """JSON beyond max_content_chars degrades to a truncated message object (MQ size guard)."""
+        mw = _middleware(max_content_chars=20)
+        tm = _tool_msg(content=json.dumps({"k": "v" * 100}), name="cfgpu_generate_image", tool_call_id="tc_b")
+        req = _tool_request(_tool("cfgpu_generate_image", "progress"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=tm))
+
+        content = captured[0]["content"]
+        assert set(content.keys()) == {"message"}
+        assert "truncated" in content["message"]
 
     def test_emits_tool_result_error_status(self):
         mw = _middleware()
@@ -412,10 +457,11 @@ class TestWrapToolCallSync:
             mock_writer.return_value = captured.append
             mw.wrap_tool_call(req, MagicMock(return_value=tm))
 
-        content = captured[0]["content"]
-        assert content.startswith("x" * 10)
-        assert "truncated" in content
-        assert "90 chars omitted" in content
+        # Non-JSON text degrades to a truncated message object.
+        message = captured[0]["content"]["message"]
+        assert message.startswith("x" * 10)
+        assert "truncated" in message
+        assert "90 chars omitted" in message
 
     def test_returns_original_result_unchanged(self):
         mw = _middleware(default_visibility="progress")
@@ -479,7 +525,7 @@ class TestWrapToolCallAsync:
 
         assert result is tm
         assert captured[0]["type"] == "tool_result"
-        assert captured[0]["content"] == "async result"
+        assert captured[0]["content"] == {"message": "async result"}
 
     @pytest.mark.asyncio
     async def test_async_artifact_command(self):

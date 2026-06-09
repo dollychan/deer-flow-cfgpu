@@ -66,21 +66,23 @@ class _FakeBridge:
     async def publish_result(self, run_id, *, status, stream_events, checkpoint_id=None, echo=None, final_state=None, usage=None):
         self.results.append((run_id, status, checkpoint_id))
 
-    async def publish_error(self, code, *, echo, message="", retriable=False, node=None, checkpoint_id=None):
-        self.errors.append((code, message, checkpoint_id, retriable))
+    async def publish_error(self, code, *, echo, message="", retriable=False, node=None):
+        # error envelopes never carry checkpoint_id (fork anchor is result-only, P0.2);
+        # keep the recorded tuple shape stable with a None placeholder for the ckpt slot.
+        self.errors.append((code, message, None, retriable))
 
 
 def _runner(reg, *, checkpointer=None):
     return AgentRunner(reg, _FakeBridge(), checkpointer, MagicMock())
 
 
-def _envelope(mid, tid="t1", seq=1, *, messages=None, command=None):
+def _envelope(mid, tid="t1", seq=1, *, messages=None, command=None, user_id=None):
     payload: dict = {"config": {}, "reply_config": {"stream_events": True}}
     if command is not None:
         payload["command"] = command
     else:
         payload["messages"] = messages or [{"role": "user", "content": f"msg-{mid}"}]
-    return {
+    env = {
         "schema_version": "2.5",
         "message_id": mid,
         "type": "task",
@@ -88,6 +90,9 @@ def _envelope(mid, tid="t1", seq=1, *, messages=None, command=None):
         "thread_msg_seq": seq,
         "payload": payload,
     }
+    if user_id is not None:
+        env["user_id"] = user_id
+    return env
 
 
 async def _enqueue(reg, tid, mid, seq, policy=QueuePolicy.FOLLOWUP, body=None):
@@ -236,7 +241,7 @@ class TestFallbackDetection:
         code, _msg, ckpt, retriable = runner._bridge.errors[0]
         assert code == "INTERNAL_ERROR"  # circuit_open → INTERNAL_ERROR (AGENT_BUSY reserved for ingest reject)
         assert retriable is True  # provider unavailable → worth retrying
-        assert ckpt == "ck1"  # fork anchor preserved
+        assert ckpt is None  # error envelopes never carry checkpoint_id (fork anchor is result-only, P0.2)
         st = await reg.get_thread_state("t1")
         assert st.status == ThreadStatus.IDLE
 
@@ -433,6 +438,113 @@ class TestCancelWatcher:
         watcher = asyncio.create_task(runner._cancel_watcher("t1", current_task_seq=5, runner_task=target, poll_interval=0))
         await target  # completes normally — not cancelled (seq 5 > watermark 2)
         watcher.cancel()
+
+
+# ── user contextvar (BUG-008: consumer has no auth middleware) ─────────────────
+
+
+class TestUserContext:
+    """run() sets _current_user from the run's user_id so the in-graph stack
+    (sandbox/uploads/acp/present) resolves get_effective_user_id() to the real
+    bucket instead of串桶 'default'. Task-local + try/finally reset (no leak)."""
+
+    @pytest.mark.anyio
+    async def test_run_sets_user_context_during_graph_execution(self, reg, monkeypatch):
+        from deerflow.runtime.user_context import get_effective_user_id
+
+        await _enqueue(reg, "t1", "m1", 1, body=_envelope("m1", "t1", 1, user_id="34"))
+        claimed = await reg.claim_next_runnable("i1")
+        runner = _runner(reg)
+        monkeypatch.setattr(runner, "_build_graph", lambda cfg: MagicMock())
+
+        captured: dict = {}
+
+        async def _exec(*a, **k):
+            captured["uid"] = get_effective_user_id()
+            return False, {"status": "success", "checkpoint_id": "ck1"}
+
+        monkeypatch.setattr(runner, "_execute", _exec)
+        await runner.run(claimed)
+        # Overrides even the conftest autouse baseline ("test-user-autouse").
+        assert captured["uid"] == "34"
+
+    @pytest.mark.no_auto_user
+    @pytest.mark.anyio
+    async def test_user_context_reset_after_run(self, reg, monkeypatch):
+        from deerflow.runtime.user_context import get_current_user
+
+        await _enqueue(reg, "t1", "m1", 1, body=_envelope("m1", "t1", 1, user_id="34"))
+        claimed = await reg.claim_next_runnable("i1")
+        runner = _runner(reg)
+        monkeypatch.setattr(runner, "_build_graph", lambda cfg: MagicMock())
+        monkeypatch.setattr(
+            runner, "_execute",
+            lambda *a, **k: _coro((False, {"status": "success", "checkpoint_id": "ck1"})),
+        )
+        assert get_current_user() is None  # no_auto_user → clean baseline
+        await runner.run(claimed)
+        assert get_current_user() is None  # token reset in finally → no leak
+
+    @pytest.mark.no_auto_user
+    @pytest.mark.anyio
+    async def test_no_user_id_falls_back_to_default(self, reg, monkeypatch):
+        from deerflow.runtime.user_context import get_effective_user_id
+
+        # No user_id on the envelope (mirrors a message without it) → run() does not
+        # set the contextvar; in-graph resolution falls back to DEFAULT_USER_ID and
+        # the run still completes (no crash).
+        await _enqueue(reg, "t1", "m1", 1, body=_envelope("m1", "t1", 1))
+        claimed = await reg.claim_next_runnable("i1")
+        runner = _runner(reg)
+        monkeypatch.setattr(runner, "_build_graph", lambda cfg: MagicMock())
+
+        captured: dict = {}
+
+        async def _exec(*a, **k):
+            captured["uid"] = get_effective_user_id()
+            return False, {"status": "success", "checkpoint_id": "ck1"}
+
+        monkeypatch.setattr(runner, "_execute", _exec)
+        await runner.run(claimed)
+        assert captured["uid"] == "default"
+        proc = await reg.check_processed("m1")
+        assert proc.status == ProcessedStatus.COMPLETED
+
+    @pytest.mark.anyio
+    async def test_concurrent_runs_user_isolation(self, reg, monkeypatch):
+        """Two runs for different users execute as separate asyncio tasks; the
+        contextvar is task-local so neither sees the other's user_id."""
+        from deerflow.runtime.user_context import get_effective_user_id
+
+        await _enqueue(reg, "ta", "ma", 1, body=_envelope("ma", "ta", 1, user_id="34"))
+        await _enqueue(reg, "tb", "mb", 1, body=_envelope("mb", "tb", 1, user_id="99"))
+        claimed_a = await reg.claim_next_runnable("ia")
+        claimed_b = await reg.claim_next_runnable("ib")
+        assert {claimed_a.thread_id, claimed_b.thread_id} == {"ta", "tb"}
+        runner = _runner(reg)
+        monkeypatch.setattr(runner, "_build_graph", lambda cfg: MagicMock())
+
+        gate = asyncio.Event()
+        captured: dict = {}
+
+        async def _exec(message, run_id, agent, runnable_config):
+            # Record under contextvar, then interleave both runs at this point before
+            # either returns — proving the set in one task does not leak into the other.
+            captured[run_id] = get_effective_user_id()
+            captured.setdefault("_arrived", set()).add(run_id)
+            if len(captured["_arrived"]) >= 2:
+                gate.set()
+            await gate.wait()
+            return False, {"status": "success", "checkpoint_id": "ck1"}
+
+        monkeypatch.setattr(runner, "_execute", _exec)
+        ta = asyncio.create_task(runner.run(claimed_a))
+        tb = asyncio.create_task(runner.run(claimed_b))
+        await asyncio.gather(ta, tb)
+
+        by_thread = {claimed_a.message_id: "34", claimed_b.message_id: "99"}
+        for run_id, expected in by_thread.items():
+            assert captured[run_id] == expected
 
 
 def _coro(value):

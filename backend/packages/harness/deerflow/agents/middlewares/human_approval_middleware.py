@@ -133,7 +133,7 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
                     approved_args != tc["args"],
                 )
             else:
-                reason = decision.get("reason", "User rejected the tool call.")
+                reason = decision.get("reason", "User REJECTED the tool call. Ask for clarification.")
                 # Keep the tool_call in the AIMessage so ToolMessage.tool_call_id has a
                 # matching entry — stripping it creates an orphaned ToolMessage that breaks
                 # LangChain message history validation and confuses the model on future turns.

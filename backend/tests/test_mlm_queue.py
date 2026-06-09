@@ -30,7 +30,7 @@ def _reset():
 
 class TestMlmQueueManagement:
     def test_add_enqueues_context(self, monkeypatch):
-        monkeypatch.setattr("deerflow.agents.memory.mlm_queue.get_memory_config", _enabled_config)
+        monkeypatch.setattr("deerflow.agents.memory.mlm_queue.get_mlm_config", _enabled_config)
         q = MlmUpdateQueue()
         q._schedule_timer = MagicMock()  # don't actually start a thread
 
@@ -38,7 +38,7 @@ class TestMlmQueueManagement:
         assert q.pending_count == 1
 
     def test_add_deduplicates_same_key(self, monkeypatch):
-        monkeypatch.setattr("deerflow.agents.memory.mlm_queue.get_memory_config", _enabled_config)
+        monkeypatch.setattr("deerflow.agents.memory.mlm_queue.get_mlm_config", _enabled_config)
         q = MlmUpdateQueue()
         q._schedule_timer = MagicMock()
 
@@ -47,7 +47,7 @@ class TestMlmQueueManagement:
         assert q.pending_count == 1  # second replaces first
 
     def test_add_different_threads_kept_separate(self, monkeypatch):
-        monkeypatch.setattr("deerflow.agents.memory.mlm_queue.get_memory_config", _enabled_config)
+        monkeypatch.setattr("deerflow.agents.memory.mlm_queue.get_mlm_config", _enabled_config)
         q = MlmUpdateQueue()
         q._schedule_timer = MagicMock()
 
@@ -56,13 +56,13 @@ class TestMlmQueueManagement:
         assert q.pending_count == 2
 
     def test_add_noop_when_memory_disabled(self, monkeypatch):
-        monkeypatch.setattr("deerflow.agents.memory.mlm_queue.get_memory_config", _disabled_config)
+        monkeypatch.setattr("deerflow.agents.memory.mlm_queue.get_mlm_config", _disabled_config)
         q = MlmUpdateQueue()
         q.add("t1", [_human("hi")])
         assert q.pending_count == 0
 
     def test_clear_empties_queue(self, monkeypatch):
-        monkeypatch.setattr("deerflow.agents.memory.mlm_queue.get_memory_config", _enabled_config)
+        monkeypatch.setattr("deerflow.agents.memory.mlm_queue.get_mlm_config", _enabled_config)
         q = MlmUpdateQueue()
         q._schedule_timer = MagicMock()
         q.add("t1", [_human("x")])
@@ -176,11 +176,11 @@ def _ai(text: str):
 
 
 def _enabled_config():
-    return SimpleNamespace(mlm_enabled=True, debounce_seconds=30)
+    return SimpleNamespace(enabled=True, debounce_seconds=30)
 
 
 def _disabled_config():
-    return SimpleNamespace(mlm_enabled=False, debounce_seconds=30)
+    return SimpleNamespace(enabled=False, debounce_seconds=30)
 
 
 def _fake_repo():
