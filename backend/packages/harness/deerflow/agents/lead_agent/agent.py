@@ -377,6 +377,19 @@ def _build_middlewares(
 
         middlewares.append(HumanApprovalMiddleware(set(agent_config.approval_required_tools)))
 
+    # UninterruptibleToolMiddleware: shield non-cancellable tool calls (e.g. cfgpu
+    # generate, which has no remote cancel API) so a mid-flight hard cancel drains the
+    # tool to completion instead of orphaning the billed remote task (BUG-009). Always
+    # on when the agent declares non_interruptible_tools — independent of `ask`.
+    # Registered here (adjacent to / after HumanApprovalMiddleware) so it sits OUTSIDE
+    # MessageStreamMiddleware on the awrap_tool_call onion: the tool_result emit happens
+    # inside the shield, so the client gets the result before the run stops at the next
+    # super-step boundary. See cfgpu-docs/cancel.md §4.2.
+    if agent_config and agent_config.non_interruptible_tools:
+        from deerflow.agents.middlewares.uninterruptible_tool_middleware import UninterruptibleToolMiddleware
+
+        middlewares.append(UninterruptibleToolMiddleware(agent_config.non_interruptible_tools))
+
     # Apply per-run client runtime config: eager-inject config.skills (Model B, before_agent) and
     # constrain cfgpu generate model selection to config.models (方案 3, after_model). No-op when
     # neither is set. Registered AFTER HumanApprovalMiddleware on purpose: after_model dispatches in

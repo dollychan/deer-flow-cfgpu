@@ -28,6 +28,7 @@ from app.consumer.run_registry import ClaimedRun, RunRegistry
 from app.consumer.schemas import ContentItem, TaskMessage, UserMessage
 from app.consumer.stream_bridge.mq import MQStreamBridge
 from deerflow.config.app_config import AppConfig
+from deerflow.runtime.cancel_signal import CancelState, get_cancel_state, install_cancel_event, reset_cancel_event
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -124,13 +125,29 @@ class AgentRunner:
         seq = claimed.seq
         runner_task = asyncio.current_task()
 
+        # Cooperative-cancel signal (BUG-009 / cancel.md §4.3). Shared with
+        # UninterruptibleToolMiddleware — which swallows a hard cancel that lands on a
+        # non-cancellable tool (e.g. cfgpu generate, no remote cancel API) and drains it
+        # — and with the _execute astream loop, which stops at the next super-step
+        # boundary once this is set. Installed on a task-local ContextVar so the in-graph
+        # middleware reads the same Event: it runs in this run task, or in the wait_for
+        # inner task (timeout path), which snapshots this context at creation. The watcher
+        # gets the Event explicitly (it is a sibling task, not in this context).
+        cancel_event = asyncio.Event()
+        cancel_event_token = install_cancel_event(cancel_event)
+        # The watcher is a sibling task that does not inherit later ContextVar
+        # mutations, so hand it the live CancelState (event + protected_in_flight)
+        # explicitly. install_cancel_event always returns a fresh state, so this is
+        # never None here.
+        cancel_state = get_cancel_state()
+
         self._bridge.register_run(run_id, message.reply_config, echo=message.downlink_echo())
         heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(thread_id, interval=10),
             name=f"heartbeat-{run_id[:8]}",
         )
         cancel_watcher_task = asyncio.create_task(
-            self._cancel_watcher(thread_id, seq, runner_task, poll_interval=2),
+            self._cancel_watcher(thread_id, seq, runner_task, cancel_state, poll_interval=2),
             name=f"cancel-watcher-{run_id[:8]}",
         )
 
@@ -150,7 +167,7 @@ class AgentRunner:
             runnable_config = self._build_config(message, run_id)
             agent = self._build_graph(runnable_config)
 
-            coro = self._execute(message, run_id, agent, runnable_config)
+            coro = self._execute(message, run_id, agent, runnable_config, cancel_event)
             if message.timeout_seconds:
                 is_paused, result_cache = await asyncio.wait_for(coro, timeout=message.timeout_seconds)
             else:
@@ -223,6 +240,7 @@ class AgentRunner:
             downlink_sent = True
 
         finally:
+            reset_cancel_event(cancel_event_token)
             cancel_watcher_task.cancel()
             heartbeat_task.cancel()
             self._bridge.unregister_run(run_id)
@@ -249,6 +267,7 @@ class AgentRunner:
         run_id: str,
         agent: Any,
         runnable_config: RunnableConfig,
+        cancel_event: asyncio.Event | None = None,
     ) -> tuple[bool, dict]:
         """Run the agent graph; returns (is_paused, result_cache).
 
@@ -296,14 +315,38 @@ class AgentRunner:
         stream_mode: list[str] = (
             rc.stream_event_types if rc.stream_events and rc.stream_event_types else ["custom"]
         )
+        # Add "updates" as an internal-only super-step boundary signal for cooperative
+        # cancel (BUG-009 / cancel.md §4.3). It fires once per completed super-step — the
+        # only point where no node is in flight and the just-committed step (incl. a
+        # drained cfgpu ToolMessage) is already checkpointed (durability=sync). It is
+        # never downlinked. Requires checkpoint durability=sync, else a resume re-runs the
+        # node and re-submits cfgpu (double billing).
+        effective_stream_mode = stream_mode if "updates" in stream_mode else [*stream_mode, "updates"]
+        cooperative_cancel = False
         async for mode, chunk in agent.astream(
             stream_input,
             config=runnable_config,
-            stream_mode=stream_mode,
+            stream_mode=effective_stream_mode,
         ):
+            if mode == "updates":
+                # Super-step boundary. If a cancel was folded while a shielded tool was
+                # draining, stop here — cleanly, after the tool's result is checkpointed
+                # and (via inner MessageStreamMiddleware) already downlinked.
+                if cancel_event is not None and cancel_event.is_set():
+                    cooperative_cancel = True
+                    break
+                continue  # internal-only: never downlink "updates"
             if mode == "messages" and _is_empty_message_chunk(chunk):
                 continue
             await self._bridge.publish(run_id, mode, serialize(chunk, mode=mode))
+
+        if cooperative_cancel:
+            # Translate the cooperative stop into the same terminal path as a hard cancel:
+            # _run's `except asyncio.CancelledError` publishes CANCELLED with a checkpoint_id
+            # (fork anchor) read from the last committed super-step. The shielded tool that
+            # ran to completion is part of that checkpoint, so nothing is orphaned.
+            logger.info("Run %s: cooperative cancel at super-step boundary (cancel.md §4.3)", run_id)
+            raise asyncio.CancelledError()
 
         is_paused = False
         try:
@@ -630,30 +673,56 @@ class AgentRunner:
         thread_id: str,
         current_task_seq: int,
         runner_task: asyncio.Task,
+        cancel_state: CancelState | None = None,
         poll_interval: int = 2,
     ) -> None:
         """Poll thread_run_state.cancel_watermark; cancel the run when it covers this seq (§7.1).
 
         Pure interrupter — touches no DB writes. cancel persistence already lives in the
-        folded watermark, so the watcher just translates ``seq < watermark`` into one
-        runner_task.cancel(); the signalled-watermark guard de-dupes repeat signals.
+        folded watermark, so the watcher just translates ``seq < watermark`` into a stop.
+
+        Conditional hard cancel (BUG-009 / cancel.md §4.3). The cooperative ``event`` is
+        set unconditionally; the hard ``runner_task.cancel()`` is issued **only when no
+        protected tool is in flight**. A hard cancel tears down ``astream`` and discards a
+        shielded tool's already-emitted ``tool_result`` (langgraph runs nodes in their own
+        tasks, so the cancel never lands inside the shield — it just unwinds the stream).
+        So:
+          - protected tool (cfgpu) in flight → set the Event, do NOT hard-cancel; the run
+            stops cooperatively at the next super-step boundary, after the result has been
+            downlinked and checkpointed. Keep polling: once it drains (and if the run has
+            not already stopped on the cooperative flag) a later iteration hard-cancels.
+          - nothing protected in flight (LLM / bash / parked) → set the Event AND hard-cancel
+            for an immediate interrupt, then return.
         """
-        signalled = -1
+        event_set = False
         while True:
             await asyncio.sleep(poll_interval)
             try:
                 state = await self._registry.get_thread_state(thread_id)
                 watermark = (state.cancel_watermark or 0) if state else 0
-                if watermark > current_task_seq and watermark > signalled:
+                if watermark <= current_task_seq:
+                    continue
+                if cancel_state is not None and not event_set:
                     logger.info(
-                        "Cancel watermark=%d covers run seq=%d thread=%s — cancelling",
+                        "Cancel watermark=%d covers run seq=%d thread=%s — signalling cooperative stop",
                         watermark,
                         current_task_seq,
                         thread_id,
                     )
-                    signalled = watermark
-                    runner_task.cancel()
-                    return
+                    cancel_state.event.set()
+                    event_set = True
+                # Withhold the hard cancel while a shielded tool is draining so its
+                # tool_result is not lost to the astream teardown.
+                if cancel_state is not None and cancel_state.protected_in_flight > 0:
+                    logger.info(
+                        "Cancel: %d protected tool(s) draining thread=%s — deferring hard cancel",
+                        cancel_state.protected_in_flight,
+                        thread_id,
+                    )
+                    continue
+                logger.info("Cancel: hard-cancelling run seq=%d thread=%s", current_task_seq, thread_id)
+                runner_task.cancel()
+                return
             except Exception:
                 logger.debug("Cancel watcher error for thread %s", thread_id, exc_info=True)
 

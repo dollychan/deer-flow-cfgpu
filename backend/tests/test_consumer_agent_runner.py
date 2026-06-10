@@ -27,6 +27,7 @@ from app.consumer.models import (  # noqa: F401  (register tables on Base)
 from app.consumer.run_registry import ClaimedRun, RunRegistry
 from app.consumer.schemas import TaskMessage
 from deerflow.persistence.base import Base
+from deerflow.runtime.cancel_signal import CancelState
 
 
 @pytest.fixture
@@ -439,6 +440,147 @@ class TestCancelWatcher:
         await target  # completes normally — not cancelled (seq 5 > watermark 2)
         watcher.cancel()
 
+    @pytest.mark.anyio
+    async def test_sets_cancel_event_then_hard_cancel_when_unprotected(self, reg, sf):
+        """No protected tool in flight → cooperative event set AND hard cancel (BUG-009 §4.3)."""
+        async with sf() as session:
+            session.add(ThreadRunStateRow(
+                thread_id="t1", instance_id="i", message_id="m1",
+                status=ThreadStatus.RUNNING, cancel_watermark=9,
+            ))
+            await session.commit()
+        runner = _runner(reg)
+        cancel_state = CancelState(event=asyncio.Event())  # protected_in_flight=0
+
+        async def _target():
+            await asyncio.sleep(5)
+
+        target = asyncio.create_task(_target())
+        watcher = asyncio.create_task(
+            runner._cancel_watcher("t1", current_task_seq=3, runner_task=target, cancel_state=cancel_state, poll_interval=0)
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await target
+        assert cancel_state.event.is_set()  # cooperative flag raised alongside the hard cancel
+        watcher.cancel()
+
+    @pytest.mark.anyio
+    async def test_defers_hard_cancel_while_protected_in_flight(self, reg, sf):
+        """A protected tool draining → set the event but withhold the hard cancel,
+        so its tool_result is not lost to the astream teardown. Once it drains
+        (protected_in_flight→0), the next poll hard-cancels."""
+        async with sf() as session:
+            session.add(ThreadRunStateRow(
+                thread_id="t1", instance_id="i", message_id="m1",
+                status=ThreadStatus.RUNNING, cancel_watermark=9,
+            ))
+            await session.commit()
+        runner = _runner(reg)
+        cancel_state = CancelState(event=asyncio.Event(), protected_in_flight=1)
+
+        async def _target():
+            await asyncio.sleep(5)
+
+        target = asyncio.create_task(_target())
+        # Small non-zero interval so the defer path does not hot-loop the DB.
+        watcher = asyncio.create_task(
+            runner._cancel_watcher("t1", current_task_seq=3, runner_task=target, cancel_state=cancel_state, poll_interval=0.01)
+        )
+        # Let the watcher poll a few times: event must be set, but the run is NOT
+        # hard-cancelled while the protected tool is in flight.
+        await asyncio.sleep(0.08)
+        assert cancel_state.event.is_set()
+        assert not target.done()
+
+        # Protected tool drains → the watcher's next poll issues the hard cancel.
+        cancel_state.protected_in_flight = 0
+        with pytest.raises(asyncio.CancelledError):
+            await target
+        watcher.cancel()
+
+
+# ── cooperative cancel at super-step boundary (BUG-009 / cancel.md §4.3) ──────
+
+
+class _StreamingAgent:
+    """Fake agent whose astream yields a custom chunk then an 'updates' boundary chunk.
+
+    'updates' is the internal-only super-step boundary signal _execute injects for
+    cooperative cancel; it must never be downlinked.
+    """
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+        self.stream_modes = None
+        self._snap = SimpleNamespace(
+            tasks=[],  # no interrupt → not paused
+            config={"configurable": {"checkpoint_id": "ck1"}},
+            values={"messages": []},  # no fallback message
+        )
+
+    async def aget_state(self, config):
+        return self._snap
+
+    async def astream(self, stream_input, *, config, stream_mode):
+        self.stream_modes = list(stream_mode)
+        for mode, chunk in self._chunks:
+            yield mode, chunk
+
+
+def _message(reg):
+    claimed = ClaimedRun(
+        thread_id="t1", message_id="m1", policy=QueuePolicy.FOLLOWUP.value, seq=1,
+        input_bodies=[_envelope("m1", seq=1)], batch_message_ids=["m1"], prefix_message_ids=[],
+    )
+    return _runner(reg)._build_run_message(claimed)
+
+
+class TestCooperativeCancel:
+    @pytest.mark.anyio
+    async def test_breaks_and_raises_when_event_set_at_boundary(self, reg):
+        """cancel_event set + 'updates' boundary → break → CancelledError (→ CANCELLED in _run)."""
+        runner = _runner(reg)
+        message = _message(reg)
+        cancel_event = asyncio.Event()
+        cancel_event.set()  # a fold already happened (shielded tool drained)
+        agent = _StreamingAgent([("custom", {"type": "x"}), ("updates", {"node": {}})])
+
+        with pytest.raises(asyncio.CancelledError):
+            await runner._execute(message, "m1", agent, {}, cancel_event)
+
+        # "updates" was requested internally but never downlinked; the custom chunk was.
+        assert "updates" in agent.stream_modes
+        modes = [ev for (_rid, ev, _data) in runner._bridge.progress]
+        assert "custom" in modes
+        assert "updates" not in modes
+
+    @pytest.mark.anyio
+    async def test_updates_never_downlinked_when_not_cancelled(self, reg):
+        """No cancel: 'updates' boundary chunks are silently dropped; run completes normally."""
+        runner = _runner(reg)
+        message = _message(reg)
+        cancel_event = asyncio.Event()  # not set
+        agent = _StreamingAgent([("custom", {"type": "x"}), ("updates", {"node": {}})])
+
+        is_paused, result = await runner._execute(message, "m1", agent, {}, cancel_event)
+
+        assert is_paused is False
+        assert result["status"] == "success"
+        modes = [ev for (_rid, ev, _data) in runner._bridge.progress]
+        assert modes == ["custom"]  # updates never published
+
+    @pytest.mark.anyio
+    async def test_no_cancel_event_is_safe(self, reg):
+        """cancel_event=None (e.g. legacy call): 'updates' still dropped, no crash."""
+        runner = _runner(reg)
+        message = _message(reg)
+        agent = _StreamingAgent([("updates", {"node": {}}), ("custom", {"type": "x"})])
+
+        is_paused, result = await runner._execute(message, "m1", agent, {}, None)
+
+        assert is_paused is False
+        assert result["status"] == "success"
+
 
 # ── user contextvar (BUG-008: consumer has no auth middleware) ─────────────────
 
@@ -527,7 +669,7 @@ class TestUserContext:
         gate = asyncio.Event()
         captured: dict = {}
 
-        async def _exec(message, run_id, agent, runnable_config):
+        async def _exec(message, run_id, agent, runnable_config, cancel_event=None):
             # Record under contextvar, then interleave both runs at this point before
             # either returns — proving the set in one task does not leak into the other.
             captured[run_id] = get_effective_user_id()

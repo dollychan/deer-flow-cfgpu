@@ -52,6 +52,16 @@ class AgentConfig(BaseModel):
     # LangGraph interrupt() until the client sends Command(resume={...}).
     # e.g. ["cfgpu__generate_image", "cfgpu__generate_video", "*generate*"]
     approval_required_tools: list[str] | None = None
+    # non_interruptible_tools: tool name patterns (fnmatch) whose in-flight calls
+    # must NOT be hard-cancelled mid-execution. Used by UninterruptibleToolMiddleware
+    # to shield matched tool calls: on cancel the underlying tool is allowed to run
+    # to completion (and checkpoint its result) before the run stops cooperatively
+    # at the next super-step boundary. Targets tools that spawn non-cancellable
+    # remote work — e.g. cfgpu generate has no cancel API, so a hard cancel mid-poll
+    # orphans the remote task (billed, result discarded). See cfgpu-docs/cancel.md.
+    # - None (or omitted): no tool is shielded (every call is hard-cancellable).
+    # - ["cfgpu_generate_*"]: shield matched calls; others stay hard-cancellable.
+    non_interruptible_tools: list[str] | None = None
     # tool_visibility: maps tool-name fnmatch patterns to the client-facing
     # visibility used by MessageStreamMiddleware ("internal" | "progress" |
     # "artifact"). First matching pattern wins; unmatched tools fall back to
