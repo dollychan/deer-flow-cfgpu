@@ -304,6 +304,15 @@ def _build_middlewares(
     if resolved_app_config.mlm.enabled:
         middlewares.append(MlmMiddleware(agent_name=agent_name))
 
+    # Deterministically repair stale/cross-object presigned URLs in tool-call args
+    # (e.g. a bash `curl` whose URL kept the correct object path but borrowed another
+    # object's Expires/Signature after summarization). Matches by object identity
+    # (scheme+host+path, query ignored) against the authoritative ThreadState.artifacts
+    # and rewrites to the correct full URL. See the middleware docstring for details.
+    from deerflow.agents.middlewares.artifact_url_guard_middleware import ArtifactUrlGuardMiddleware
+
+    middlewares.append(ArtifactUrlGuardMiddleware())
+
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
     if summarization_middleware is not None:
