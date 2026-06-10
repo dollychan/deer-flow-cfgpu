@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -33,6 +33,28 @@ def validate_agent_name(name: str | None) -> str | None:
     if not AGENT_NAME_PATTERN.fullmatch(name):
         raise ValueError(f"Invalid agent name '{name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
     return name
+
+
+class PromptSectionsConfig(BaseModel):
+    """Per-agent control over *optional* system-prompt sections.
+
+    Only advisory sections are controllable; core/infra sections (role, working
+    directory, skills, deferred tools, subagent, response style, critical
+    reminders) are always present and cannot be dropped. Recognized optional
+    section names live in ``deerflow.agents.lead_agent.prompt.OPTIONAL_PROMPT_SECTIONS``
+    (currently ``"citations"`` and ``"clarification"``).
+
+    - Omitted (``None``): keep all sections — identical to the default agent.
+    - ``exclude: [...]``: drop the named optional sections for this agent only.
+
+    Example (``config.yaml`` for a generation-focused agent that produces media
+    files rather than cited research reports)::
+
+        prompt_sections:
+          exclude: [citations, clarification]
+    """
+
+    exclude: list[str] = Field(default_factory=list)
 
 
 class AgentConfig(BaseModel):
@@ -77,6 +99,12 @@ class AgentConfig(BaseModel):
     # - explicit dict: replaces the default entirely (config wins)
     # e.g. {"*generate_image": "image", "*generate_video": "video"}
     model_bindings: dict[str, str] | None = None
+    # prompt_sections: drop optional/advisory system-prompt sections for this
+    # agent (e.g. the research-oriented citations block). Only optional sections
+    # are controllable; core/infra sections are always present.
+    # - None (or omitted): keep all sections (default agent behavior).
+    # - {"exclude": ["citations", "clarification"]}: drop those sections.
+    prompt_sections: PromptSectionsConfig | None = None
 
 
 def _is_shared_agent(name: str) -> bool:

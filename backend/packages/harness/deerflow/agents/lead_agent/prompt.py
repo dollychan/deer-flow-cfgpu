@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -359,6 +360,39 @@ task(description="Oracle Cloud analysis", prompt="...", subagent_type="general-p
 - Single task = No value from subagents = Execute directly
 - For >{n} sub-tasks, use sequential batches of {n} across multiple turns
 </subagent_system>"""
+
+
+# Optional/advisory system-prompt sections that a custom agent may drop via
+# ``AgentConfig.prompt_sections.exclude``. Maps the public section name to the
+# XML tag that delimits it inside ``SYSTEM_PROMPT_TEMPLATE``. Only advisory
+# sections are listed here; core/infra sections (role, working directory,
+# skills, deferred tools, subagent, response style, critical reminders) are
+# always present and intentionally not controllable.
+OPTIONAL_PROMPT_SECTIONS: dict[str, str] = {
+    "citations": "citations",
+    "clarification": "clarification_system",
+}
+
+
+def _strip_optional_section(prompt: str, xml_tag: str) -> str:
+    """Remove a single ``<xml_tag>...</xml_tag>`` block plus its surrounding blank lines.
+
+    Operates on the already-formatted prompt so the template text stays
+    untouched — the default agent (no exclusions) renders byte-for-byte
+    identically and keeps its prefix-cache.
+    """
+    pattern = re.compile(rf"\n*<{xml_tag}>.*?</{xml_tag}>\n*", re.DOTALL)
+    return pattern.sub("\n\n", prompt, count=1)
+
+
+def _apply_excluded_sections(prompt: str, excluded_sections: frozenset[str]) -> str:
+    for name in excluded_sections:
+        xml_tag = OPTIONAL_PROMPT_SECTIONS.get(name)
+        if xml_tag is None:
+            logger.warning("Ignoring unknown prompt section '%s' in prompt_sections.exclude (known: %s)", name, sorted(OPTIONAL_PROMPT_SECTIONS))
+            continue
+        prompt = _strip_optional_section(prompt, xml_tag)
+    return prompt
 
 
 SYSTEM_PROMPT_TEMPLATE = """
@@ -753,6 +787,7 @@ def apply_prompt_template(
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
     deferred_names: frozenset[str] = frozenset(),
+    excluded_sections: frozenset[str] = frozenset(),
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
     n = max_concurrent_subagents
@@ -791,7 +826,7 @@ def apply_prompt_template(
     # Memory and current date are injected per-turn via DynamicContextMiddleware
     # as a <system-reminder> in the first HumanMessage, keeping this prompt
     # identical across users and sessions for maximum prefix-cache reuse.
-    return SYSTEM_PROMPT_TEMPLATE.format(
+    prompt = SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
         soul=get_agent_soul(agent_name),
         self_update_section=_build_self_update_section(agent_name),
@@ -802,3 +837,10 @@ def apply_prompt_template(
         subagent_thinking=subagent_thinking,
         acp_section=acp_and_mounts_section,
     )
+
+    # Drop optional/advisory sections for custom agents that opt out. No-op for
+    # the default agent (empty set), so its rendered prompt stays byte-identical.
+    if excluded_sections:
+        prompt = _apply_excluded_sections(prompt, excluded_sections)
+
+    return prompt

@@ -573,6 +573,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             available_skills=set(agent_config.skills) if agent_config and agent_config.skills is not None else None,
             app_config=resolved_app_config,
             deferred_names=setup.deferred_names,
+            excluded_sections=frozenset(agent_config.prompt_sections.exclude) if agent_config and agent_config.prompt_sections else frozenset(),
         ),
         state_schema=ThreadState,
     )
