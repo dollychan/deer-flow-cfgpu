@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy import DateTime, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -67,10 +67,11 @@ class MemoryAgentRow(Base):
     Primary key: agent_name
 
     Stores tool performance experience, known failure patterns, and prompt
-    heuristics accumulated from all threads using this agent.  Writes are
-    serialised through a dedicated Memory Update Worker (single MQ consumer)
-    so no optimistic-locking retry is needed here, but the version column
-    is kept for auditability.
+    heuristics accumulated from all threads using this agent.  Every consumer
+    instance runs its own ``memory_extraction_loop``, so writes to a hot
+    agent row may race across instances; ``upsert_agent`` therefore uses the
+    same optimistic-locking (version CAS + retry) strategy as the user and
+    project scopes.
     """
 
     __tablename__ = "memory_agent"
@@ -80,3 +81,47 @@ class MemoryAgentRow(Base):
     facts: Mapped[str] = mapped_column(Text, default="[]")  # JSON array
     version: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+
+class MemoryExtractionRow(Base):
+    """DB-backed extraction queue: one pending task per thread (PK=thread_id).
+
+    Replaces the in-process ``MlmUpdateQueue`` so that under the slot-driven
+    scheduler — where successive turns of one thread may run on different
+    consumer instances — extraction enqueue/processing survives both
+    cross-instance dispatch and instance crashes.
+
+    Lifecycle (see multi-level-memory设计.md §三):
+    - ``MlmMiddleware.aafter_agent`` upserts one row per terminal turn, keyed
+      by ``thread_id`` (idempotent merge: latest context wins, claim reset).
+    - ``not_before = now + debounce`` gates the debounce window without a Timer.
+    - ``memory_extraction_loop`` on every instance claims rows whose
+      ``not_before <= now`` via FOR UPDATE SKIP LOCKED, stamping
+      ``claimed_by``/``claimed_at`` so stale (crashed) claims can be recovered.
+
+    Scope columns are nullable: a degraded-context turn may enqueue without a
+    resolved user/agent/project.
+    """
+
+    __tablename__ = "memory_extraction_queue"
+
+    thread_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(128))
+    agent_name: Mapped[str | None] = mapped_column(String(128))
+    project_id: Mapped[str | None] = mapped_column(String(128))
+    not_before: Mapped[datetime] = mapped_column(DateTime(timezone=True))  # debounce gate
+    claimed_by: Mapped[str | None] = mapped_column(String(128))  # instance processing this row
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # stale-recovery basis
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    __table_args__ = (
+        # Claim path scans only unclaimed rows ordered by not_before. Partial index
+        # keeps it small; both dialects support it (cf. consumer models.py ux_thread_running).
+        Index(
+            "ix_mem_extract_claimable",
+            "not_before",
+            postgresql_where=text("claimed_by IS NULL"),
+            sqlite_where=text("claimed_by IS NULL"),
+        ),
+    )

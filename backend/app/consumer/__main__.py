@@ -51,6 +51,7 @@ from app.consumer.run_registry import RunRegistry
 from app.consumer.scheduler import Scheduler
 from app.consumer.stream_bridge.mq import MQStreamBridge
 from app.consumer.task_consumer import TaskConsumer
+from deerflow.agents.memory.extraction_worker import run_extraction_loop
 from deerflow.config.app_config import get_app_config
 from deerflow.persistence import close_engine, get_session_factory, init_engine_from_config
 from deerflow.runtime.checkpointer import make_checkpointer
@@ -249,6 +250,29 @@ async def _processed_messages_cleanup(registry: RunRegistry, ttl_days: int, inte
             logger.debug("processed_messages cleanup error", exc_info=True)
 
 
+def _start_mlm_extraction_loop(
+    checkpointer: Any,
+    instance_id: str,
+    stop_event: asyncio.Event,
+) -> asyncio.Task:
+    """Start the DB-backed MLM extraction worker as a named maintenance task (G6).
+
+    The worker claims rows from ``memory_extraction_queue`` and reads each thread's
+    latest checkpoint to extract memory, so it must share the *same* checkpointer
+    instance the AgentRunner writes through — passing a different one would read an
+    empty/foreign store. It self-disables when the persistence backend is ``memory``
+    or MLM is turned off at runtime, and exits promptly on ``stop_event``.
+
+    Returned as a named handle so the draining-first shutdown (§4.1/#4) cancels it in
+    the maintenance-loop batch at step ④ (after the final outbox flush, before the
+    MQ/producer close).
+    """
+    return asyncio.create_task(
+        run_extraction_loop(checkpointer, instance_id, stop_event),
+        name="mlm-extraction",
+    )
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
@@ -385,7 +409,11 @@ async def main() -> None:
             outbox.run_loop(stop_event),
             name="outbox-producer",
         )
-        maintenance_tasks = [heartbeat_task, watchdog_task, outbox_task]
+        # MLM extraction worker (G6): shares the AgentRunner's checkpointer so it can
+        # read each thread's latest checkpoint for memory extraction. Maintenance class
+        # → cancelled in the step-④ batch below.
+        mlm_extraction_task = _start_mlm_extraction_loop(checkpointer, instance_id, stop_event)
+        maintenance_tasks = [heartbeat_task, watchdog_task, outbox_task, mlm_extraction_task]
         if consumer_cfg.processed_messages_ttl_days > 0:
             maintenance_tasks.append(
                 asyncio.create_task(

@@ -5,15 +5,15 @@ Uses an in-memory SQLite database so tests are fast and self-contained.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.persistence.base import Base
-from deerflow.persistence.memory.model import MemoryAgentRow, MemoryProjectRow, MemoryUserRow
-from deerflow.persistence.memory.repository import MemoryRepository, merge_facts
-
+from deerflow.persistence.memory.repository import _MAX_RETRIES, MemoryRepository, merge_facts
 
 # ---------------------------------------------------------------------------
 # Shared fixture
@@ -289,13 +289,105 @@ class TestUpsertAgent:
 
 
 # ---------------------------------------------------------------------------
+# upsert_agent — optimistic locking (Phase G5)
+# ---------------------------------------------------------------------------
+
+
+class _FakeResult:
+    def __init__(self, rowcount: int) -> None:
+        self.rowcount = rowcount
+
+
+class _FakeSession:
+    """Minimal async-session stand-in driving upsert_agent's CAS retry loop."""
+
+    def __init__(self, row, rowcount: int) -> None:
+        self._row = row
+        self._rowcount = rowcount
+        self.added: list = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, _model, _key):
+        return self._row
+
+    async def execute(self, _stmt):
+        return _FakeResult(self._rowcount)
+
+    async def commit(self):
+        pass
+
+    def add(self, obj):
+        self.added.append(obj)
+
+
+class _FakeSessionFactory:
+    """Hands out one pre-scripted session per attempt (per ``self._sf()`` call)."""
+
+    def __init__(self, sessions: list[_FakeSession]) -> None:
+        self._sessions = list(sessions)
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        return self._sessions.pop(0)
+
+
+class TestUpsertAgentOptimisticLock:
+    @pytest.mark.anyio
+    async def test_concurrent_writers_preserve_all_facts(self, repo):
+        """No lost update: two racing writers both win (one via a CAS retry).
+
+        Two writers keep the worst-case conflict count (1) well within the
+        retry budget, so the merge invariant holds deterministically — unlike a
+        large fan-out where a writer could lose every race and exhaust retries.
+        """
+        await repo.upsert_agent("director", [{"content": "base"}], None)
+
+        results = await asyncio.gather(
+            repo.upsert_agent("director", [{"content": "w0"}], None),
+            repo.upsert_agent("director", [{"content": "w1"}], None),
+        )
+        assert all(results)  # neither exhausted its retry budget
+
+        row = await repo.load_agent("director")
+        contents = {f["content"] for f in json.loads(row.facts)}
+        assert {"base", "w0", "w1"} <= contents
+
+    @pytest.mark.anyio
+    async def test_retries_then_succeeds_on_version_conflict(self):
+        """First CAS UPDATE matches 0 rows (stale version) → retry succeeds."""
+        row = SimpleNamespace(facts="[]", version=0, summary=None)
+        sf = _FakeSessionFactory([_FakeSession(row, rowcount=0), _FakeSession(row, rowcount=1)])
+        repo = MemoryRepository(sf)
+
+        ok = await repo.upsert_agent("director", [{"content": "x"}], None)
+        assert ok is True
+        assert sf.calls == 2  # one retry
+
+    @pytest.mark.anyio
+    async def test_gives_up_after_max_retries(self):
+        """Persistent version conflict exhausts the retry budget → False."""
+        row = SimpleNamespace(facts="[]", version=0, summary=None)
+        sf = _FakeSessionFactory([_FakeSession(row, rowcount=0) for _ in range(_MAX_RETRIES)])
+        repo = MemoryRepository(sf)
+
+        ok = await repo.upsert_agent("director", [{"content": "x"}], None)
+        assert ok is False
+        assert sf.calls == _MAX_RETRIES
+
+
+# ---------------------------------------------------------------------------
 # get_memory_repository
 # ---------------------------------------------------------------------------
 
 
 class TestGetMemoryRepository:
     def test_returns_none_when_no_session_factory(self, monkeypatch):
-        from deerflow.persistence import memory as mem_pkg
 
         monkeypatch.setattr("deerflow.persistence.engine._session_factory", None)
         from deerflow.persistence.memory.repository import get_memory_repository

@@ -9,11 +9,10 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.mlm_middleware import (
+    _MLM_INJECTED_KEY,
     MlmMiddleware,
     _already_injected,
-    _MLM_INJECTED_KEY,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -190,18 +189,20 @@ class TestAbforeAgent:
 
 
 # ---------------------------------------------------------------------------
-# after_agent (sync extraction queuing)
+# aafter_agent (async DB extraction enqueue)
 # ---------------------------------------------------------------------------
 
 
-class TestAfterAgent:
-    def test_returns_none_when_memory_disabled(self):
+class TestAafterAgent:
+    @pytest.mark.anyio
+    async def test_returns_none_when_memory_disabled(self):
         mw = MlmMiddleware(agent_name="director")
         with patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _disabled_config):
-            result = mw.after_agent(_state(_human("hi"), _ai("ok")), _runtime())
+            result = await mw.aafter_agent(_state(_human("hi"), _ai("ok")), _runtime())
         assert result is None
 
-    def test_returns_none_when_no_thread_id(self):
+    @pytest.mark.anyio
+    async def test_returns_none_when_no_thread_id(self):
         mw = MlmMiddleware(agent_name="director")
         runtime = MagicMock()
         runtime.context = {}  # no thread_id
@@ -209,35 +210,68 @@ class TestAfterAgent:
             patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
             patch("deerflow.agents.middlewares.mlm_middleware.get_config", return_value={"configurable": {}}),
         ):
-            result = mw.after_agent(_state(_human("hi"), _ai("ok")), runtime)
+            result = await mw.aafter_agent(_state(_human("hi"), _ai("ok")), runtime)
         assert result is None
 
-    def test_enqueues_when_valid_conversation(self):
+    @pytest.mark.anyio
+    async def test_no_op_when_no_repository(self):
+        """backend=memory → get_memory_repository() is None → enqueue skipped."""
         mw = MlmMiddleware(agent_name="director")
-        mock_queue = MagicMock()
         with (
             patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
-            patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_queue", return_value=mock_queue),
+            patch("deerflow.agents.middlewares.mlm_middleware.get_memory_repository", return_value=None),
+        ):
+            result = await mw.aafter_agent(_state(_human("hi"), _ai("ok")), _runtime())
+        assert result is None
+
+    @pytest.mark.anyio
+    async def test_enqueues_when_valid_conversation(self):
+        mw = MlmMiddleware(agent_name="director")
+        mock_repo = MagicMock()
+        mock_repo.enqueue_extraction = AsyncMock()
+        with (
+            patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
+            patch("deerflow.agents.middlewares.mlm_middleware.get_memory_repository", return_value=mock_repo),
             patch("deerflow.agents.middlewares.mlm_middleware.resolve_runtime_user_id", return_value="u1"),
         ):
-            result = mw.after_agent(_state(_human("hi"), _ai("ok")), _runtime())
+            result = await mw.aafter_agent(_state(_human("hi"), _ai("ok")), _runtime(project_id="p1"))
 
         assert result is None
-        mock_queue.add.assert_called_once()
-        call_kwargs = mock_queue.add.call_args.kwargs
-        assert call_kwargs["thread_id"] == "t1"
-        assert call_kwargs["agent_name"] == "director"
-        assert call_kwargs["user_id"] == "u1"
+        mock_repo.enqueue_extraction.assert_awaited_once()
+        call = mock_repo.enqueue_extraction.await_args
+        assert call.args[0] == "t1"  # thread_id positional
+        assert call.kwargs["agent_name"] == "director"
+        assert call.kwargs["user_id"] == "u1"
+        assert call.kwargs["project_id"] == "p1"
+        assert call.kwargs["debounce_seconds"] == 30
+        # the enqueue must NOT carry messages (worker reads checkpoint)
+        assert "messages" not in call.kwargs
 
-    def test_skips_when_no_user_or_ai_messages_after_filtering(self):
+    @pytest.mark.anyio
+    async def test_skips_when_no_user_or_ai_messages_after_filtering(self):
         mw = MlmMiddleware(agent_name="director")
-        mock_queue = MagicMock()
+        mock_repo = MagicMock()
+        mock_repo.enqueue_extraction = AsyncMock()
         with (
             patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
-            patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_queue", return_value=mock_queue),
+            patch("deerflow.agents.middlewares.mlm_middleware.get_memory_repository", return_value=mock_repo),
         ):
             # Only AI messages, no human → filter returns nothing useful
-            result = mw.after_agent(_state(_ai("unprompted")), _runtime())
+            result = await mw.aafter_agent(_state(_ai("unprompted")), _runtime())
 
         assert result is None
-        mock_queue.add.assert_not_called()
+        mock_repo.enqueue_extraction.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_user_id_none_passed_as_none(self):
+        """Empty resolved user_id collapses to None (not '')."""
+        mw = MlmMiddleware(agent_name="director")
+        mock_repo = MagicMock()
+        mock_repo.enqueue_extraction = AsyncMock()
+        with (
+            patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
+            patch("deerflow.agents.middlewares.mlm_middleware.get_memory_repository", return_value=mock_repo),
+            patch("deerflow.agents.middlewares.mlm_middleware.resolve_runtime_user_id", return_value=""),
+        ):
+            await mw.aafter_agent(_state(_human("hi"), _ai("ok")), _runtime())
+        assert mock_repo.enqueue_extraction.await_args.kwargs["user_id"] is None

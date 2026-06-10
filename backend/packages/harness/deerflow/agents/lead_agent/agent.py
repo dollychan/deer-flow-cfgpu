@@ -27,7 +27,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
-from deerflow.agents.memory.summarization_hook import memory_flush_hook, mlm_flush_hook
+from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
@@ -123,8 +123,9 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     hooks: list[BeforeSummarizationHook] = []
     if resolved_app_config.memory.enabled:
         hooks.append(memory_flush_hook)
-    if resolved_app_config.mlm.enabled:
-        hooks.append(mlm_flush_hook)
+    # MLM no longer flushes a pre-summary queue: the DB-backed extraction worker
+    # reads the thread's latest checkpoint (which already carries the structured
+    # summary), so compressed detail is preserved via that summary (design §八).
 
     # The logic below relies on two assumptions holding true: this factory is
     # the sole entry point for DeerFlowSummarizationMiddleware, and the runtime

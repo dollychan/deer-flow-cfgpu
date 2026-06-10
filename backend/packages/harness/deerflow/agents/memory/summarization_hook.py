@@ -3,41 +3,16 @@
 from __future__ import annotations
 
 from deerflow.agents.memory.message_processing import detect_correction, detect_reinforcement, filter_messages_for_memory
-from deerflow.agents.memory.mlm_queue import get_mlm_queue
 from deerflow.agents.memory.queue import get_memory_queue
 from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
 from deerflow.config.memory_config import get_memory_config
-from deerflow.config.mlm_config import get_mlm_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
 
-
-def mlm_flush_hook(event: SummarizationEvent) -> None:
-    """Flush messages about to be summarized into the MLM queue.
-
-    Mirrors :func:`memory_flush_hook` but targets the multi-level memory
-    queue instead of the legacy file-based queue.  Registered alongside
-    ``memory_flush_hook`` in ``_build_hooks()`` of the lead agent.
-    """
-    if not get_mlm_config().enabled or not event.thread_id:
-        return
-
-    filtered = filter_messages_for_memory(list(event.messages_to_summarize))
-    user_messages = [m for m in filtered if getattr(m, "type", None) == "human"]
-    ai_messages = [m for m in filtered if getattr(m, "type", None) == "ai"]
-    if not user_messages or not ai_messages:
-        return
-
-    user_id = resolve_runtime_user_id(event.runtime)
-    context = getattr(event.runtime, "context", {}) or {}
-    project_id = context.get("project_id")
-
-    get_mlm_queue().add_nowait(
-        thread_id=event.thread_id,
-        messages=filtered,
-        user_id=user_id if user_id else None,
-        agent_name=event.agent_name,
-        project_id=project_id,
-    )
+# NOTE: there is intentionally no ``mlm_flush_hook`` here. Multi-level memory
+# extraction is now scheduled via the DB-backed ``memory_extraction_queue`` and
+# run by a per-instance ``memory_extraction_loop`` that reads the thread's latest
+# checkpoint (which already carries the structured summary), so flushing a
+# process-local queue before summarization is no longer needed (design §八).
 
 
 def memory_flush_hook(event: SummarizationEvent) -> None:

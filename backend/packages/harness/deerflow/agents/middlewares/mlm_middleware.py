@@ -6,9 +6,17 @@ Lifecycle:
     and prepends it to the conversation using the ID-swap technique so
     LangGraph's ``add_messages`` replaces it in-place.
 
-  - ``after_agent`` (every turn): enqueues the filtered conversation into
-    :class:`~deerflow.agents.memory.mlm_queue.MlmUpdateQueue` for
-    background LLM extraction and DB upsert.
+  - ``aafter_agent`` (every terminal turn): upserts one row per thread into the
+    DB-backed extraction queue (``memory_extraction_queue``) via
+    :meth:`MemoryRepository.enqueue_extraction`. The actual LLM extraction runs
+    later in a per-instance ``memory_extraction_loop`` that reads the thread's
+    latest checkpoint — so the enqueue carries scope dims only, never messages.
+
+This replaces the former in-process ``MlmUpdateQueue`` (Timer debounce), which
+broke under the slot-driven scheduler: successive turns of one thread may run on
+different consumer instances, so a process-local queue could neither debounce
+across instances nor survive a crash. ``not_before = now + debounce`` moves the
+debounce into the DB row instead.
 
 The middleware is a no-op when no DB repository is configured (persistence
 backend is ``memory``) or when the injection produces no content.
@@ -28,8 +36,8 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.memory.injector import build_injection
 from deerflow.agents.memory.message_processing import filter_messages_for_memory
-from deerflow.agents.memory.mlm_queue import get_mlm_queue
 from deerflow.config.mlm_config import get_mlm_config
+from deerflow.persistence.memory.repository import get_memory_repository
 from deerflow.runtime.user_context import resolve_runtime_user_id
 
 logger = logging.getLogger(__name__)
@@ -148,10 +156,17 @@ class MlmMiddleware(AgentMiddleware):
         correct_order = messages[:first_idx] + [reminder_msg, user_msg] + later_messages
         return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + correct_order}
 
-    # ── Extraction ────────────────────────────────────────────────────────
+    # ── Extraction enqueue ────────────────────────────────────────────────
 
     @override
-    def after_agent(self, state, runtime: Runtime) -> dict | None:
+    async def aafter_agent(self, state, runtime: Runtime) -> dict | None:
+        """Enqueue one DB extraction task per thread (no messages stored).
+
+        The enqueue is gated on a valid exchange (≥1 human + ≥1 AI after
+        filtering) so empty / tool-only turns don't schedule pointless work.
+        HIL ``paused`` turns never reach this hook, so extraction is naturally
+        deferred to the terminal turn of the resumed run (design §三).
+        """
         if not get_mlm_config().enabled:
             return None
 
@@ -159,8 +174,11 @@ class MlmMiddleware(AgentMiddleware):
         if not thread_id:
             return None
 
-        messages = state.get("messages", [])
-        filtered = filter_messages_for_memory(messages)
+        repo = get_memory_repository()
+        if repo is None:  # persistence backend is "memory" → no queue table
+            return None
+
+        filtered = filter_messages_for_memory(state.get("messages", []))
         has_human = any(getattr(m, "type", None) == "human" for m in filtered)
         has_ai = any(getattr(m, "type", None) == "ai" for m in filtered)
         if not has_human or not has_ai:
@@ -168,13 +186,12 @@ class MlmMiddleware(AgentMiddleware):
 
         context = runtime.context or {}
         user_id = resolve_runtime_user_id(runtime)
-        project_id = context.get("project_id")
 
-        get_mlm_queue().add(
-            thread_id=thread_id,
-            messages=filtered,
+        await repo.enqueue_extraction(
+            thread_id,
             user_id=user_id if user_id else None,
             agent_name=self._agent_name,
-            project_id=project_id,
+            project_id=context.get("project_id"),
+            debounce_seconds=get_mlm_config().debounce_seconds,
         )
         return None
