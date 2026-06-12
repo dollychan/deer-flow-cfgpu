@@ -77,6 +77,20 @@ def _invoke_sync(prompt: str) -> list[ExtractionResult]:
     return _parse_response(response.content)
 
 
+def _render_skill(skill_text: str, **values: str) -> str:
+    """Fill ``{placeholder}`` slots in a skill template.
+
+    Unlike :meth:`str.format`, this only substitutes the explicitly provided
+    keys and leaves every other brace untouched. Skill markdown legitimately
+    contains literal braces — JSON examples (``{"scope_key": ...}``) and
+    documentation tokens like ``"agent:{name}"`` — which would otherwise make
+    ``str.format`` raise ``KeyError`` (e.g. on ``{name}``).
+    """
+    for key, value in values.items():
+        skill_text = skill_text.replace("{" + key + "}", value)
+    return skill_text
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -110,7 +124,8 @@ async def extract_user_knowledge(
         return []
 
     existing_json = json.dumps(existing, ensure_ascii=False, indent=2)
-    prompt = skill_text.format(
+    prompt = _render_skill(
+        skill_text,
         conversation=conversation,
         existing_facts_json=existing_json,
     )
@@ -155,7 +170,8 @@ async def extract_project_knowledge(
         return []
 
     existing_json = json.dumps(existing, ensure_ascii=False, indent=2)
-    prompt = skill_text.format(
+    prompt = _render_skill(
+        skill_text,
         conversation=conversation,
         existing_facts_json=existing_json,
         project_id=project_id,
@@ -202,7 +218,8 @@ async def extract_agent_knowledge(
         return ExtractionResult(scope_key="")
 
     existing_json = json.dumps(existing_facts, ensure_ascii=False, indent=2)
-    prompt = skill_text.format(
+    prompt = _render_skill(
+        skill_text,
         conversation=conversation,
         existing_facts_json=existing_json,
         agent_name=agent_name,

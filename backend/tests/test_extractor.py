@@ -12,7 +12,41 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from deerflow.agents.memory.extractor import ExtractionResult, _parse_response
+from deerflow.agents.memory.extractor import ExtractionResult, _parse_response, _render_skill
+
+
+# Mirrors the literal braces present in the real skill markdown
+# (skills/public/memory/extract-*.md): a JSON example block plus the
+# documentation token "agent:{name}". str.format would choke on {name}.
+_SKILL_WITH_LITERAL_BRACES = (
+    'Scope key may be "agent:{name}".\n'
+    "Output format:\n"
+    '```json\n[{"scope_key": "", "facts": [{"content": "x"}]}]\n```\n'
+    "Existing facts:\n{existing_facts_json}\n"
+    "Transcript:\n{conversation}\n"
+)
+
+
+# ---------------------------------------------------------------------------
+# _render_skill (regression for KeyError: 'name' on literal braces)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderSkill:
+    def test_substitutes_only_named_placeholders(self):
+        out = _render_skill(_SKILL_WITH_LITERAL_BRACES, conversation="CONV", existing_facts_json="FACTS")
+        assert "CONV" in out
+        assert "FACTS" in out
+
+    def test_preserves_literal_braces(self):
+        out = _render_skill(_SKILL_WITH_LITERAL_BRACES, conversation="C", existing_facts_json="F")
+        # Literal JSON example and {name} token survive untouched.
+        assert '"agent:{name}"' in out
+        assert '{"content": "x"}' in out
+
+    def test_does_not_raise_on_unfilled_braces(self):
+        # No KeyError even though {name} is never provided as a value.
+        _render_skill(_SKILL_WITH_LITERAL_BRACES, conversation="C", existing_facts_json="F")
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +141,28 @@ class TestExtractUserKnowledge:
 
         result = await extract_user_knowledge([_human("hi"), _ai("ok")], "u1", "agent-a", {})
         assert result == []
+
+    @pytest.mark.anyio
+    async def test_skill_with_literal_braces_does_not_raise(self, tmp_path, monkeypatch):
+        # Regression: skill markdown with a {name} token / JSON example used to
+        # crash extract_user_knowledge with KeyError: 'name' via str.format.
+        _patch_resolver(tmp_path, monkeypatch, "user", "agent-a", _SKILL_WITH_LITERAL_BRACES)
+        captured: dict[str, str] = {}
+
+        import deerflow.agents.memory.extractor as ext_mod
+
+        def _fake_invoke(prompt: str):
+            captured["prompt"] = prompt
+            return _parse_response("[]")
+
+        monkeypatch.setattr(ext_mod, "_invoke_sync", _fake_invoke)
+
+        from deerflow.agents.memory.extractor import extract_user_knowledge
+
+        result = await extract_user_knowledge([_human("hi"), _ai("ok")], "u1", "agent-a", {})
+        assert result == []
+        # Placeholders filled, literal braces preserved.
+        assert '"agent:{name}"' in captured["prompt"]
 
 
 # ---------------------------------------------------------------------------
