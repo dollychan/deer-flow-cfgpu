@@ -168,30 +168,52 @@ class MlmMiddleware(AgentMiddleware):
         deferred to the terminal turn of the resumed run (design §三).
         """
         if not get_mlm_config().enabled:
+            logger.debug("MlmMiddleware: skip enqueue — MLM disabled")
             return None
 
         thread_id = _get_thread_id(runtime)
         if not thread_id:
+            logger.debug("MlmMiddleware: skip enqueue — no thread_id in runtime context/config")
             return None
 
         repo = get_memory_repository()
         if repo is None:  # persistence backend is "memory" → no queue table
+            logger.debug("MlmMiddleware: skip enqueue — no DB repository (backend=memory) thread=%s", thread_id)
             return None
 
         filtered = filter_messages_for_memory(state.get("messages", []))
         has_human = any(getattr(m, "type", None) == "human" for m in filtered)
         has_ai = any(getattr(m, "type", None) == "ai" for m in filtered)
         if not has_human or not has_ai:
+            logger.debug(
+                "MlmMiddleware: skip enqueue — no valid exchange thread=%s has_human=%s has_ai=%s "
+                "(filtered=%d/%d raw messages)",
+                thread_id,
+                has_human,
+                has_ai,
+                len(filtered),
+                len(state.get("messages", [])),
+            )
             return None
 
         context = runtime.context or {}
         user_id = resolve_runtime_user_id(runtime)
 
+        debounce_seconds = get_mlm_config().debounce_seconds
         await repo.enqueue_extraction(
             thread_id,
             user_id=user_id if user_id else None,
             agent_name=self._agent_name,
             project_id=context.get("project_id"),
-            debounce_seconds=get_mlm_config().debounce_seconds,
+            debounce_seconds=debounce_seconds,
+        )
+        logger.info(
+            "MlmMiddleware: enqueued extraction thread=%s user_id=%r agent=%r project_id=%r "
+            "(not_before=+%ds; row visible to worker only after debounce)",
+            thread_id,
+            user_id if user_id else None,
+            self._agent_name,
+            context.get("project_id"),
+            debounce_seconds,
         )
         return None
