@@ -175,8 +175,13 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
             )
             return self._build_response(last_msg, tool_approvals, pending_ids)
 
-        # --- First call: emit SSE and interrupt ---
-        pending_payload = [{"id": tc["id"], "name": tc["name"], "args": tc["args"]} for tc in pending]
+        # --- First call (or partial resume): emit SSE and interrupt ---
+        # Only re-request the still-undecided calls. On a partial resume some
+        # decisions are already merged into state.tool_approvals (merge reducer);
+        # re-emitting those would make the client re-confirm tools it already
+        # answered. The final _build_response below still applies the full set.
+        undecided = [tc for tc in pending if tc["id"] not in tool_approvals]
+        pending_payload = [{"id": tc["id"], "name": tc["name"], "args": tc["args"]} for tc in undecided]
 
         sse_emitted = False
         try:
@@ -188,8 +193,9 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
             logger.warning("HumanApproval: get_stream_writer failed; %s event will be emitted by worker fallback", _APPROVAL_SSE_TYPE, exc_info=True)
 
         logger.info(
-            "HumanApproval: emitting approval request for %d tool call(s), pausing graph",
-            len(pending),
+            "HumanApproval: emitting approval request for %d undecided tool call(s) (%d already decided), pausing graph",
+            len(undecided),
+            len(pending) - len(undecided),
         )
 
         # Single interrupt for the whole batch.

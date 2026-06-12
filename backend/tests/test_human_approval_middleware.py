@@ -185,7 +185,7 @@ class TestAfterModelResumePath:
         new_msg = next(m for m in result["messages"] if isinstance(m, AIMessage))
         assert new_msg.tool_calls[0]["args"] == new_args
 
-    def test_rejected_removes_tool_call_adds_error_message(self):
+    def test_rejected_retains_tool_call_adds_error_message(self):
         m = _make_middleware()
         msg = _ai_msg([{"id": "tc1", "name": "cfgpu__generate_image", "args": {"prompt": "cat"}}])
         state = _make_state(
@@ -204,8 +204,9 @@ class TestAfterModelResumePath:
         ai_msg = next(m for m in messages if isinstance(m, AIMessage))
         tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
 
-        # Rejected tool call removed from tool_calls
-        assert ai_msg.tool_calls == []
+        # Rejected tool call is RETAINED so its ToolMessage has a matching tool_call_id
+        # (stripping it would orphan the ToolMessage and break history validation).
+        assert [tc["id"] for tc in ai_msg.tool_calls] == ["tc1"]
         # Artificial error ToolMessage injected
         assert len(tool_msgs) == 1
         assert tool_msgs[0].tool_call_id == "tc1"
@@ -240,8 +241,8 @@ class TestAfterModelResumePath:
         # tc1 approved with new args
         approved = next(tc for tc in ai_msg.tool_calls if tc["name"] == "cfgpu__generate_image")
         assert approved["args"]["prompt"] == "fluffy cat"
-        # tc2 rejected — not in tool_calls
-        assert not any(tc["name"] == "cfgpu__generate_video" for tc in ai_msg.tool_calls)
+        # tc2 rejected — RETAINED in tool_calls so its error ToolMessage stays paired
+        assert any(tc["name"] == "cfgpu__generate_video" for tc in ai_msg.tool_calls)
         # tc3 (non-approval) passes through
         assert any(tc["name"] == "search_web" for tc in ai_msg.tool_calls)
         # One error ToolMessage for tc2
@@ -266,6 +267,42 @@ class TestAfterModelResumePath:
         ):
             with pytest.raises(Exception, match="interrupted"):
                 m.after_model(state, MagicMock())
+
+    def test_partial_resume_reemits_only_undecided(self):
+        """Partial resume re-requests only the still-undecided tool calls.
+
+        tc1 already decided in state → must NOT reappear in the SSE/interrupt
+        payload; only tc2 (undecided) should be re-requested.
+        """
+        m = _make_middleware({"cfgpu__generate_*"})
+        msg = _ai_msg([
+            {"id": "tc1", "name": "cfgpu__generate_image", "args": {}},
+            {"id": "tc2", "name": "cfgpu__generate_video", "args": {}},
+        ])
+        state = _make_state([msg], tool_approvals={"tc1": {"status": "approved", "args": {}}})
+
+        captured_sse = []
+        captured_interrupt = []
+
+        def fake_interrupt(value):
+            captured_interrupt.append(value)
+            raise Exception("interrupted")
+
+        with (
+            patch("deerflow.agents.middlewares.human_approval_middleware.get_stream_writer", return_value=lambda d: captured_sse.append(d)),
+            patch("deerflow.agents.middlewares.human_approval_middleware.interrupt", side_effect=fake_interrupt),
+        ):
+            with pytest.raises(Exception, match="interrupted"):
+                m.after_model(state, MagicMock())
+
+        # SSE re-emitted with ONLY the undecided tc2
+        assert len(captured_sse) == 1
+        sse_ids = {tc["id"] for tc in captured_sse[0]["tool_calls"]}
+        assert sse_ids == {"tc2"}
+        # interrupt payload also carries only the undecided tc2
+        assert len(captured_interrupt) == 1
+        interrupt_ids = {tc["id"] for tc in captured_interrupt[0]["tool_calls"]}
+        assert interrupt_ids == {"tc2"}
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +341,8 @@ class TestAfterModelFallbackResume:
             result = m.after_model(state, MagicMock())
 
         ai_msg = next(m for m in result["messages"] if isinstance(m, AIMessage))
-        assert ai_msg.tool_calls == []
+        # Rejected call retained to keep ToolMessage pairing valid
+        assert [tc["id"] for tc in ai_msg.tool_calls] == ["tc1"]
         tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
         assert len(tool_msgs) == 1
         assert tool_msgs[0].tool_call_id == "tc1"
