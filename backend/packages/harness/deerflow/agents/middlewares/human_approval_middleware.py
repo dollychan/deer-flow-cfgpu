@@ -134,15 +134,15 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
                 )
             else:
                 reason = decision.get("reason") or "用户拒绝了这次调用，请向用户确认后再继续。"
-                # Self-describing rejection: echo the tool name + the rejected args (e.g. the
-                # prompt) into the ToolMessage content. Without this, the result is an
-                # anonymous {"status":"cancelled"} blob — to know *which* call it belongs to
-                # the model must join tool_call_id back to the AIMessage, which it does
-                # unreliably and instead guesses by position. In a partial-approval batch
-                # (one approved, one rejected) that positional guess flips, so the model
-                # reports a rejected call as "succeeded" and re-runs the one that actually
-                # ran. Anchoring the identity + "未执行/no output" in the content removes the
-                # join entirely. See BUG: partial-approval tool_result mis-attribution.
+                # Self-describing rejection: the structured fields (tool, rejected_args,
+                # executed=False) carry the call's identity in the ToolMessage content, so the
+                # model attributes it by content rather than joining tool_call_id back to the
+                # AIMessage by position. Without this anchor an anonymous {"status":"cancelled"}
+                # blob makes the model guess by position; in a partial-approval batch that guess
+                # flips and it reports a rejected call as "succeeded". message is a short
+                # human-readable summary — it names the tool and the not-executed signal but does
+                # NOT re-dump args/reason (those live in rejected_args/reason).
+                # See BUG: partial-approval tool_result mis-attribution.
                 rejected_payload = {
                     "status": "rejected",
                     "executed": False,
@@ -151,9 +151,8 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
                     "rejected_args": tc["args"],
                     "reason": reason,
                     "message": (
-                        f"❌ 用户拒绝了调用 {tc['name']}(args={json.dumps(tc['args'], ensure_ascii=False)})。"
-                        "该调用【未执行、无任何产物】。不要将其判定为成功，也不要因此重复其它已成功的调用；"
-                        f"如需继续这一项，请先向用户确认。原因：{reason}"
+                        f"❌ 用户拒绝了对 {tc['name']} 的调用，该调用【未执行、无任何产物】。"
+                        "不要判定为成功或重复其它已成功的调用；如需继续请先向用户确认。"
                     ),
                 }
                 # Keep the tool_call in the AIMessage so ToolMessage.tool_call_id has a

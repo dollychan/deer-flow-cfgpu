@@ -214,13 +214,14 @@ class TestAfterModelResumePath:
         assert "Too expensive" in tool_msgs[0].content
 
     def test_rejected_message_is_self_describing(self):
-        """Rejected ToolMessage must echo tool name + rejected args so the model
-        can attribute it by content, not by positional guess.
+        """Rejected ToolMessage must carry tool name + rejected args (structured)
+        so the model can attribute it by content, not by positional guess.
 
         Regression for partial-approval mis-attribution: with an anonymous
         {"status":"cancelled"} blob, the model joined results to calls by
         position and reported a rejected image as 'succeeded'. The rejection
-        content must now carry the prompt and an explicit not-executed signal.
+        content must now carry the prompt (in rejected_args) and an explicit
+        not-executed signal (in message), without duplicating args/reason text.
         """
         import json
 
@@ -245,8 +246,9 @@ class TestAfterModelResumePath:
         assert payload["tool"] == "cfgpu__generate_image"
         # The identifying arg (prompt) is echoed back so the model knows WHICH call
         assert payload["rejected_args"]["prompt"] == "一只可爱的狗狗"
-        # The subject also appears in the human-readable message
-        assert "一只可爱的狗狗" in payload["message"]
+        # The tool name anchors the message; args/reason are NOT re-dumped into it
+        assert payload["tool"] in payload["message"]
+        assert "一只可爱的狗狗" not in payload["message"]
         # And the not-executed signal is explicit (defeats "succeeded" mis-read)
         assert "未执行" in payload["message"]
 
