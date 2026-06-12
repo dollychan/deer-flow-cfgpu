@@ -800,6 +800,13 @@ sandbox:
 #   # Optional: Prefix for container names (default: deer-flow-sandbox)
 #   # container_prefix: deer-flow-sandbox
 #
+#   # Optional: Per-container cgroup resource limits (local docker backend only).
+#   # Map directly to `docker run --cpus / --memory`. Omit for no limit (default).
+#   # Recommended on small CPU-only hosts so one runaway ffmpeg transcode cannot
+#   # starve the consumer's poll loop (quality isolation, not a count cap).
+#   # container_cpus: "2"        # e.g. "2", "1.5"
+#   # container_memory: "4g"     # e.g. "4g", "2048m"
+#
 #   # Optional: Additional mount directories from host to container
 #   # NOTE: Skills directory is automatically mounted from skills.path to skills.container_path
 #   # mounts:

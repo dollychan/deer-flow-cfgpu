@@ -55,8 +55,122 @@ from deerflow.agents.memory.extraction_worker import run_extraction_loop
 from deerflow.config.app_config import get_app_config
 from deerflow.persistence import close_engine, get_session_factory, init_engine_from_config
 from deerflow.runtime.checkpointer import make_checkpointer
+from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sandbox.security import uses_local_sandbox_provider
 
 logger = logging.getLogger(__name__)
+
+# Override env var to permit the (dangerous) root + host-bash combo in a fully
+# trusted single-tenant environment. See _enforce_host_bash_safety / BUG-014.
+_ALLOW_ROOT_HOST_BASH_ENV = "DEERFLOW_ALLOW_ROOT_HOST_BASH"
+
+
+def _enforce_host_bash_safety(config: Any) -> None:
+    """BUG-014 guard: refuse to run host-bash-on-local-sandbox as root.
+
+    ``LocalSandboxProvider`` + ``sandbox.allow_host_bash`` makes the bash tool a raw
+    host subprocess with no chroot/namespace — the *only* remaining boundary is the
+    process UID plus OS hardening. Running that as root removes even that boundary:
+    bash can read every thread/user directory on the shared FS and the consumer's own
+    secrets (DB / OSS credentials). We fail closed unless explicitly overridden.
+
+    This guard fires only for the dangerous combination (local provider AND
+    ``allow_host_bash``). It is a no-op for AioSandboxProvider (bash runs inside the
+    container) and when host bash is disabled. When host bash is enabled but the
+    process is non-root, we only warn — OS hardening is still required (see
+    ``cfgpu-docs/sandbox.md`` §1).
+    """
+    sandbox_cfg = getattr(config, "sandbox", None)
+    if sandbox_cfg is None:
+        return
+    host_bash_on_local = uses_local_sandbox_provider(config) and bool(
+        getattr(sandbox_cfg, "allow_host_bash", False)
+    )
+    if not host_bash_on_local:
+        return
+
+    geteuid = getattr(os, "geteuid", None)
+    is_root = geteuid is not None and geteuid() == 0
+
+    if not is_root:
+        logger.warning(
+            "sandbox.allow_host_bash is enabled on LocalSandboxProvider: agent bash runs "
+            "directly on the host with NO sandbox boundary. Ensure OS hardening is in place "
+            "(non-root user, systemd ProtectSystem/ReadWritePaths, consumer.env off any "
+            "shared/mounted path). See cfgpu-docs/sandbox.md §1 / BUG-014."
+        )
+        return
+
+    if os.environ.get(_ALLOW_ROOT_HOST_BASH_ENV) == "1":
+        logger.warning(
+            "Running as root with sandbox.allow_host_bash on LocalSandboxProvider; %s=1 "
+            "override is set. Agent bash has full root access to the host and the shared "
+            "filesystem — only use this in a fully trusted single-tenant environment.",
+            _ALLOW_ROOT_HOST_BASH_ENV,
+        )
+        return
+
+    raise RuntimeError(
+        "Refusing to start: sandbox.allow_host_bash is enabled on LocalSandboxProvider while "
+        "running as root (euid=0). Host bash would execute as root with no sandbox boundary, "
+        "exposing every thread/user directory on the shared filesystem and the consumer's own "
+        "secrets (DB/OSS credentials). Run the consumer as a dedicated non-root user with "
+        "systemd hardening (see cfgpu-docs/vm-部署.md / sandbox.md §1, BUG-014), or set "
+        f"{_ALLOW_ROOT_HOST_BASH_ENV}=1 to override in a fully trusted single-tenant environment."
+    )
+
+
+# ── Sandbox provider lifecycle (P1 / BUG-010+011) ─────────────────────────────
+
+
+async def _prewarm_sandbox_provider() -> Any:
+    """Construct the sandbox provider off the main thread / event loop at startup.
+
+    The AIO provider is otherwise lazily built on the first sandbox acquire, inside
+    ``AioSandboxProvider.__init__`` which (a) calls ``signal.signal()`` and (b) runs a
+    synchronous ``docker ps`` orphan reconciliation. Prewarming here via
+    ``asyncio.to_thread`` — *before* the consumer installs its own
+    ``loop.add_signal_handler`` — fixes both:
+
+      - BUG-010: off the main thread ``signal.signal()`` raises ``ValueError`` (already
+        swallowed by the provider), so it does **not** steal the consumer's signal
+        handlers / break draining-first shutdown.
+      - BUG-011: the blocking ``list_running()`` (``docker ps``) runs in the worker
+        thread, not on the event loop.
+
+    ``get_sandbox_provider()`` caches a singleton, so the first real acquire reuses
+    this instance. Returns the provider, or ``None`` if construction fails — startup
+    must not abort, lazy first-acquire stays as the fallback.
+    """
+    try:
+        provider = await asyncio.to_thread(get_sandbox_provider)
+        logger.info("Sandbox provider prewarmed: %s", type(provider).__name__)
+        return provider
+    except Exception:
+        logger.warning(
+            "Sandbox provider prewarm failed; falling back to lazy first-acquire",
+            exc_info=True,
+        )
+        return None
+
+
+async def _shutdown_sandbox_provider(provider: Any) -> None:
+    """Explicitly tear down sandbox containers during draining (P1).
+
+    Because the provider was prewarmed off the main thread it no longer owns a signal
+    handler to clean itself up, so the draining-first shutdown destroys its active +
+    warm-pool containers here, off the event loop. No-op for providers without a
+    ``shutdown`` method (e.g. ``LocalSandboxProvider``) and for ``None`` (prewarm
+    failure). The provider's ``atexit`` registration remains as a crash-time fallback.
+    """
+    shutdown = getattr(provider, "shutdown", None)
+    if not callable(shutdown):
+        return
+    try:
+        await asyncio.to_thread(shutdown)
+        logger.info("Sandbox provider shut down")
+    except Exception:
+        logger.warning("Sandbox provider shutdown failed", exc_info=True)
 
 
 # ── RocketMQ producer adapter ─────────────────────────────────────────────────
@@ -296,6 +410,9 @@ async def main() -> None:
             "Set ROCKETMQ_ENDPOINT (or consumer.endpoint in config.yaml)."
         )
 
+    # 1b. BUG-014 guard: never run host-bash-on-local-sandbox as root.
+    _enforce_host_bash_safety(config)
+
     # 2. Init DB — consumer ORM tables already registered by the top-level import
     await init_engine_from_config(config.database)
     session_factory = get_session_factory()
@@ -335,7 +452,9 @@ async def main() -> None:
 
         bridge = MQStreamBridge(producer_adapter)
         active_tasks: set[asyncio.Task] = set()
-        runner = AgentRunner(registry, bridge, checkpointer, config, task_registry=active_tasks)
+        # No pinned app_config: AgentRunner resolves it live per build via
+        # get_app_config() so config.yaml hot-reloads without a consumer restart.
+        runner = AgentRunner(registry, bridge, checkpointer, task_registry=active_tasks)
         # v2 layering (§2.5/§2.6): Scheduler owns claim + dispatch; ingest only lands + pokes.
         scheduler = Scheduler(
             registry,
@@ -374,7 +493,13 @@ async def main() -> None:
             consumer_cfg.consumer_group,
         )
 
-        # 8. Shutdown event + signal handlers
+        # 8. Prewarm sandbox provider BEFORE installing signal handlers (P1 / BUG-010+011):
+        #    construct it off the main thread so its signal.signal() raises ValueError
+        #    (swallowed) instead of stealing our handlers, and so its docker-ps orphan
+        #    reconciliation runs off the event loop. Lazy first-acquire stays as fallback.
+        sandbox_provider = await _prewarm_sandbox_provider()
+
+        # 9. Shutdown event + signal handlers
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -462,6 +587,11 @@ async def main() -> None:
         for task in maintenance_tasks:
             task.cancel()
         await asyncio.gather(*maintenance_tasks, return_exceptions=True)
+
+        # ④b destroy sandbox containers (P1): in-flight runs are drained (③) so their
+        #     containers are parked in the warm pool; tear them down explicitly here
+        #     since we no longer rely on the provider's own signal handler (BUG-010).
+        await _shutdown_sandbox_provider(sandbox_provider)
 
         mq_task_consumer.shutdown()
         logger.info("RocketMQ consumer shut down")

@@ -190,6 +190,8 @@ class LocalContainerBackend(SandboxBackend):
         container_prefix: str,
         config_mounts: list,
         environment: dict[str, str],
+        container_cpus: str | None = None,
+        container_memory: str | None = None,
     ):
         """Initialize the local container backend.
 
@@ -199,12 +201,18 @@ class LocalContainerBackend(SandboxBackend):
             container_prefix: Prefix for container names (e.g., "deer-flow-sandbox").
             config_mounts: Volume mount configurations from config (list of VolumeMountConfig).
             environment: Environment variables to inject into containers.
+            container_cpus: Optional ``docker run --cpus`` value (e.g. "2"). When unset,
+                no flag is emitted and the command is byte-identical to the original.
+            container_memory: Optional ``docker run --memory`` value (e.g. "4g"). When
+                unset, no flag is emitted.
         """
         self._image = image
         self._base_port = base_port
         self._container_prefix = container_prefix
         self._config_mounts = config_mounts
         self._environment = environment
+        self._container_cpus = container_cpus
+        self._container_memory = container_memory
         self._runtime = self._detect_runtime()
 
     @property
@@ -506,6 +514,14 @@ class LocalContainerBackend(SandboxBackend):
         # Docker-specific security options
         if self._runtime == "docker":
             cmd.extend(["--security-opt", "seccomp=unconfined"])
+
+        # Optional cgroup resource limits (config-gated, docker-only). Absent config ==
+        # no flags == original behavior (upstreamable additive seam, D9 quality isolation).
+        if self._runtime == "docker":
+            if self._container_cpus:
+                cmd.extend(["--cpus", str(self._container_cpus)])
+            if self._container_memory:
+                cmd.extend(["--memory", str(self._container_memory)])
 
         if self._runtime == "docker":
             port_mapping = f"{_resolve_docker_bind_host()}:{port}:8080"

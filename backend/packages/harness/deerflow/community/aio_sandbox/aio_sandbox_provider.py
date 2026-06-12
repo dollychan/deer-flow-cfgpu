@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 try:
     import fcntl
@@ -192,6 +193,8 @@ class AioSandboxProvider(SandboxProvider):
             container_prefix=self._config["container_prefix"],
             config_mounts=self._config["mounts"],
             environment=self._config["environment"],
+            container_cpus=self._config.get("container_cpus"),
+            container_memory=self._config.get("container_memory"),
         )
 
     # ── Configuration ────────────────────────────────────────────────────
@@ -214,6 +217,9 @@ class AioSandboxProvider(SandboxProvider):
             "environment": self._resolve_env_vars(sandbox_config.environment or {}),
             # provisioner URL for dynamic pod management (e.g. http://provisioner:8002)
             "provisioner_url": getattr(sandbox_config, "provisioner_url", None) or "",
+            # Optional per-container cgroup limits (config-gated; None = no flag = original behavior).
+            "container_cpus": getattr(sandbox_config, "container_cpus", None),
+            "container_memory": getattr(sandbox_config, "container_memory", None),
         }
 
     @staticmethod
@@ -448,34 +454,59 @@ class AioSandboxProvider(SandboxProvider):
 
     # ── Thread locking (in-process) ──────────────────────────────────────
 
+    def _identity_key(self, thread_id: str, user_id: str | None = None) -> str:
+        """Isolation key for a thread's sandbox identity (the single keying seam).
+
+        The three keying sites — the container-name source (``_sandbox_id_for_thread``),
+        the ``_thread_sandboxes`` reuse map, and the in-process thread lock — all route
+        through this one method so they stay consistent with each other.
+
+        ``user_id`` is an *optional explicit override*. The acquire path omits it (the
+        effective user is read from the ambient ContextVar, co-located with the mounts);
+        the cancel-into-container path (D7) passes it explicitly, because the watcher is a
+        sibling task that must not re-resolve the user (R1).
+
+        The base implementation keys by ``thread_id`` alone — it ignores ``user_id``
+        entirely: behaviour-preserving, byte-for-byte identical to the historical
+        ``sha256(thread_id)`` derivation, and therefore safe to upstream. Subclasses that
+        bind-mount per-``(user, thread)`` data MUST override this to fold the user in
+        (preferring the explicit ``user_id`` when given, else the same source the mounts
+        use, e.g. ``get_effective_user_id``); otherwise two users colliding on a
+        ``thread_id`` reuse each other's sandbox and read into each other's bucket (D11
+        cross-user reuse leak).
+        """
+        return thread_id
+
     def _get_thread_lock(self, thread_id: str) -> threading.Lock:
-        """Get or create an in-process lock for a specific thread_id."""
+        """Get or create an in-process lock for a specific thread."""
+        key = self._identity_key(thread_id)
         with self._lock:
-            if thread_id not in self._thread_locks:
-                self._thread_locks[thread_id] = threading.Lock()
-            return self._thread_locks[thread_id]
+            if key not in self._thread_locks:
+                self._thread_locks[key] = threading.Lock()
+            return self._thread_locks[key]
 
     def _sandbox_id_for_thread(self, thread_id: str | None) -> str:
         """Return deterministic IDs for thread sandboxes and random IDs otherwise."""
-        return self._deterministic_sandbox_id(thread_id) if thread_id else str(uuid.uuid4())[:8]
+        return self._deterministic_sandbox_id(self._identity_key(thread_id)) if thread_id else str(uuid.uuid4())[:8]
 
     def _reuse_in_process_sandbox(self, thread_id: str | None, *, post_lock: bool = False) -> str | None:
         """Reuse an active in-process sandbox for a thread if one is still tracked."""
         if thread_id is None:
             return None
 
+        key = self._identity_key(thread_id)
         with self._lock:
-            if thread_id not in self._thread_sandboxes:
+            if key not in self._thread_sandboxes:
                 return None
 
-            existing_id = self._thread_sandboxes[thread_id]
+            existing_id = self._thread_sandboxes[key]
             if existing_id in self._sandboxes:
                 suffix = " (post-lock check)" if post_lock else ""
                 logger.info(f"Reusing in-process sandbox {existing_id} for thread {thread_id}{suffix}")
                 self._last_activity[existing_id] = time.time()
                 return existing_id
 
-            del self._thread_sandboxes[thread_id]
+            del self._thread_sandboxes[key]
             return None
 
     def _reclaim_warm_pool_sandbox(self, thread_id: str | None, sandbox_id: str, *, post_lock: bool = False) -> str | None:
@@ -488,15 +519,36 @@ class AioSandboxProvider(SandboxProvider):
                 return None
 
             info, _ = self._warm_pool.pop(sandbox_id)
+
+        # Health-gate promotion OUTSIDE the global lock: a subclass may probe the
+        # container (docker), which must never stall every other provider operation.
+        # The per-thread acquire lock already serializes same-identity reclaim, so the
+        # popped entry cannot be re-raced while we check it.
+        if not self._warm_is_promotable(info):
+            logger.info(f"Discarding stale warm-pool sandbox {sandbox_id} for thread {thread_id} (no longer alive)")
+            return None
+
+        with self._lock:
             sandbox = AioSandbox(id=sandbox_id, base_url=info.sandbox_url)
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
             self._last_activity[sandbox_id] = time.time()
-            self._thread_sandboxes[thread_id] = sandbox_id
+            self._thread_sandboxes[self._identity_key(thread_id)] = sandbox_id
 
         suffix = " (post-lock check)" if post_lock else f" at {info.sandbox_url}"
         logger.info(f"Reclaimed warm-pool sandbox {sandbox_id} for thread {thread_id}{suffix}")
         return sandbox_id
+
+    def _warm_is_promotable(self, info: SandboxInfo) -> bool:
+        """Whether a popped warm-pool entry may be promoted back to active (P4 / R2).
+
+        Base always promotes — byte-for-byte unchanged, upstreamable. A subclass whose
+        warm pool may hold entries a per-host janitor has already ``docker rm -f``'d
+        overrides this to probe ``self._backend.is_alive(info)``: a dead reference is then
+        discarded and the acquire falls back to discover/create instead of handing back a
+        sandbox whose container is gone (I19).
+        """
+        return True
 
     def _recheck_cached_sandbox(self, thread_id: str, sandbox_id: str) -> str | None:
         """Re-check in-memory caches after acquiring the cross-process file lock."""
@@ -509,7 +561,7 @@ class AioSandboxProvider(SandboxProvider):
             self._sandboxes[info.sandbox_id] = sandbox
             self._sandbox_infos[info.sandbox_id] = info
             self._last_activity[info.sandbox_id] = time.time()
-            self._thread_sandboxes[thread_id] = info.sandbox_id
+            self._thread_sandboxes[self._identity_key(thread_id)] = info.sandbox_id
 
         logger.info(f"Discovered existing sandbox {info.sandbox_id} for thread {thread_id} at {info.sandbox_url}")
         return info.sandbox_id
@@ -522,7 +574,7 @@ class AioSandboxProvider(SandboxProvider):
             self._sandbox_infos[sandbox_id] = info
             self._last_activity[sandbox_id] = time.time()
             if thread_id:
-                self._thread_sandboxes[thread_id] = sandbox_id
+                self._thread_sandboxes[self._identity_key(thread_id)] = sandbox_id
 
         logger.info(f"Created sandbox {sandbox_id} for thread {thread_id} at {info.sandbox_url}")
         return sandbox_id
@@ -625,7 +677,9 @@ class AioSandboxProvider(SandboxProvider):
         sandbox_id = self._sandbox_id_for_thread(thread_id)
 
         # ── Layer 1.5: Warm pool (container still running, no cold-start) ──
-        reclaimed_id = self._reclaim_warm_pool_sandbox(thread_id, sandbox_id)
+        # Offloaded: the warm health-gate (R2) may probe docker, which must stay off
+        # the event loop. Base reclaim is pure in-memory, so this is only a thread hop.
+        reclaimed_id = await asyncio.to_thread(self._reclaim_warm_pool_sandbox, thread_id, sandbox_id)
         if reclaimed_id is not None:
             return reclaimed_id
 
@@ -634,6 +688,19 @@ class AioSandboxProvider(SandboxProvider):
             return await self._discover_or_create_with_lock_async(thread_id, sandbox_id)
 
         return await self._create_sandbox_async(thread_id, sandbox_id)
+
+    def _creation_lock_path(self, thread_id: str, sandbox_id: str, *, user_id: str | None = None) -> Path:
+        """Filesystem path of the cross-process sandbox-creation lock (P4 / R3).
+
+        Base places it on the per-thread data dir (``{thread_dir}/{sandbox_id}.lock``) —
+        byte-for-byte unchanged. That dir lives on shared storage (virtiofs), where flock
+        semantics are unreliable. A subclass running per-VM local docker overrides this to
+        relocate the lock onto per-host *local* disk (keyed by the same ``sandbox_id``),
+        turning the creation lock into a real flock without touching the data layout (I17).
+        The parent directory is already ensured by the caller's ``ensure_thread_dirs``;
+        an override that points elsewhere is responsible for creating its own lock dir.
+        """
+        return get_paths().thread_dir(thread_id, user_id=user_id) / f"{sandbox_id}.lock"
 
     def _discover_or_create_with_lock(self, thread_id: str, sandbox_id: str) -> str:
         """Discover an existing sandbox or create a new one under a cross-process file lock.
@@ -644,7 +711,7 @@ class AioSandboxProvider(SandboxProvider):
         paths = get_paths()
         user_id = get_effective_user_id()
         paths.ensure_thread_dirs(thread_id, user_id=user_id)
-        lock_path = paths.thread_dir(thread_id, user_id=user_id) / f"{sandbox_id}.lock"
+        lock_path = self._creation_lock_path(thread_id, sandbox_id, user_id=user_id)
 
         with open(lock_path, "a", encoding="utf-8") as lock_file:
             locked = False
@@ -672,7 +739,7 @@ class AioSandboxProvider(SandboxProvider):
         paths = get_paths()
         user_id = get_effective_user_id()
         await asyncio.to_thread(paths.ensure_thread_dirs, thread_id, user_id=user_id)
-        lock_path = paths.thread_dir(thread_id, user_id=user_id) / f"{sandbox_id}.lock"
+        lock_path = await asyncio.to_thread(self._creation_lock_path, thread_id, sandbox_id, user_id=user_id)
 
         lock_file = await asyncio.to_thread(_open_lock_file, lock_path)
         locked = False
@@ -884,7 +951,18 @@ class AioSandboxProvider(SandboxProvider):
             logger.info("Stopped idle checker thread")
 
         logger.info(f"Shutting down {len(sandbox_ids)} active + {len(warm_items)} warm-pool sandbox(es)")
+        self._destroy_on_shutdown(sandbox_ids, warm_items)
 
+    def _destroy_on_shutdown(self, sandbox_ids: list[str], warm_items: list[tuple[str, tuple[SandboxInfo, float]]]) -> None:
+        """Tear down sandboxes during shutdown. Overridable seam (P4 / I16).
+
+        The base destroys every tracked active + warm container — correct for a
+        single-tenant process that exclusively owns its containers. In a multi-process
+        VM where ``_reconcile_orphans`` adopts *foreign* containers (other instances')
+        into this process's warm pool, a subclass overrides this to a no-op so shutdown
+        never blind-``docker stop``s a container another instance is actively serving;
+        orphans are instead reclaimed out-of-band by a per-host run-flock janitor (D5/D13).
+        """
         for sandbox_id in sandbox_ids:
             try:
                 self.destroy(sandbox_id)

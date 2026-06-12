@@ -55,6 +55,14 @@ class SandboxConfig(BaseModel):
         default=None,
         description="Idle timeout in seconds before sandbox is released (default: 600 = 10 minutes). Set to 0 to disable.",
     )
+    container_cpus: str | None = Field(
+        default=None,
+        description="Optional per-container CPU limit passed to 'docker run --cpus' (e.g. '2'). AioSandboxProvider local backend only. Unset = no limit (original behavior).",
+    )
+    container_memory: str | None = Field(
+        default=None,
+        description="Optional per-container memory limit passed to 'docker run --memory' (e.g. '4g'). AioSandboxProvider local backend only. Unset = no limit (original behavior).",
+    )
     mounts: list[VolumeMountConfig] = Field(
         default_factory=list,
         description="List of volume mounts to share directories between host and container",

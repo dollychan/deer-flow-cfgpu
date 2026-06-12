@@ -17,20 +17,25 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
 from collections import defaultdict
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
+from app.consumer import sandbox_locks
 from app.consumer.constants import ProcessedStatus, QueuePolicy
 from app.consumer.run_registry import ClaimedRun, RunRegistry
 from app.consumer.schemas import ContentItem, TaskMessage, UserMessage
 from app.consumer.stream_bridge.mq import MQStreamBridge
-from deerflow.config.app_config import AppConfig
+from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.runtime.cancel_signal import CancelState, get_cancel_state, install_cancel_event, reset_cancel_event
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 logger = logging.getLogger(__name__)
 
@@ -80,13 +85,18 @@ class AgentRunner:
         registry: RunRegistry,
         bridge: MQStreamBridge,
         checkpointer: Any,
-        app_config: AppConfig,
+        app_config: AppConfig | None = None,
         task_registry: set[asyncio.Task] | None = None,
     ) -> None:
         self._registry = registry
         self._bridge = bridge
         self._checkpointer = checkpointer
-        self._app_config = app_config
+        # Optional pinned override (used by tests). When None, each agent build
+        # resolves the live config via get_app_config(), which hot-reloads on
+        # config.yaml mtime change — matching the Gateway request path. A pinned
+        # snapshot here would freeze fields like models[*].supports_thinking for
+        # the whole lifetime of this long-running consumer process.
+        self._app_config_override = app_config
         self._task_registry = task_registry  # shared with the Scheduler's in-flight set
 
     # ── Public entry point ────────────────────────────────────────────────────
@@ -147,9 +157,15 @@ class AgentRunner:
             name=f"heartbeat-{run_id[:8]}",
         )
         cancel_watcher_task = asyncio.create_task(
-            self._cancel_watcher(thread_id, seq, runner_task, cancel_state, poll_interval=2),
+            self._cancel_watcher(thread_id, seq, runner_task, cancel_state, poll_interval=2, user_id=message.user_id),
             name=f"cancel-watcher-{run_id[:8]}",
         )
+
+        # Run-flock (D13): held for this run's whole lifetime so the per-host janitor keeps
+        # this thread's container while the run executes. Acquired here (before the graph
+        # creates the container — the marker is keyed by the deterministic sid, not the
+        # container's existence) and released in finally so a crash drops it via the kernel.
+        run_flock = await self._acquire_run_flock(message.user_id, thread_id)
 
         agent: Any = None
         runnable_config: RunnableConfig | None = None
@@ -241,6 +257,7 @@ class AgentRunner:
 
         finally:
             reset_cancel_event(cancel_event_token)
+            await self._release_run_flock(run_flock)
             cancel_watcher_task.cancel()
             heartbeat_task.cancel()
             self._bridge.unregister_run(run_id)
@@ -318,27 +335,34 @@ class AgentRunner:
         # Add "updates" as an internal-only super-step boundary signal for cooperative
         # cancel (BUG-009 / cancel.md §4.3). It fires once per completed super-step — the
         # only point where no node is in flight and the just-committed step (incl. a
-        # drained cfgpu ToolMessage) is already checkpointed (durability=sync). It is
-        # never downlinked. Requires checkpoint durability=sync, else a resume re-runs the
-        # node and re-submits cfgpu (double billing).
+        # drained cfgpu ToolMessage) has gone through after_tick. It is never downlinked.
         effective_stream_mode = stream_mode if "updates" in stream_mode else [*stream_mode, "updates"]
         cooperative_cancel = False
-        async for mode, chunk in agent.astream(
-            stream_input,
-            config=runnable_config,
-            stream_mode=effective_stream_mode,
-        ):
-            if mode == "updates":
-                # Super-step boundary. If a cancel was folded while a shielded tool was
-                # draining, stop here — cleanly, after the tool's result is checkpointed
-                # and (via inner MessageStreamMiddleware) already downlinked.
-                if cancel_event is not None and cancel_event.is_set():
-                    cooperative_cancel = True
-                    break
-                continue  # internal-only: never downlink "updates"
-            if mode == "messages" and _is_empty_message_chunk(chunk):
-                continue
-            await self._bridge.publish(run_id, mode, serialize(chunk, mode=mode))
+        # aclosing() guarantees the astream generator is finalized on every exit path
+        # (cancel.md §4.3). Under the default durability="async" LangGraph submits each
+        # super-step's checkpoint write to a background executor and only awaits it when the
+        # Pregel loop is finalized (AsyncBackgroundExecutor.__aexit__). A bare
+        # `async for ... break` would leave that write pending, and the aget_state below / in
+        # _run's CancelledError handler would race it — the drained cfgpu ToolMessage missing
+        # from the checkpoint, the next turn seeing a dangling tool_call (billed result lost
+        # from state). Finalizing here flushes *this* run's pending write without forcing
+        # global durability="sync" (which would serialize every super-step of every run).
+        # Normal completion exhausts the generator first, so the flush is then a no-op.
+        async with aclosing(
+            agent.astream(stream_input, config=runnable_config, stream_mode=effective_stream_mode)
+        ) as agen:
+            async for mode, chunk in agen:
+                if mode == "updates":
+                    # Super-step boundary. If a cancel was folded while a shielded tool was
+                    # draining, stop here — cleanly, after the tool's result is checkpointed
+                    # and (via inner MessageStreamMiddleware) already downlinked.
+                    if cancel_event is not None and cancel_event.is_set():
+                        cooperative_cancel = True
+                        break
+                    continue  # internal-only: never downlink "updates"
+                if mode == "messages" and _is_empty_message_chunk(chunk):
+                    continue
+                await self._bridge.publish(run_id, mode, serialize(chunk, mode=mode))
 
         if cooperative_cancel:
             # Translate the cooperative stop into the same terminal path as a hard cancel:
@@ -536,6 +560,10 @@ class AgentRunner:
         """Build the LangGraph RunnableConfig from a TaskMessage."""
         task_cfg = message.config
 
+        # Resolve config fresh per build so config.yaml hot-reloads take effect
+        # without restarting the consumer (the override seam is for tests).
+        app_config = self._app_config_override or get_app_config()
+
         # agent_name="lead_agent" (default) is treated as no custom agent
         agent_name = message.agent_name if message.agent_name != "lead_agent" else None
 
@@ -548,7 +576,7 @@ class AgentRunner:
             # MQ protocol uses thinking_enabled as the plan-mode switch
             "is_plan_mode": thinking_enabled,
             "ask": task_cfg.get("ask", True),
-            "app_config": self._app_config,
+            "app_config": app_config,
             # Controls whether web-group tools (web_search, web_fetch) are loaded
             "web_search_enabled": task_cfg.get("web_search_enabled", True),
         }
@@ -568,7 +596,7 @@ class AgentRunner:
         context: dict[str, Any] = {
             "thread_id": message.thread_id,
             "run_id": run_id,
-            "app_config": self._app_config,
+            "app_config": app_config,
         }
         if message.user_id:
             context["user_id"] = message.user_id
@@ -668,6 +696,58 @@ class AgentRunner:
             except Exception:
                 logger.debug("Heartbeat update failed for thread %s", thread_id, exc_info=True)
 
+    async def _kill_thread_sandbox(self, user_id: str | None, thread_id: str) -> None:
+        """Hard-kill this thread's local sandbox container (D7 cancel-into-container).
+
+        No-op unless the active provider is an AIO provider on a local docker backend.
+        Order is the linchpin (R1): ``docker kill`` MUST precede ``provider.destroy``. A
+        wedged ``execute_command`` (sync + ``threading.Lock``, offloaded via ``to_thread``)
+        cannot be reached by ``runner_task.cancel()``; SIGKILL severs its HTTP call so the
+        thread returns and ``AioSandbox._lock`` releases. Only then can ``destroy`` —
+        which needs that same lock to ``close()`` the client — run cleanly (cancel.md §4.4).
+
+        ``user_id`` flows in explicitly from the run message and is fed to the *same*
+        identity seam ``_identity_key`` that acquire used (P2.5), so the container name
+        matches — never the legacy thread-only hash, which would miss after P2.5 and leave
+        the container wedged. It is not re-resolved here (R1).
+        """
+        provider = _maybe_aio_local_provider()
+        if provider is None:
+            return
+        # Same identity source as acquire/discover/run-flock → name parity (R1/I15).
+        sandbox_id = provider._deterministic_sandbox_id(provider._identity_key(thread_id, user_id))
+        prefix = provider._config.get("container_prefix") or "deer-flow-sandbox"
+        container_name = f"{prefix}-{sandbox_id}"
+        # ① kill first (SIGKILL → HTTP severed → wedged to_thread returns, lock released).
+        await asyncio.to_thread(_docker_kill, container_name)
+        # ② then destroy: clears in-memory tracking; the inner docker stop is now a no-op
+        #    (container already gone) and close() no longer blocks on the freed lock.
+        try:
+            await asyncio.to_thread(provider.destroy, sandbox_id)
+        except Exception:
+            logger.warning("Sandbox destroy failed after kill for thread %s", thread_id, exc_info=True)
+
+    async def _acquire_run_flock(self, user_id: str | None, thread_id: str) -> Any:
+        """Take this run's shared run-flock so the per-host janitor sees it as active (D13).
+
+        No-op (returns ``None``) unless the active provider is an AIO local-docker provider
+        and a real ``user_id`` is known — the sid is derived from the *same* identity seam
+        ``_identity_key`` that acquire and D7 cancel use, so the flock file, the container
+        name, and the creation lock all key off one ``sandbox_id`` (I15). Offloaded: open +
+        ``flock`` are blocking syscalls and must not run on the event loop.
+        """
+        provider = _maybe_aio_local_provider()
+        if provider is None or not user_id:
+            return None
+        sandbox_id = provider._deterministic_sandbox_id(provider._identity_key(thread_id, user_id))
+        return await asyncio.to_thread(sandbox_locks.acquire_run_flock, sandbox_id)
+
+    async def _release_run_flock(self, run_flock: Any) -> None:
+        """Release this run's run-flock and stamp park-time mtime (janitor warm_ttl anchor)."""
+        if run_flock is None:
+            return
+        await asyncio.to_thread(sandbox_locks.release_run_flock, run_flock)
+
     async def _cancel_watcher(
         self,
         thread_id: str,
@@ -675,6 +755,7 @@ class AgentRunner:
         runner_task: asyncio.Task,
         cancel_state: CancelState | None = None,
         poll_interval: int = 2,
+        user_id: str | None = None,
     ) -> None:
         """Poll thread_run_state.cancel_watermark; cancel the run when it covers this seq (§7.1).
 
@@ -722,12 +803,54 @@ class AgentRunner:
                     continue
                 logger.info("Cancel: hard-cancelling run seq=%d thread=%s", current_task_seq, thread_id)
                 runner_task.cancel()
+                # Break into the container (D7): runner_task.cancel() cannot reach a
+                # wedged execute_command offloaded via to_thread; docker kill frees it.
+                await self._kill_thread_sandbox(user_id, thread_id)
                 return
             except Exception:
                 logger.debug("Cancel watcher error for thread %s", thread_id, exc_info=True)
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────────
+
+
+def _maybe_aio_local_provider() -> AioSandboxProvider | None:
+    """Return the active sandbox provider iff ``docker kill`` applies to it.
+
+    That is: an AIO provider (base or director subclass) running on a *local* docker
+    backend — the only configuration where the consumer owns the container and can kill it
+    by name (D7). For the local-host LocalSandboxProvider or a remote/provisioner backend,
+    there is no local container to kill, so this returns None and the cancel path stays a
+    no-op. Construction is already prewarmed (P1), so this just reads the cached singleton.
+    """
+    try:
+        provider = get_sandbox_provider()
+    except Exception:
+        logger.debug("Sandbox provider unavailable for cancel-into-container", exc_info=True)
+        return None
+    if isinstance(provider, AioSandboxProvider) and getattr(provider, "uses_thread_data_mounts", False):
+        return provider
+    return None
+
+
+def _docker_kill(container_name: str) -> None:
+    """SIGKILL a sandbox container by name; ignore 'no such container'.
+
+    Blocking subprocess — always call via ``asyncio.to_thread`` so the event loop is not
+    stalled. ``--rm`` containers vanish on kill, so a missing container is success, not an
+    error; any other failure is logged but never raised (the cancel must not be derailed).
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "kill", container_name],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 and "no such container" not in result.stderr.lower():
+            logger.warning("docker kill %s failed: %s", container_name, result.stderr.strip())
+    except Exception:
+        logger.warning("docker kill %s raised", container_name, exc_info=True)
 
 
 def _checkpoint_id_of(state: Any) -> str | None:
