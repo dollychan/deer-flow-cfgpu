@@ -213,6 +213,43 @@ class TestAfterModelResumePath:
         assert tool_msgs[0].status == "error"
         assert "Too expensive" in tool_msgs[0].content
 
+    def test_rejected_message_is_self_describing(self):
+        """Rejected ToolMessage must echo tool name + rejected args so the model
+        can attribute it by content, not by positional guess.
+
+        Regression for partial-approval mis-attribution: with an anonymous
+        {"status":"cancelled"} blob, the model joined results to calls by
+        position and reported a rejected image as 'succeeded'. The rejection
+        content must now carry the prompt and an explicit not-executed signal.
+        """
+        import json
+
+        m = _make_middleware()
+        msg = _ai_msg([{"id": "tc1", "name": "cfgpu__generate_image", "args": {"prompt": "一只可爱的狗狗"}}])
+        state = _make_state(
+            [msg],
+            tool_approvals={"tc1": {"status": "rejected"}},
+        )
+
+        with (
+            patch("deerflow.agents.middlewares.human_approval_middleware.get_stream_writer", return_value=lambda d: None),
+            patch("deerflow.agents.middlewares.human_approval_middleware.interrupt", side_effect=AssertionError("should not call")),
+        ):
+            result = m.after_model(state, MagicMock())
+
+        tool_msg = next(m for m in result["messages"] if isinstance(m, ToolMessage))
+        payload = json.loads(tool_msg.content)
+
+        assert payload["status"] == "rejected"
+        assert payload["executed"] is False
+        assert payload["tool"] == "cfgpu__generate_image"
+        # The identifying arg (prompt) is echoed back so the model knows WHICH call
+        assert payload["rejected_args"]["prompt"] == "一只可爱的狗狗"
+        # The subject also appears in the human-readable message
+        assert "一只可爱的狗狗" in payload["message"]
+        # And the not-executed signal is explicit (defeats "succeeded" mis-read)
+        assert "未执行" in payload["message"]
+
     def test_mixed_batch_approved_and_rejected(self):
         m = _make_middleware({"cfgpu__generate_*"})
         msg = _ai_msg([

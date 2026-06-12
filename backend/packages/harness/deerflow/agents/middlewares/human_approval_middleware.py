@@ -133,7 +133,29 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
                     approved_args != tc["args"],
                 )
             else:
-                reason = decision.get("reason", "User REJECTED the tool call. Ask for clarification.")
+                reason = decision.get("reason") or "用户拒绝了这次调用，请向用户确认后再继续。"
+                # Self-describing rejection: echo the tool name + the rejected args (e.g. the
+                # prompt) into the ToolMessage content. Without this, the result is an
+                # anonymous {"status":"cancelled"} blob — to know *which* call it belongs to
+                # the model must join tool_call_id back to the AIMessage, which it does
+                # unreliably and instead guesses by position. In a partial-approval batch
+                # (one approved, one rejected) that positional guess flips, so the model
+                # reports a rejected call as "succeeded" and re-runs the one that actually
+                # ran. Anchoring the identity + "未执行/no output" in the content removes the
+                # join entirely. See BUG: partial-approval tool_result mis-attribution.
+                rejected_payload = {
+                    "status": "rejected",
+                    "executed": False,
+                    "output": None,
+                    "tool": tc["name"],
+                    "rejected_args": tc["args"],
+                    "reason": reason,
+                    "message": (
+                        f"❌ 用户拒绝了调用 {tc['name']}(args={json.dumps(tc['args'], ensure_ascii=False)})。"
+                        "该调用【未执行、无任何产物】。不要将其判定为成功，也不要因此重复其它已成功的调用；"
+                        f"如需继续这一项，请先向用户确认。原因：{reason}"
+                    ),
+                }
                 # Keep the tool_call in the AIMessage so ToolMessage.tool_call_id has a
                 # matching entry — stripping it creates an orphaned ToolMessage that breaks
                 # LangChain message history validation and confuses the model on future turns.
@@ -141,7 +163,7 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
                 new_tool_calls.append(tc)
                 artificial_messages.append(
                     ToolMessage(
-                        content=json.dumps({"status": "cancelled", "reason": reason}),
+                        content=json.dumps(rejected_payload, ensure_ascii=False),
                         tool_call_id=tc["id"],
                         name=tc["name"],
                         status="error",
