@@ -101,4 +101,4 @@ async def present_urls_tool(
 
 # Client-facing visibility for MessageStreamMiddleware: this tool's output is a
 # final deliverable, emitted as an `artifact` event (carrying ToolMessage.artifact).
-present_urls_tool.metadata = {"visibility": "artifact"}
+present_urls_tool.metadata = {"visibility": "internal"}
