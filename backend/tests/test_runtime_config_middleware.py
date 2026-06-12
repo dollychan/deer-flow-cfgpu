@@ -495,6 +495,39 @@ def _build_context(skills=None, models=None):
     return rc["configurable"]["__pregel_runtime"].context
 
 
+def test_build_config_resolves_live_config_when_no_override():
+    """No pinned app_config → each build re-resolves via get_app_config().
+
+    Locks the consumer hot-reload fix: a long-running consumer must pick up
+    config.yaml edits (e.g. models[*].supports_thinking) without a restart,
+    matching the Gateway request path. A startup snapshot would freeze it.
+    """
+    from unittest.mock import patch
+
+    from app.consumer.agent_runner import AgentRunner
+
+    runner = AgentRunner(MagicMock(), MagicMock(), None)  # no app_config override
+    sentinel = MagicMock(name="live_app_config")
+    with patch("app.consumer.agent_runner.get_app_config", return_value=sentinel) as gac:
+        rc = runner._build_config(_task_message(), "run-1")
+    gac.assert_called_once()
+    assert rc["configurable"]["app_config"] is sentinel
+
+
+def test_build_config_prefers_pinned_override():
+    """An explicit app_config (test seam) is used verbatim, bypassing get_app_config()."""
+    from unittest.mock import patch
+
+    from app.consumer.agent_runner import AgentRunner
+
+    pinned = MagicMock(name="pinned_app_config")
+    runner = AgentRunner(MagicMock(), MagicMock(), None, pinned)
+    with patch("app.consumer.agent_runner.get_app_config") as gac:
+        rc = runner._build_config(_task_message(), "run-1")
+    gac.assert_not_called()
+    assert rc["configurable"]["app_config"] is pinned
+
+
 def test_build_config_passes_skills_to_context():
     ctx = _build_context(skills=[_SKILL_NAME])
     assert ctx["skills"] == [_SKILL_NAME]
