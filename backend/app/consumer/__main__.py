@@ -176,6 +176,24 @@ async def _shutdown_sandbox_provider(provider: Any) -> None:
 # ── RocketMQ producer adapter ─────────────────────────────────────────────────
 
 
+def _make_task_filter(tag: str) -> Any:
+    """Build the uplink subscription filter for ``task_topic``.
+
+    Uses RocketMQ's native TAG filter (``FilterType.TAG``) for an exact
+    single-tag match — universally supported by all brokers without needing
+    SQL property-filter to be enabled. Empty tag → ``"*"`` (accept all).
+
+    The producer side stamps the *same* tag on every downlink message (see
+    ``_RocketMQProducerAdapter`` constructed with ``tag=task_topic_tag`` in
+    ``run()``), so uplink and downlink correspond on a single routing tag.
+    """
+    from rocketmq import FilterExpression
+
+    if tag:
+        return FilterExpression(tag)
+    return FilterExpression("*")
+
+
 class _RocketMQProducerAdapter:
     """Wraps the sync RocketMQ Producer to satisfy the MQProducer protocol.
 
@@ -429,7 +447,7 @@ async def main() -> None:
         executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="rmq")
 
         # 5. Build RocketMQ producer
-        from rocketmq import ClientConfiguration, Credentials, FilterExpression, Producer, SimpleConsumer
+        from rocketmq import ClientConfiguration, Credentials, Producer, SimpleConsumer
 
         credentials = Credentials(consumer_cfg.username, consumer_cfg.password)
         mq_client_config = ClientConfiguration(consumer_cfg.endpoint, credentials, request_timeout=10)
@@ -441,6 +459,10 @@ async def main() -> None:
         producer_adapter = _RocketMQProducerAdapter(
             mq_producer,
             result_topic=consumer_cfg.result_topic,
+            # Stamp every downlink message with the same tag the consumer filters
+            # uplink on, so result/progress/error replies route back in correspondence
+            # with the task subscription (empty = no tag, accept-all).
+            tag=consumer_cfg.task_topic_tag,
             executor=executor,
         )
 
@@ -474,16 +496,10 @@ async def main() -> None:
         outbox = OutboxProducer(registry, bridge)
 
         # 7. Build single RocketMQ consumer (all message types on one topic)
-        def _make_filter(tag: str) -> FilterExpression:
-            if tag:
-                from rocketmq.grpc_protocol import FilterType
-                return FilterExpression(f"TAGS = '{tag}'", FilterType.SQL)
-            return FilterExpression("*")
-
         mq_task_consumer = SimpleConsumer(
             mq_client_config,
             consumer_cfg.consumer_group,
-            subscription={consumer_cfg.task_topic: _make_filter(consumer_cfg.task_topic_tag)},
+            subscription={consumer_cfg.task_topic: _make_task_filter(consumer_cfg.task_topic_tag)},
             await_duration=20,
         )
         mq_task_consumer.startup()

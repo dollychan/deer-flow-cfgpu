@@ -62,7 +62,6 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-
 # ── Envelope builder ──────────────────────────────────────────────────────────
 
 SCHEMA_VERSION = "2.3"
@@ -655,19 +654,21 @@ def _print_envelope(topic: str, envelope: dict, index: int = 0) -> None:
 
 # ── RocketMQ send ─────────────────────────────────────────────────────────────
 
-def _send_message(producer: Any, topic: str, body: bytes) -> None:
+def _send_message(producer: Any, topic: str, body: bytes, tag: str = "") -> None:
     from rocketmq import Message
 
     msg = Message()
     msg.topic = topic
     msg.body = body
+    if tag:
+        msg.tag = tag
     producer.send(msg)
 
 
 # ── Config loader ─────────────────────────────────────────────────────────────
 
-def _load_consumer_config() -> tuple[str, str, str, str, str]:
-    """Return (endpoint, username, password, task_topic, signal_topic) from config.yaml."""
+def _load_consumer_config() -> tuple[str, str, str, str, str, str]:
+    """Return (endpoint, username, password, task_topic, signal_topic, task_topic_tag) from config.yaml."""
     # Add backend/ to path so deerflow can be imported
     backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if backend_dir not in sys.path:
@@ -677,10 +678,10 @@ def _load_consumer_config() -> tuple[str, str, str, str, str]:
         from deerflow.config.app_config import get_app_config
         cfg = get_app_config()
         c = cfg.consumer
-        return c.endpoint, c.username, c.password, c.task_topic, c.signal_topic
+        return c.endpoint, c.username, c.password, c.task_topic, c.signal_topic, c.task_topic_tag
     except Exception as exc:
         print(f"[WARN] Failed to load config.yaml ({exc}); use --endpoint etc. to provide connection", file=sys.stderr)
-        return "", "", "", "$AGENT_TASKS", "$AGENT_SIGNALS"
+        return "", "", "", "$AGENT_TASKS", "$AGENT_SIGNALS", ""
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -700,6 +701,7 @@ def main() -> None:
     parser.add_argument("--password", default="", help="RocketMQ secret key")
     parser.add_argument("--task-topic", default="", dest="task_topic", help="Task topic name")
     parser.add_argument("--signal-topic", default="", dest="signal_topic", help="Signal topic name")
+    parser.add_argument("--tag", default=None, dest="tag", help="Message tag (defaults to consumer.task_topic_tag from config.yaml; empty string disables)")
 
     # Scenario parameters
     parser.add_argument("--thread-id", default="", dest="thread_id", help="Thread ID (generated if omitted)")
@@ -728,18 +730,22 @@ def main() -> None:
         sys.exit(1)
 
     # Resolve connection settings: CLI args > config.yaml
-    cfg_endpoint, cfg_user, cfg_pass, cfg_task, cfg_signal = _load_consumer_config()
+    cfg_endpoint, cfg_user, cfg_pass, cfg_task, cfg_signal, cfg_tag = _load_consumer_config()
     endpoint = args.endpoint or cfg_endpoint
     username = args.username or cfg_user
     password = args.password or cfg_pass
     args.task_topic = args.task_topic or cfg_task
     args.signal_topic = args.signal_topic or cfg_signal
+    # --tag explicitly given (incl. "") wins; otherwise default to config's task_topic_tag
+    # so uplink messages carry the tag the consumer subscription filters on.
+    tag = args.tag if args.tag is not None else cfg_tag
 
     # Build messages
     print(f"\n{'═' * 60}")
     print(f"  Scenario : {scenario.name}")
     print(f"  Topic T  : {args.task_topic}")
     print(f"  Topic S  : {args.signal_topic}")
+    print(f"  Tag      : {tag or '(none)'}")
     print(f"  Dry-run  : {args.dry_run}")
     print(f"{'═' * 60}")
 
@@ -773,8 +779,8 @@ def main() -> None:
             producer.startup()
 
             body = json.dumps(envelope, ensure_ascii=False).encode()
-            _send_message(producer, topic, body)
-            print(f"[SENT] message_id={envelope['message_id']} → topic={topic}")
+            _send_message(producer, topic, body, tag=tag)
+            print(f"[SENT] message_id={envelope['message_id']} → topic={topic} tag={tag or '(none)'}")
 
             producer.shutdown()
 
