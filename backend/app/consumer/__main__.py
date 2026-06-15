@@ -504,9 +504,10 @@ async def main() -> None:
         )
         mq_task_consumer.startup()
         logger.info(
-            "RocketMQ consumer started (task_topic=%s group=%s)",
+            "RocketMQ consumer started (task_topic=%s group=%s tag=%s)",
             consumer_cfg.task_topic,
             consumer_cfg.consumer_group,
+            consumer_cfg.task_topic_tag,
         )
 
         # 8. Prewarm sandbox provider BEFORE installing signal handlers (P1 / BUG-010+011):
