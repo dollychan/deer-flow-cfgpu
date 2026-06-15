@@ -259,6 +259,10 @@ class MQStreamBridge(StreamBridge):
             }
             if "usage" in result_cache:
                 terminal_payload["usage"] = result_cache["usage"]
+            # idle ack (§6.4): cancel landing on an idle thread carries the resolved frontier
+            # (the OLD last_resolved_seq) so the client can treat result(cancelled) as the ack.
+            if "last_resolved_seq" in result_cache:
+                terminal_payload["last_resolved_seq"] = result_cache["last_resolved_seq"]
             if not result_cache.get("stream_events", True) and "final_state" in result_cache:
                 terminal_payload["final_state"] = result_cache["final_state"]
             terminal_type = "result"

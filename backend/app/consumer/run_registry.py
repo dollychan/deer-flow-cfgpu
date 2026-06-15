@@ -66,6 +66,21 @@ class ClaimedRun:
     prefix_message_ids: list[str] = field(default_factory=list)  # cancel-covered history merged in
 
 
+@dataclass
+class FoldOutcome:
+    """What a cancel fold synthesized in its transaction (design §6.4/§6.5).
+
+    drain_synthesized: a ``policy='drain'`` queue row was queued because the cancel
+        cleared a HIL gate (paused→idle) — the Scheduler must be poked.
+    idle_ack_synthesized: a ``processed_messages(cancelled)`` terminal was written
+        (keyed on the cancel's own message_id) because the cancel landed on an idle
+        thread with nothing to interrupt — the outbox delivers it, no poke needed.
+    """
+
+    drain_synthesized: bool = False
+    idle_ack_synthesized: bool = False
+
+
 class RunRegistry:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
@@ -710,7 +725,13 @@ class RunRegistry:
             ThreadMsgQueueRow.message_id,
         )
 
-    async def fold_cancel_watermark(self, thread_id: str, cancel_seq: int) -> bool:
+    async def fold_cancel_watermark(
+        self,
+        thread_id: str,
+        cancel_seq: int,
+        cancel_message_id: str | None = None,
+        echo: dict | None = None,
+    ) -> FoldOutcome:
         """Fold cancel(seq=N) into the thread_run_state high-water (design §6.4/§6.5, D2/I12).
 
         One transaction under the state-row lock: cancel_watermark and last_resolved_seq
@@ -718,12 +739,21 @@ class RunRegistry:
         the OLD last_resolved_seq (== the paused run's seq P) against the NEW watermark so a
         late small-seq cancel that does not cover the pending-approval run leaves it paused.
 
-        When the fold clears a HIL gate (paused run actually covered), it atomically
-        synthesizes a ``policy='drain'`` queue row (seq=N, message_id='<paused>:drain',
-        ON CONFLICT DO NOTHING) so the Scheduler dispatches a reject-resume that drains the
-        orphaned interrupt checkpoint to a clean terminal — same transaction as the fold so
-        a cancel never clears the gate without also queuing its drain (I12). Returns True
-        iff a drain row was synthesized (the gate was cleared).
+        Two synthesis branches, both in this same transaction (see FoldOutcome):
+
+        - **drain** — when the fold clears a HIL gate (paused run actually covered), queue a
+          ``policy='drain'`` row (seq=N, message_id='<paused>:drain', ON CONFLICT DO NOTHING)
+          so the Scheduler dispatches a reject-resume that drains the orphaned interrupt
+          checkpoint to a clean terminal (I12).
+
+        - **idle ack** (§6.4) — when the cancel lands on an ``idle`` thread and is "live"
+          (``cancel_seq > OLD last_resolved_seq``), write a ``processed_messages(cancelled)``
+          terminal keyed on the cancel's own ``message_id`` (delivered=false → outbox
+          delivers ``result(cancelled, last_resolved_seq=OLD lrs)``), so a cancel that has
+          nothing to interrupt (lost task / cancel-before-task) still gives the client a
+          terminal. ``cancel_seq <= OLD lrs`` (redundant / redelivered / late small seq) and
+          calls without ``cancel_message_id`` synthesize nothing. ON CONFLICT keeps it
+          idempotent on redelivery.
         """
         now = datetime.now(UTC)
         async with self._sf() as session:
@@ -743,12 +773,18 @@ class RunRegistry:
                 new_wm = max(state.cancel_watermark or 0, cancel_seq)
                 new_lrs = max(old_lrs, cancel_seq)
                 gate_cleared = old_status == ThreadStatus.PAUSED.value and old_lrs < new_wm
+                idle_ack = (
+                    old_status == ThreadStatus.IDLE.value
+                    and cancel_seq > old_lrs
+                    and cancel_message_id is not None
+                )
 
                 state.cancel_watermark = new_wm
                 state.last_resolved_seq = new_lrs
                 if gate_cleared:
                     state.status = ThreadStatus.IDLE.value
 
+                outcome = FoldOutcome()
                 if gate_cleared and old_msg:
                     drain_mid = f"{old_msg}:drain"
                     await self._insert_queue_if_absent(
@@ -760,8 +796,23 @@ class RunRegistry:
                         QueuePolicy.DRAIN.value,
                         now,
                     )
-                    return True
-                return False
+                    outcome.drain_synthesized = True
+                elif idle_ack:
+                    await self._insert_processed_if_absent(
+                        session,
+                        cancel_message_id,
+                        thread_id,
+                        ProcessedStatus.CANCELLED.value,
+                        {
+                            "status": ProcessedStatus.CANCELLED.value,
+                            "last_resolved_seq": old_lrs,
+                            "echo": echo or {"message_id": cancel_message_id, "thread_id": thread_id},
+                        },
+                        False,
+                        now,
+                    )
+                    outcome.idle_ack_synthesized = True
+                return outcome
 
     async def _sweep_covered_locked(
         self, session: AsyncSession, thread_id: str, watermark: int, now: datetime

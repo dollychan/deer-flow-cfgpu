@@ -172,20 +172,27 @@ class TaskConsumer:
     async def _handle_cancel(self, message: TaskMessage) -> None:
         """Fold cancel(seq=N) into cancel_watermark (fire-and-forget, not enqueued, §6.4/D2).
 
-        Idempotent: a redelivered cancel just re-folds GREATEST(watermark, same N). When the
-        fold clears a HIL gate, fold_cancel_watermark atomically synthesizes a drain row in
-        the same transaction (§6.5/I12), so we only need to poke afterwards.
+        Idempotent: a redelivered cancel just re-folds GREATEST(watermark, same N). The fold
+        may synthesize, in its own transaction, either a drain row (HIL gate cleared, §6.5/I12)
+        or an idle-ack terminal (cancel landed on an idle thread with nothing to interrupt,
+        §6.4 — the outbox delivers result(cancelled) so the client never blocks). We pass the
+        cancel's own message_id + echo so the idle ack can be keyed/echoed correctly, and poke
+        for the drain case (the idle ack rides the outbox loop, no poke needed).
         """
-        synthesized = await self._registry.fold_cancel_watermark(
-            message.thread_id, message.thread_msg_seq
-        )
-        self._poke()
-        logger.info(
-            "Cancel folded thread=%s watermark>=%d message_id=%s drain=%s",
+        outcome = await self._registry.fold_cancel_watermark(
             message.thread_id,
             message.thread_msg_seq,
             message.message_id,
-            synthesized,
+            message.downlink_echo(),
+        )
+        self._poke()
+        logger.info(
+            "Cancel folded thread=%s watermark>=%d message_id=%s drain=%s idle_ack=%s",
+            message.thread_id,
+            message.thread_msg_seq,
+            message.message_id,
+            outcome.drain_synthesized,
+            outcome.idle_ack_synthesized,
         )
 
     async def _handle_task(self, message: TaskMessage, raw_envelope: dict) -> None:

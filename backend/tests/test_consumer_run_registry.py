@@ -63,6 +63,15 @@ async def _queue_rows(sf, thread_id):
         return list(rows.scalars())
 
 
+async def _processed(sf, message_id):
+    async with sf() as session:
+        return (
+            await session.execute(
+                select(ProcessedMessageRow).where(ProcessedMessageRow.message_id == message_id)
+            )
+        ).scalar_one_or_none()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # B1 — fold_cancel_watermark (§6.4)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -125,6 +134,99 @@ class TestFoldCancelWatermark:
         st = await _state(reg, "t1")
         assert st.status == ThreadStatus.PAUSED  # gate held
         assert st.cancel_watermark == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# B1b — fold_cancel_watermark idle ack (§6.4): cancel on an idle thread synthesizes
+#       a result(cancelled, last_resolved_seq) terminal so the client never blocks.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFoldIdleAck:
+    _echo = {"message_id": "cx", "thread_id": "t1", "thread_msg_seq": 5}
+
+    @pytest.mark.anyio
+    async def test_idle_live_cancel_synthesizes_cancelled_terminal(self, reg, sf):
+        # Fresh idle thread (old_lrs=0); cancel seq=5 > 0 → idle ack keyed on cancel message_id.
+        out = await reg.fold_cancel_watermark("t1", 5, cancel_message_id="cx", echo=self._echo)
+        assert out.idle_ack_synthesized is True
+        assert out.drain_synthesized is False
+        row = await _processed(sf, "cx")
+        assert row is not None
+        assert row.status == ProcessedStatus.CANCELLED
+        assert row.delivered is False  # outbox delivers it
+        assert row.result_cache["status"] == "cancelled"
+        assert row.result_cache["last_resolved_seq"] == 0  # OLD lrs, before this fold advances it
+        assert row.result_cache["echo"]["message_id"] == "cx"
+
+    @pytest.mark.anyio
+    async def test_redundant_cancel_below_old_lrs_no_ack(self, reg, sf):
+        # A prior cancel @10 advances lrs to 10; a later smaller cancel @8 (8 <= old_lrs) → no ack.
+        await reg.fold_cancel_watermark("t1", 10, cancel_message_id="c1", echo=self._echo)
+        out = await reg.fold_cancel_watermark("t1", 8, cancel_message_id="c2", echo=self._echo)
+        assert out.idle_ack_synthesized is False
+        assert await _processed(sf, "c2") is None
+
+    @pytest.mark.anyio
+    async def test_cancel_seq_equal_old_lrs_no_ack(self, reg, sf):
+        # Boundary: cancel_seq == old_lrs is still fully-covered-already → no ack (skip on <=).
+        await reg.fold_cancel_watermark("t1", 5, cancel_message_id="c1", echo=self._echo)  # lrs→5
+        out = await reg.fold_cancel_watermark("t1", 5, cancel_message_id="c2", echo=self._echo)
+        assert out.idle_ack_synthesized is False
+        assert await _processed(sf, "c2") is None
+
+    @pytest.mark.anyio
+    async def test_redelivered_cancel_idempotent(self, reg, sf):
+        # Same cancel message_id redelivered: first writes ack (5>0); second has old_lrs=5 so 5>5
+        # is false → no second attempt, and ON CONFLICT would keep one row regardless.
+        await reg.fold_cancel_watermark("t1", 5, cancel_message_id="cx", echo=self._echo)
+        out = await reg.fold_cancel_watermark("t1", 5, cancel_message_id="cx", echo=self._echo)
+        assert out.idle_ack_synthesized is False
+        async with sf() as session:
+            n = (
+                await session.execute(
+                    select(ProcessedMessageRow).where(ProcessedMessageRow.message_id == "cx")
+                )
+            ).scalars().all()
+        assert len(n) == 1
+
+    @pytest.mark.anyio
+    async def test_running_thread_no_idle_ack(self, reg, sf):
+        # Running thread → the watcher path produces the cancelled terminal, not the idle ack.
+        async with sf() as session:
+            session.add(
+                ThreadRunStateRow(
+                    thread_id="t1", instance_id="i1", message_id="run1",
+                    status=ThreadStatus.RUNNING, last_resolved_seq=1, cancel_watermark=0,
+                )
+            )
+            await session.commit()
+        out = await reg.fold_cancel_watermark("t1", 5, cancel_message_id="cx", echo=self._echo)
+        assert out.idle_ack_synthesized is False
+        assert await _processed(sf, "cx") is None
+
+    @pytest.mark.anyio
+    async def test_paused_covered_does_drain_not_idle_ack(self, reg, sf):
+        # paused+covered → drain branch; idle ack must NOT also fire.
+        async with sf() as session:
+            session.add(
+                ThreadRunStateRow(
+                    thread_id="t1", instance_id="i1", message_id="run3",
+                    status=ThreadStatus.PAUSED, last_resolved_seq=3, cancel_watermark=0,
+                )
+            )
+            await session.commit()
+        out = await reg.fold_cancel_watermark("t1", 5, cancel_message_id="cx", echo=self._echo)
+        assert out.drain_synthesized is True
+        assert out.idle_ack_synthesized is False
+        assert await _processed(sf, "cx") is None
+
+    @pytest.mark.anyio
+    async def test_no_message_id_skips_ack(self, reg, sf):
+        # Backward-compatible call (no cancel_message_id) never synthesizes an idle ack.
+        out = await reg.fold_cancel_watermark("t1", 5)
+        assert out.idle_ack_synthesized is False
+        assert out.drain_synthesized is False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -470,8 +572,8 @@ class TestFoldDrainSynth:
     @pytest.mark.anyio
     async def test_no_drain_when_no_paused_gate(self, reg, sf):
         # Plain cancel on a fresh thread: folds watermark, synthesizes no drain row.
-        synthesized = await reg.fold_cancel_watermark("t1", 5)
-        assert synthesized is False
+        out = await reg.fold_cancel_watermark("t1", 5)
+        assert out.drain_synthesized is False
         rows = await _queue_rows(sf, "t1")
         assert rows == []
 
@@ -486,8 +588,8 @@ class TestFoldDrainSynth:
                 )
             )
             await session.commit()
-        synthesized = await reg.fold_cancel_watermark("t1", 5)
-        assert synthesized is True
+        out = await reg.fold_cancel_watermark("t1", 5)
+        assert out.drain_synthesized is True
         st = await _state(reg, "t1")
         assert st.status == ThreadStatus.IDLE
         rows = await _queue_rows(sf, "t1")
@@ -508,10 +610,10 @@ class TestFoldDrainSynth:
                 )
             )
             await session.commit()
-        assert await reg.fold_cancel_watermark("t1", 5) is True
+        assert (await reg.fold_cancel_watermark("t1", 5)).drain_synthesized is True
         # Redelivered cancel: gate already cleared (idle) → no new drain, ON CONFLICT keeps one row.
         again = await reg.fold_cancel_watermark("t1", 5)
-        assert again is False
+        assert again.drain_synthesized is False
         rows = await _queue_rows(sf, "t1")
         assert len([r for r in rows if r.policy == QueuePolicy.DRAIN]) == 1
 
@@ -525,8 +627,8 @@ class TestFoldDrainSynth:
                 )
             )
             await session.commit()
-        synthesized = await reg.fold_cancel_watermark("t1", 2)  # N=2 < P=3 → not covered
-        assert synthesized is False
+        out = await reg.fold_cancel_watermark("t1", 2)  # N=2 < P=3 → not covered
+        assert out.drain_synthesized is False
         st = await _state(reg, "t1")
         assert st.status == ThreadStatus.PAUSED
         assert await _queue_rows(sf, "t1") == []

@@ -127,6 +127,29 @@ async def test_replay_result_carries_checkpoint_id():
 
 
 @pytest.mark.anyio
+async def test_replay_idle_ack_carries_last_resolved_seq():
+    # idle ack (§6.4): a cancel-on-idle terminal carries last_resolved_seq (resolved frontier)
+    # so the client treats result(cancelled) as the cancel ack and unblocks.
+    bridge, producer = _bridge()
+    await bridge.replay(
+        {"status": "cancelled", "stream_events": True, "last_resolved_seq": 7},
+        echo=_ECHO,
+    )
+    terminal = producer.bodies[-1]
+    assert terminal["type"] == "result"
+    assert terminal["payload"]["status"] == "cancelled"
+    assert terminal["payload"]["last_resolved_seq"] == 7
+
+
+@pytest.mark.anyio
+async def test_replay_result_omits_last_resolved_seq_when_absent():
+    # Ordinary terminals do not carry last_resolved_seq.
+    bridge, producer = _bridge()
+    await bridge.replay({"status": "success", "stream_events": True}, echo=_ECHO)
+    assert "last_resolved_seq" not in producer.bodies[-1]["payload"]
+
+
+@pytest.mark.anyio
 async def test_replay_error_never_carries_checkpoint_id():
     # A stray checkpoint_id in the error result_cache must not leak onto the replayed
     # error envelope — error is never a fork anchor (P0.2).
