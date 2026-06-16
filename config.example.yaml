@@ -1341,8 +1341,8 @@ run_events:
 #   # ── Consumer group ──────────────────────────────────────────────────────
 #   consumer_group: $AGENT_CONSUMER_GROUP
 #
-#   # ── Optional tag filter (empty = accept all) ────────────────────────────
-#   # task_topic_tag: ""
+#   # ── tag filter (not null) ────────────────────────────
+#   # task_topic_tag: daily or product
 #
 #   # ── Runtime limits ──────────────────────────────────────────────────────
 #   max_concurrent_runs: 10       # max simultaneous agent runs per instance
