@@ -20,6 +20,36 @@ UPLINK_TYPES: frozenset[str] = frozenset({"task", "cancel", "ping"})
 _SUPPORTED_SCHEMA_MAJOR = "2"
 
 
+def build_downlink_echo(envelope: dict) -> dict:
+    """Build the downlink echo (uplink envelope fields mirrored onto every reply) from a raw envelope dict.
+
+    Single source of truth for the uplink↔downlink echo contract (MQ消息协议.md): every
+    reply must carry the originating ``message_id`` / ``thread_id`` plus ``thread_msg_seq``
+    and ``bizType``, and the optional context (``agent_name`` / ``user_id`` / ``project_id``)
+    when present. ``agent_name`` is omitted for the implicit default ("lead_agent").
+
+    Used both by ``TaskMessage.downlink_echo()`` on live ingest and by the cancel-barrier
+    sweep, which has only the persisted raw envelope (the queue row ``body``) to echo from —
+    so a cancel-covered task's ``result(cancelled)`` mirrors the same fields as a live reply
+    instead of degrading to a bare ``message_id`` / ``thread_id`` pair (thread_msg_seq=0, no
+    user_id / project_id / agent_name).
+    """
+    echo: dict = {
+        "message_id": envelope.get("message_id", ""),
+        "thread_id": envelope.get("thread_id", ""),
+        "thread_msg_seq": envelope.get("thread_msg_seq", 0),
+        "bizType": envelope.get("bizType") or "agent_task",
+    }
+    agent_name = envelope.get("agent_name")
+    if agent_name and agent_name != "lead_agent":
+        echo["agent_name"] = agent_name
+    if envelope.get("user_id"):
+        echo["user_id"] = envelope["user_id"]
+    if envelope.get("project_id"):
+        echo["project_id"] = envelope["project_id"]
+    return echo
+
+
 class SchemaValidationError(ValueError):
     """Raised when an incoming MQ message fails schema validation.
 
@@ -114,19 +144,17 @@ class TaskMessage:
 
     def downlink_echo(self) -> dict:
         """Return the envelope fields that must be echoed unchanged to every downlink message."""
-        echo: dict = {
-            "message_id": self.message_id,
-            "thread_id": self.thread_id,
-            "thread_msg_seq": self.thread_msg_seq,
-            "bizType": self.biz_type,
-        }
-        if self.agent_name and self.agent_name != "lead_agent":
-            echo["agent_name"] = self.agent_name
-        if self.user_id:
-            echo["user_id"] = self.user_id
-        if self.project_id:
-            echo["project_id"] = self.project_id
-        return echo
+        return build_downlink_echo(
+            {
+                "message_id": self.message_id,
+                "thread_id": self.thread_id,
+                "thread_msg_seq": self.thread_msg_seq,
+                "bizType": self.biz_type,
+                "agent_name": self.agent_name,
+                "user_id": self.user_id,
+                "project_id": self.project_id,
+            }
+        )
 
     @property
     def timestamp_utc(self) -> datetime | None:

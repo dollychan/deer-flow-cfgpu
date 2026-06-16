@@ -31,6 +31,7 @@ from app.consumer.models import (
     ThreadMsgQueueRow,
     ThreadRunStateRow,
 )
+from app.consumer.schemas import build_downlink_echo
 
 # Policies that can be claimed as an independent run (design §6.3 phase-1 predicate).
 # prefix is pure history (only merged); steer is currently downgraded to followup at ingest.
@@ -839,12 +840,19 @@ class RunRegistry:
             )
         ).scalars().all()
         for row in covered:
+            # Carry the echo derived from the stored uplink envelope so the outbox can build a
+            # full downlink that mirrors the uplink (thread_msg_seq + bizType + user_id /
+            # project_id / agent_name). A bare result_cache=None would degrade the cancelled
+            # terminal to message_id/thread_id only (thread_msg_seq=0, missing context).
             await self._insert_processed_if_absent(
                 session,
                 row.message_id,
                 thread_id,
                 ProcessedStatus.CANCELLED.value,
-                None,
+                {
+                    "status": ProcessedStatus.CANCELLED.value,
+                    "echo": build_downlink_echo(row.body or {}),
+                },
                 False,
                 now,
             )

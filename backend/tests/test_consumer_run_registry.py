@@ -298,6 +298,40 @@ class TestClaimWatermark:
         assert proc.delivered is False  # I10: outbox will deliver
 
     @pytest.mark.anyio
+    async def test_sweep_carries_uplink_echo_for_downlink(self, reg, sf):
+        # cancel-before-task: a covered task swept to cancelled must echo the uplink envelope
+        # (thread_msg_seq + bizType + user_id / project_id / agent_name) so the downlink mirrors
+        # the uplink instead of degrading to message_id/thread_id only (regression: thread_msg_seq=0,
+        # missing context fields). Echo is reconstructed from the stored queue-row body.
+        body = {
+            "schema_version": "2.5",
+            "message_id": "m8",
+            "thread_id": "t1",
+            "thread_msg_seq": 8,
+            "type": "task",
+            "agent_name": "director",
+            "user_id": "34",
+            "project_id": "proj-1",
+            "bizType": "agent_task",
+            "payload": {"messages": [{"role": "user", "content": "x"}]},
+        }
+        await _enqueue(reg, "t1", "m8", 8, body=body)
+        await reg.fold_cancel_watermark("t1", 9)  # cancel seq=9 > task seq=8 → covers it
+        assert await reg.sweep_cancelled("t1") == 1
+
+        proc = await _processed(sf, "m8")
+        assert proc is not None
+        assert proc.result_cache is not None  # not None: carries the echo (regression guard)
+        echo = proc.result_cache["echo"]
+        assert echo["message_id"] == "m8"
+        assert echo["thread_id"] == "t1"
+        assert echo["thread_msg_seq"] == 8  # not 0
+        assert echo["bizType"] == "agent_task"
+        assert echo["agent_name"] == "director"
+        assert echo["user_id"] == "34"
+        assert echo["project_id"] == "proj-1"
+
+    @pytest.mark.anyio
     async def test_sweep_all_threads(self, reg):
         await _enqueue(reg, "tA", "a1", 1)
         await _enqueue(reg, "tB", "b1", 1)
