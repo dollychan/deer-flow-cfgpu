@@ -7,10 +7,11 @@ from typing import Any, Self
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
+from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.extensions_config import ExtensionsConfig
@@ -28,6 +29,7 @@ from deerflow.config.skill_evolution_config import SkillEvolutionConfig
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, load_stream_bridge_config_from_dict
 from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict
+from deerflow.config.suggestions_config import SuggestionsConfig
 from deerflow.config.summarization_config import SummarizationConfig, load_summarization_config_from_dict
 from deerflow.config.title_config import TitleConfig, load_title_config_from_dict
 from deerflow.config.token_usage_config import TokenUsageConfig
@@ -128,7 +130,15 @@ class AppConfig(BaseModel):
     acp_agents: dict[str, ACPAgentConfig] = Field(default_factory=dict, description="ACP-compatible agent configuration")
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
+    suggestions: SuggestionsConfig = Field(default_factory=SuggestionsConfig, description="Follow-up suggestions configuration.")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
+    channel_connections: ChannelConnectionsConfig = Field(
+        default_factory=ChannelConnectionsConfig,
+        description=format_field_description(
+            "channel_connections",
+            field_doc="User-facing IM channel connection configuration.",
+        ),
+    )
     loop_detection: LoopDetectionConfig = Field(default_factory=LoopDetectionConfig, description="Loop detection middleware configuration")
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
     model_config = ConfigDict(extra="allow")
@@ -162,6 +172,21 @@ class AppConfig(BaseModel):
     )
     consumer: ConsumerConfig = Field(default_factory=ConsumerConfig, description="Consumer process (RocketMQ) configuration")
     oss: OSSConfig = Field(default_factory=OSSConfig, description="OSS (object storage) configuration for serving agent-generated files via Alibaba Cloud OSS")
+
+    @field_validator("models", "tools", "tool_groups", mode="before")
+    @classmethod
+    def _coerce_null_list_sections(cls, value: Any) -> Any:
+        """Treat a present-but-empty config section as an empty list.
+
+        Commenting out every entry under a top-level YAML key — e.g. ``models:``
+        with only comments beneath it, exactly as shipped in
+        ``config.example.yaml`` — makes PyYAML parse the value as ``None``.
+        Without this, the documented ``cp config.example.yaml config.yaml``
+        first-run flow crashes with an opaque ``Input should be a valid list``
+        pydantic error. Coercing ``None`` to ``[]`` keeps that flow working and
+        matches the field's own ``default_factory=list``.
+        """
+        return [] if value is None else value
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path:
@@ -224,6 +249,11 @@ class AppConfig(BaseModel):
         config_data["extensions"] = extensions_config.model_dump()
 
         result = cls.model_validate(config_data)
+        if not result.models:
+            logger.warning(
+                "No models are configured in %s. Add at least one entry under `models:` (see the commented examples in config.example.yaml) or run `make setup`.",
+                resolved_path,
+            )
         acp_agents = cls._validate_acp_agents(config_data.get("acp_agents", {}))
         cls._apply_singleton_configs(result, acp_agents)
         return result

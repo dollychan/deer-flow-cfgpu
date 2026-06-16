@@ -11,9 +11,10 @@ from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BACKEND = "auto"
+#DEFAULT_BACKEND = "auto"
+DEFAULT_BACKEND = "brave,mojeek"
 DEFAULT_REGION = "wt-wt"
-DEFAULT_SAFESEARCH = "moderate"
+DEFAULT_SAFESEARCH = "on"
 DEFAULT_WIKIPEDIA_REGION = "us-en"
 
 WIKIPEDIA_BACKENDS = {"auto", "all", "wikipedia"}

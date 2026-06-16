@@ -13,9 +13,11 @@ This file guards three behaviour-preserving deerflow seams and their director ov
 
   P4a  ``_destroy_on_shutdown``   — base destroys (unchanged); director no-ops (I16).
        ``_evict_oldest_warm``     — base capacity-destroys; director never destroys.
-  P4b  ``_warm_is_promotable``    — base ``True`` (always promote); director gates on
-       ``backend.is_alive`` so a janitor ``rm -f``'d stale warm entry is discarded and the
-       acquire falls back to discover/create instead of handing back a dead sandbox (R2/I19).
+  P4b  ``_drop_unhealthy_sandbox`` — base removes the in-process reference *and*
+       ``backend.destroy``s the container on a failed ``is_alive`` probe (single-tenant);
+       director strips the destroy (I16) and only forgets the dead reference so the acquire
+       falls back to discover/create. The probe itself (``_check_tracked_sandbox_alive`` on
+       active reuse + warm reclaim) discards a janitor ``rm -f``'d stale entry (R2/I19).
   P4c  ``_creation_lock_path``    — base returns the per-thread virtiofs ``{sid}.lock``
        (unchanged); director relocates it to per-host *local disk* so the cross-process
        creation lock is a real flock, not an unreliable virtiofs one (R3/I17).
@@ -154,27 +156,46 @@ def test_base_evict_oldest_warm_still_destroys():
     assert "wwww" not in provider._warm_pool
 
 
-# ── P4b: warm-pool health check (R2 / I19) ──────────────────────────────────────
+# ── P4b: unhealthy-drop destroy stripping (R2 / I16 / I19) ──────────────────────
 
 
-def test_base_warm_is_promotable_always_true():
-    provider = _provider(_base_cls())
-    assert provider._warm_is_promotable(_info("wwww")) is True
-
-
-def test_director_warm_is_promotable_delegates_to_is_alive():
+def test_base_drop_unhealthy_destroys_container():
+    """Base ``_drop_unhealthy_sandbox`` removes tracking AND destroys (upstreamable)."""
     backend = MagicMock()
-    backend.is_alive.return_value = False
-    provider = _provider(_director_cls(), backend=backend)
-    info = _info("wwww")
+    provider = _provider(_base_cls(), backend=backend)
+    info = _info("aaaa")
+    provider._sandboxes["aaaa"] = MagicMock()
+    provider._sandbox_infos["aaaa"] = info
 
-    assert provider._warm_is_promotable(info) is False
-    backend.is_alive.assert_called_once_with(info)
+    provider._drop_unhealthy_sandbox("aaaa", "test", expected_info=info)
+
+    backend.destroy.assert_called_once_with(info)
+    assert "aaaa" not in provider._sandboxes
+    assert "aaaa" not in provider._sandbox_infos
+
+
+def test_director_drop_unhealthy_strips_destroy():
+    """Director ``_drop_unhealthy_sandbox`` forgets the reference but never ``docker rm``s (I16)."""
+    backend = MagicMock()
+    provider = _provider(_director_cls(), backend=backend)
+    info = _info("aaaa")
+    handle = MagicMock()
+    provider._sandboxes["aaaa"] = handle
+    provider._sandbox_infos["aaaa"] = info
+
+    provider._drop_unhealthy_sandbox("aaaa", "test", expected_info=info)
+
+    backend.destroy.assert_not_called()  # zero autonomous destroy power
+    handle.close.assert_called_once()  # local client handle still closed
+    assert "aaaa" not in provider._sandboxes  # in-process reference forgotten
+    assert "aaaa" not in provider._sandbox_infos
 
 
 def test_reclaim_promotes_live_warm_sandbox():
     """Base/live path: promotable warm entry is reclaimed into active tracking."""
-    provider = _provider(_base_cls())
+    backend = MagicMock()
+    backend.is_alive.return_value = True
+    provider = _provider(_base_cls(), backend=backend)
     info = _info("wwww")
     provider._warm_pool["wwww"] = (info, 0.0)
 
@@ -186,7 +207,7 @@ def test_reclaim_promotes_live_warm_sandbox():
 
 
 def test_reclaim_discards_dead_warm_sandbox():
-    """R2: a janitor-killed warm entry fails is_alive → discarded, not promoted; falls back."""
+    """R2/I16: a janitor-killed warm entry fails is_alive → reference dropped, never destroyed."""
     backend = MagicMock()
     backend.is_alive.return_value = False
     provider = _provider(_director_cls(), backend=backend)
@@ -199,6 +220,7 @@ def test_reclaim_discards_dead_warm_sandbox():
     assert "wwww" not in provider._warm_pool  # stale entry discarded
     assert "wwww" not in provider._sandboxes  # never registered
     backend.is_alive.assert_called_once_with(info)
+    backend.destroy.assert_not_called()  # director never autonomously destroys (I16)
 
 
 # ── P4c: creation lock path (R3 / I17) ──────────────────────────────────────────

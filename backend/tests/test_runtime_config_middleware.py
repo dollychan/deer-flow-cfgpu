@@ -447,12 +447,12 @@ def test_after_model_custom_bindings_replace_default():
 
 
 def test_runtime_config_registered_after_human_approval():
-    from deerflow.agents.lead_agent.agent import _build_middlewares
+    from deerflow.agents.lead_agent.agent import build_middlewares
     from deerflow.config import get_app_config
     from deerflow.config.agents_config import AgentConfig
 
     agent_cfg = AgentConfig(name="director", approval_required_tools=["*generate_*"])
-    mws = _build_middlewares(
+    mws = build_middlewares(
         {"configurable": {"ask": True}},
         model_name=None,
         agent_name="director",
