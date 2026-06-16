@@ -27,6 +27,7 @@ def _task_envelope(**overrides) -> dict:
         "timestamp": "2026-05-21T00:00:00.000Z",
         "type": "task",
         "thread_id": "thread-001",
+        "clientId": "client-001",
         "payload": {
             "messages": [{"role": "user", "content": "hi"}],
             "command": None,
@@ -44,6 +45,7 @@ def _cancel_envelope(**overrides) -> dict:
         "message_id": "msg-002",
         "type": "cancel",
         "thread_id": "thread-001",
+        "clientId": "client-001",
         "payload": {"reason": "user_requested"},
     }
     base.update(overrides)
@@ -56,6 +58,7 @@ def _ping_envelope(**overrides) -> dict:
         "message_id": "msg-003",
         "type": "ping",
         "thread_id": "thread-001",
+        "clientId": "client-001",
         "payload": {},
     }
     base.update(overrides)
@@ -68,6 +71,7 @@ def _resume_envelope(**overrides) -> dict:
         "message_id": "msg-004",
         "type": "task",
         "thread_id": "thread-001",
+        "clientId": "client-001",
         "payload": {
             "messages": None,
             "command": {
@@ -105,6 +109,7 @@ def _fork_envelope(*, command: bool = False, **fork_fields) -> dict:
         "message_id": "msg-fork-1",
         "type": "task",
         "thread_id": "t_branch",
+        "clientId": "client-001",
         "payload": payload,
     }
 
@@ -191,6 +196,47 @@ class TestBizType:
         env.pop("bizType", None)
         echo = TaskMessage.from_dict(env).downlink_echo()
         assert echo["bizType"] == "agent_task"
+
+
+# ---------------------------------------------------------------------------
+# clientId — required uplink originating-client tag, echoed to downlink
+# ---------------------------------------------------------------------------
+
+
+class TestClientId:
+    def test_parsed_from_envelope(self):
+        msg = TaskMessage.from_dict(_task_envelope(clientId="c_xyz"))
+        assert msg.client_id == "c_xyz"
+
+    def test_echoed_to_downlink(self):
+        echo = TaskMessage.from_dict(_task_envelope(clientId="c_xyz")).downlink_echo()
+        assert echo["clientId"] == "c_xyz"
+
+    def test_required_on_task(self):
+        env = _task_envelope()
+        env.pop("clientId")
+        with pytest.raises(SchemaValidationError) as exc:
+            TaskMessage.from_dict(env)
+        assert "clientId" in exc.value.reason
+
+    def test_empty_string_rejected(self):
+        with pytest.raises(SchemaValidationError) as exc:
+            TaskMessage.from_dict(_task_envelope(clientId=""))
+        assert "clientId" in exc.value.reason
+
+    def test_required_on_cancel(self):
+        env = _cancel_envelope()
+        env.pop("clientId")
+        with pytest.raises(SchemaValidationError) as exc:
+            TaskMessage.from_dict(env)
+        assert "clientId" in exc.value.reason
+
+    def test_required_on_ping(self):
+        env = _ping_envelope()
+        env.pop("clientId")
+        with pytest.raises(SchemaValidationError) as exc:
+            TaskMessage.from_dict(env)
+        assert "clientId" in exc.value.reason
 
 
 # ---------------------------------------------------------------------------

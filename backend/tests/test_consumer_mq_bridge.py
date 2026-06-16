@@ -32,7 +32,7 @@ def _bridge() -> tuple[MQStreamBridge, _FakeProducer]:
     return MQStreamBridge(producer), producer
 
 
-_ECHO = {"message_id": "m1", "thread_id": "t1", "thread_msg_seq": 3, "bizType": "agent_task"}
+_ECHO = {"message_id": "m1", "thread_id": "t1", "thread_msg_seq": 3, "bizType": "agent_task", "clientId": "c1"}
 
 
 # ── envelope-level fields ──────────────────────────────────────────────────────
@@ -47,6 +47,8 @@ async def test_envelope_schema_version_and_biztype():
     env = producer.bodies[-1]
     assert env["schema_version"] == "2.5"
     assert env["bizType"] == "agent_task"
+    # clientId is echoed back unchanged from the uplink (MQ消息协议.md envelope table).
+    assert env["clientId"] == "c1"
     # Downlink timestamp must be Beijing wall-clock for the frontend (no 'Z'/UTC).
     assert _BEIJING_TS_RE.match(env["timestamp"])
     assert "Z" not in env["timestamp"]

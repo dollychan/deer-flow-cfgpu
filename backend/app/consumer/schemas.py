@@ -24,9 +24,11 @@ def build_downlink_echo(envelope: dict) -> dict:
     """Build the downlink echo (uplink envelope fields mirrored onto every reply) from a raw envelope dict.
 
     Single source of truth for the uplink↔downlink echo contract (MQ消息协议.md): every
-    reply must carry the originating ``message_id`` / ``thread_id`` plus ``thread_msg_seq``
-    and ``bizType``, and the optional context (``agent_name`` / ``user_id`` / ``project_id``)
-    when present. ``agent_name`` is omitted for the implicit default ("lead_agent").
+    reply must carry the originating ``message_id`` / ``thread_id`` plus ``thread_msg_seq``,
+    ``bizType`` and ``clientId``, and the optional context (``agent_name`` / ``user_id`` /
+    ``project_id``) when present. ``agent_name`` is omitted for the implicit default
+    ("lead_agent"); ``clientId`` is required on uplink so it is normally always echoed back,
+    but is mirrored only when present to stay robust for legacy/raw bodies.
 
     Used both by ``TaskMessage.downlink_echo()`` on live ingest and by the cancel-barrier
     sweep, which has only the persisted raw envelope (the queue row ``body``) to echo from —
@@ -47,6 +49,8 @@ def build_downlink_echo(envelope: dict) -> dict:
         echo["user_id"] = envelope["user_id"]
     if envelope.get("project_id"):
         echo["project_id"] = envelope["project_id"]
+    if envelope.get("clientId"):
+        echo["clientId"] = envelope["clientId"]
     return echo
 
 
@@ -139,6 +143,7 @@ class TaskMessage:
     project_id: str | None = None
     thread_msg_seq: int = 0  # monotonic sequence within a thread; echoed to downlink
     biz_type: str = "agent_task"  # global message type for the frontend; echoed to downlink
+    client_id: str = ""  # originating client id (envelope ``clientId``); required uplink, echoed to downlink
 
     # ── derived helpers ───────────────────────────────────────────────────────
 
@@ -150,6 +155,7 @@ class TaskMessage:
                 "thread_id": self.thread_id,
                 "thread_msg_seq": self.thread_msg_seq,
                 "bizType": self.biz_type,
+                "clientId": self.client_id,
                 "agent_name": self.agent_name,
                 "user_id": self.user_id,
                 "project_id": self.project_id,
@@ -269,6 +275,12 @@ class TaskMessage:
         if msg_type != "ping" and not data.get("thread_id"):
             raise SchemaValidationError("Missing required field: thread_id")
 
+        # clientId — required, non-empty on every uplink message (task/cancel/ping).
+        # Consumer treats it as an opaque originating-client tag and echoes it back
+        # unchanged on every downlink reply (MQ消息协议.md envelope table).
+        if not data.get("clientId"):
+            raise SchemaValidationError("Missing required field: clientId")
+
         # payload — required, must be an object
         payload = data.get("payload")
         if payload is None:
@@ -380,6 +392,7 @@ class TaskMessage:
             project_id=data.get("project_id"),
             thread_msg_seq=data.get("thread_msg_seq", 0),
             biz_type=data.get("bizType") or "agent_task",
+            client_id=data.get("clientId") or "",
         )
 
     @classmethod

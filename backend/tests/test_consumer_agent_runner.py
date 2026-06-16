@@ -89,6 +89,7 @@ def _envelope(mid, tid="t1", seq=1, *, messages=None, command=None, user_id=None
         "type": "task",
         "thread_id": tid,
         "thread_msg_seq": seq,
+        "clientId": "c1",
         "payload": payload,
     }
     if user_id is not None:
@@ -366,7 +367,7 @@ class _FakeCheckpointer:
 def _fork_message(new_tid="child", parent="parent"):
     env = {
         "schema_version": "2.5", "message_id": "f1", "type": "task", "thread_id": new_tid,
-        "thread_msg_seq": 1,
+        "thread_msg_seq": 1, "clientId": "c1",
         "payload": {
             "config": {"fork": {"parent_thread_id": parent}},
             "command": {"update": {"tool_approvals": {"tc1": {"status": "approved"}}}},

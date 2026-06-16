@@ -313,7 +313,7 @@ class MQStreamBridge(StreamBridge):
             "type": type,
             "thread_id": echo.get("thread_id", ""),
         }
-        for key in ("agent_name", "user_id", "project_id"):
+        for key in ("agent_name", "user_id", "project_id", "clientId"):
             if echo.get(key):
                 envelope[key] = echo[key]
         envelope["bizType"] = echo.get("bizType") or "agent_task"

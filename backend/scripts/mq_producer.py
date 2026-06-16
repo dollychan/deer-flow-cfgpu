@@ -66,6 +66,10 @@ from typing import Any
 
 SCHEMA_VERSION = "2.3"
 
+# Originating-client tag, required on every uplink envelope (MQ消息协议.md). Overridable
+# via --client-id; build_envelope falls back to this module default when none is passed.
+CLIENT_ID = "test-client-001"
+
 
 def _now_iso() -> str:
     dt = datetime.now(UTC)
@@ -85,6 +89,7 @@ def build_envelope(
     agent_name: str = "lead_agent",
     user_id: str | None = None,
     project_id: str | None = None,
+    client_id: str | None = None,
 ) -> dict:
     """Build a protocol v2.3 message envelope."""
     return {
@@ -98,6 +103,7 @@ def build_envelope(
         "agent_name": agent_name,
         "user_id": user_id,
         "project_id": project_id,
+        "clientId": client_id or CLIENT_ID,
     }
 
 
@@ -687,6 +693,7 @@ def _load_consumer_config() -> tuple[str, str, str, str, str, str]:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    global CLIENT_ID
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -706,11 +713,15 @@ def main() -> None:
     # Scenario parameters
     parser.add_argument("--thread-id", default="", dest="thread_id", help="Thread ID (generated if omitted)")
     parser.add_argument("--user-id", default="", dest="user_id", help="User ID")
+    parser.add_argument("--client-id", default="", dest="client_id", help=f"Originating client ID (required uplink field; default {CLIENT_ID!r})")
     parser.add_argument("--agent-name", default="lead_agent", dest="agent_name", help="Agent name")
     parser.add_argument("--tool-call-id", default="", dest="tool_call_id", help="Tool call ID for HIL resume")
     parser.add_argument("--instance-id", default="", dest="instance_id", help="Consumer instance ID for ping_target")
 
     args = parser.parse_args()
+
+    if args.client_id:
+        CLIENT_ID = args.client_id
 
     if args.list:
         print(f"\n{'Scenario':<16} Description")

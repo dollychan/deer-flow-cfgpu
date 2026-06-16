@@ -482,6 +482,7 @@ def _task_message(skills=None, models=None):
         "type": "task",
         "thread_id": "t1",
         "thread_msg_seq": 1,
+        "clientId": "c1",
         "payload": {"messages": [{"role": "user", "content": "hi"}], "config": config, "reply_config": {}},
     }
     return TaskMessage.from_dict(env)

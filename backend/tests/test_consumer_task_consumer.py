@@ -87,6 +87,7 @@ def _task(mid, tid="t1", seq=1, *, mode=None, command=None, fork=None):
         "type": "task",
         "thread_id": tid,
         "thread_msg_seq": seq,
+        "clientId": "c1",
         "payload": payload,
     }
 
@@ -99,6 +100,7 @@ def _ping(mid, *, target=None):
         "schema_version": "2.5",
         "message_id": mid,
         "type": "ping",
+        "clientId": "c1",
         "payload": payload,
     }
 
@@ -110,6 +112,7 @@ def _cancel(mid, tid="t1", seq=5):
         "type": "cancel",
         "thread_id": tid,
         "thread_msg_seq": seq,
+        "clientId": "c1",
         "payload": {},
     }
 

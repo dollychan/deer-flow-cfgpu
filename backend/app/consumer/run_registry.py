@@ -674,7 +674,8 @@ class RunRegistry:
 
     @staticmethod
     def _build_drain_body(
-        thread_id: str, drain_message_id: str, seq: int, paused_message_id: str
+        thread_id: str, drain_message_id: str, seq: int, paused_message_id: str,
+        client_id: str | None = None,
     ) -> dict:
         """Synthesize the queue-row body for a cancel-cleared HIL gate's drain run (§6.5).
 
@@ -682,6 +683,9 @@ class RunRegistry:
         command and rebuilds an all-reject Command from aget_state, so only thread_id /
         message_id / a schema-valid payload matter. reply_config.stream_events=false and
         the drain policy (set on the queue row) ensure no downlink is produced (I12).
+        ``clientId`` is schema-required on every uplink envelope; the drain run produces
+        no downlink so the value is never echoed — carry the triggering cancel's clientId
+        when known, else a clearly-internal sentinel.
         """
         return {
             "schema_version": "2.5",
@@ -689,6 +693,7 @@ class RunRegistry:
             "type": "task",
             "thread_id": thread_id,
             "thread_msg_seq": seq,
+            "clientId": client_id or "_internal_drain",
             "payload": {
                 "command": {"update": {"tool_approvals": {}}},
                 "reply_config": {"stream_events": False},
@@ -792,7 +797,10 @@ class RunRegistry:
                         session,
                         thread_id,
                         drain_mid,
-                        self._build_drain_body(thread_id, drain_mid, cancel_seq, old_msg),
+                        self._build_drain_body(
+                            thread_id, drain_mid, cancel_seq, old_msg,
+                            client_id=(echo or {}).get("clientId"),
+                        ),
                         cancel_seq,
                         QueuePolicy.DRAIN.value,
                         now,
