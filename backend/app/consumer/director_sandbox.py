@@ -83,36 +83,22 @@ class DirectorAioProvider(AioSandboxProvider):
 
     # ── P4 / R2: drop dead cache references without autonomous destroy (I16 / I19) ─
 
-    def _drop_unhealthy_sandbox(self, sandbox_id: str, reason: str, *, expected_info: SandboxInfo | None = None) -> None:
-        """Forget a dead cache reference, but never autonomously ``docker rm`` it.
+    def _destroy_dropped_sandbox(self, sandbox_id: str, info: SandboxInfo) -> None:
+        """No-op: forget a dead cache reference but never autonomously ``docker rm`` it.
 
-        The base, on a failed ``is_alive`` probe (active reuse or warm reclaim), both
-        removes the in-process reference *and* ``self._backend.destroy``s the container —
-        correct for single-tenant use. A director process must not: it strips all
-        autonomous destroy power (I16, see ``_destroy_on_shutdown`` / ``_evict_oldest_warm``)
-        because the deterministic container name is shared across same-host instances and a
-        blind ``docker rm`` (no creation/run flock held) could TOCTOU-kill a container a
-        peer just (re)created with that same name.
-
-        Here ``is_alive`` already returned False, so the container is gone — there is
-        nothing to destroy. We only forget the stale in-process reference (under the base's
-        ``expected_info`` identity guard, so a freshly recreated same-id sandbox is never
-        evicted) and close the local client handle; acquire then falls through to
-        discover/create. Any genuinely orphaned container is reclaimed out-of-band by the
-        per-host run-flock janitor (D13).
+        Override of the base ``_drop_unhealthy_sandbox`` teardown seam. On a failed
+        ``is_alive`` probe (active reuse or warm reclaim) the base still forgets the stale
+        in-process reference — under its ``expected_info`` identity guard, so a freshly
+        recreated same-id sandbox is never evicted — and closes the local client handle;
+        acquire then falls through to discover/create. We only strip the autonomous
+        ``self._backend.destroy`` (I16, see ``_destroy_on_shutdown`` / ``_evict_oldest_warm``):
+        the deterministic container name is shared across same-host instances, so a blind
+        ``docker rm`` (no creation/run flock held) could TOCTOU-kill a container a peer just
+        (re)created with that same name. ``is_alive`` already returned False here, so the
+        container is gone — there is nothing to destroy anyway; any genuinely orphaned
+        container is reclaimed out-of-band by the per-host run-flock janitor (D13).
         """
-        sandbox, _info, removed = self._remove_tracked_sandbox(sandbox_id, expected_info=expected_info)
-        if not removed:
-            logger.info("DirectorAioProvider: skipped dropping sandbox %s; tracked info changed after health check", sandbox_id)
-            return
-
-        if sandbox is not None:
-            try:
-                sandbox.close()
-            except Exception as e:
-                logger.warning("Error closing unhealthy sandbox %s: %s", sandbox_id, e)
-
-        logger.info("DirectorAioProvider: dropped dead reference to sandbox %s (%s); left container teardown to the janitor (I16)", sandbox_id, reason)
+        logger.info("DirectorAioProvider: left container teardown to the janitor for sandbox %s (I16)", sandbox_id)
 
     # ── P4 / R3: move the creation flock off virtiofs onto local disk (I17) ──────
 

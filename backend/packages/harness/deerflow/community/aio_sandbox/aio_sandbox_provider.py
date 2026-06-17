@@ -659,12 +659,22 @@ class AioSandboxProvider(SandboxProvider):
                 logger.warning(f"Error closing unhealthy sandbox {sandbox_id}: {e}")
 
         if info is not None:
-            try:
-                self._backend.destroy(info)
-            except Exception as e:
-                logger.warning(f"Error destroying unhealthy sandbox {sandbox_id}: {e}")
+            self._destroy_dropped_sandbox(sandbox_id, info)
 
         logger.warning(f"Dropped unhealthy sandbox {sandbox_id}: {reason}")
+
+    def _destroy_dropped_sandbox(self, sandbox_id: str, info: SandboxInfo) -> None:
+        """Tear down the container behind a dropped dead cache reference.
+
+        Override seam for ``_drop_unhealthy_sandbox``. The default destroys the
+        container, which is correct for single-tenant use. A provider that must
+        never autonomously ``docker rm`` a shared-host container can override this
+        to a no-op without re-copying the remove/close/log body of the caller.
+        """
+        try:
+            self._backend.destroy(info)
+        except Exception as e:
+            logger.warning(f"Error destroying unhealthy sandbox {sandbox_id}: {e}")
 
     def _replica_count(self) -> tuple[int, int]:
         """Return configured replicas and currently tracked sandbox count."""
