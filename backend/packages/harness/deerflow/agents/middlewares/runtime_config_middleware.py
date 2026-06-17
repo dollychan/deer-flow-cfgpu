@@ -91,27 +91,29 @@ def _context_dict(runtime: object) -> dict:
     return ctx if isinstance(ctx, dict) else {}
 
 
-def _build_reminder(found: list[tuple[str, str]], missing: list[str]) -> str:
-    """Build the ``<system-reminder>`` content from loaded skill bodies and missing names."""
+def _build_reminder(found: list[tuple[str, str]], missing: list[str], out_of_scope: list[str]) -> str:
+    """Build the ``<system-reminder>`` content from loaded bodies, missing and out-of-scope names.
+
+    ``out_of_scope`` names are still present in ``found`` (injected best-effort), but are also
+    annotated so the agent knows they fall outside this agent's normal whitelist (strategy B).
+    """
     lines: list[str] = ["<system-reminder>"]
     if found:
-        lines.append(
-            "The user has selected the following skill(s) for THIS message. "
-            "You MUST follow their workflow and instructions for this task:"
-        )
+        lines.append("The user has selected the following skill(s) for THIS message. You MUST follow their workflow and instructions for this task:")
         lines.append("")
         for name, content in found:
             lines.append("<skill>")
             lines.append(f"<name>{name}</name>")
             lines.append(content.strip())
             lines.append("</skill>")
-    if missing:
+    if out_of_scope:
         if found:
             lines.append("")
-        lines.append(
-            f"The following requested skill(s) were NOT found and cannot be applied: "
-            f"{', '.join(missing)}. Tell the user you cannot apply them."
-        )
+        lines.append(f"Note: the following skill(s) are outside this agent's normal scope but were applied as explicitly requested by the client: {', '.join(out_of_scope)}.")
+    if missing:
+        if found or out_of_scope:
+            lines.append("")
+        lines.append(f"The following requested skill(s) were NOT found and cannot be applied: {', '.join(missing)}. Tell the user you cannot apply them.")
     lines.append("</system-reminder>")
     return "\n".join(lines)
 
@@ -204,12 +206,21 @@ class RuntimeConfigMiddleware(AgentMiddleware):
     runs before HAM's (after_model dispatches in reverse registration order).
     """
 
-    def __init__(self, *, app_config: AppConfig | None = None, model_bindings: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        app_config: AppConfig | None = None,
+        model_bindings: dict[str, str] | None = None,
+        available_skills: set[str] | None = None,
+    ) -> None:
         super().__init__()
         self._app_config = app_config
         # Effective bindings: the agent's config.yaml model_bindings if set, else the built-in
         # default. A configured dict replaces the default entirely (config wins).
         self._model_bindings: dict[str, str] = dict(model_bindings) if model_bindings else dict(_DEFAULT_MODEL_BINDINGS)
+        # Agent whitelist (the result of ``_available_skill_names``): runtime.skills outside it
+        # are injected best-effort but flagged (strategy B). ``None`` = full pool → no constraint.
+        self._available_skills: set[str] | None = set(available_skills) if available_skills is not None else None
 
     # ── config.skills — eager injection (Model B) ────────────────────────────────
 
@@ -224,8 +235,13 @@ class RuntimeConfigMiddleware(AgentMiddleware):
         except TypeError:
             return []
 
-    def _load_blocks(self, names: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
-        """Resolve skill names to (name, SKILL.md text) blocks; return (found, missing).
+    def _load_blocks(self, names: list[str]) -> tuple[list[tuple[str, str]], list[str], list[str]]:
+        """Resolve skill names to (name, SKILL.md text) blocks; return (found, missing, out_of_scope).
+
+        ``out_of_scope`` is the subset of ``found`` names that fall outside this agent's whitelist
+        (``self._available_skills``): they are still loaded and injected best-effort, but flagged so
+        the reminder can annotate them (strategy B). When the whitelist is ``None`` (full pool) no
+        name is out of scope.
 
         Blocking file IO — call directly on the sync path, via ``to_thread`` on async.
         """
@@ -233,12 +249,13 @@ class RuntimeConfigMiddleware(AgentMiddleware):
 
         found: list[tuple[str, str]] = []
         missing: list[str] = []
+        out_of_scope: list[str] = []
         try:
             storage = get_or_new_skill_storage(app_config=self._app_config)
             by_name = {s.name: s for s in storage.load_skills()}
         except Exception:
             logger.exception("RuntimeConfig: failed to load skills storage; treating all as missing")
-            return [], list(names)
+            return [], list(names), []
 
         for name in names:
             skill = by_name.get(name)
@@ -257,10 +274,16 @@ class RuntimeConfigMiddleware(AgentMiddleware):
                 )
                 missing.append(name)
                 continue
+            if self._available_skills is not None and name not in self._available_skills:
+                logger.warning(
+                    "RuntimeConfig: requested skill %r is outside this agent's whitelist; injecting best-effort",
+                    name,
+                )
+                out_of_scope.append(name)
             found.append((name, content))
-        return found, missing
+        return found, missing, out_of_scope
 
-    def _build_update(self, state, found: list[tuple[str, str]], missing: list[str]) -> dict | None:
+    def _build_update(self, state, found: list[tuple[str, str]], missing: list[str], out_of_scope: list[str]) -> dict | None:
         messages = list(state.get("messages", []))
         if not messages:
             return None
@@ -277,11 +300,11 @@ class RuntimeConfigMiddleware(AgentMiddleware):
             return None
 
         # Idempotency: this turn already carries a skill reminder.
-        if any(_is_skill_reminder(m) for m in messages[target_idx + 1:]):
+        if any(_is_skill_reminder(m) for m in messages[target_idx + 1 :]):
             return None
 
         reminder = HumanMessage(
-            content=_build_reminder(found, missing),
+            content=_build_reminder(found, missing, out_of_scope),
             additional_kwargs={"hide_from_ui": True, _SKILL_REMINDER_KEY: True},
         )
         return {"messages": [reminder]}
@@ -291,16 +314,16 @@ class RuntimeConfigMiddleware(AgentMiddleware):
         names = self._requested_skills(runtime)
         if not names:
             return None
-        found, missing = self._load_blocks(names)
-        return self._build_update(state, found, missing)
+        found, missing, out_of_scope = self._load_blocks(names)
+        return self._build_update(state, found, missing, out_of_scope)
 
     @override
     async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
         names = self._requested_skills(runtime)
         if not names:
             return None
-        found, missing = await asyncio.to_thread(self._load_blocks, names)
-        return self._build_update(state, found, missing)
+        found, missing, out_of_scope = await asyncio.to_thread(self._load_blocks, names)
+        return self._build_update(state, found, missing, out_of_scope)
 
     # ── config.models — router-whitelist, applied before HAM (方案 3) ─────────────
 

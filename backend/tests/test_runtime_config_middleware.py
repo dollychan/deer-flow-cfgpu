@@ -145,6 +145,56 @@ def test_partial_found_and_missing(monkeypatch, tmp_path):
     assert "NOT found" in content and "Ghost" in content  # other flagged
 
 
+# ── config.skills: out-of-whitelist defensive check (strategy B, best-effort) ────
+
+
+def test_out_of_whitelist_skill_injected_but_flagged(monkeypatch, tmp_path, caplog):
+    # The skill exists in the global pool but is NOT in this agent's whitelist.
+    _write_skill(tmp_path, "seedance", _SKILL_NAME, _SKILL_MARKER)
+    _patch_storage(monkeypatch, tmp_path)
+    mw = RuntimeConfigMiddleware(available_skills={"Some Other Skill"})
+    state = {"messages": [HumanMessage(content="go")]}
+
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        result = mw.before_agent(state, _runtime([_SKILL_NAME]))
+
+    assert result is not None  # run continues
+    content = result["messages"][0].content
+    assert _SKILL_MARKER in content  # best-effort: full body still injected
+    assert "outside this agent's normal scope" in content  # annotated
+    assert "NOT found" not in content  # it WAS found, just out of scope
+    assert any("outside this agent's whitelist" in r.message.lower() for r in caplog.records)
+
+
+def test_in_whitelist_skill_not_flagged(monkeypatch, tmp_path):
+    _write_skill(tmp_path, "seedance", _SKILL_NAME, _SKILL_MARKER)
+    _patch_storage(monkeypatch, tmp_path)
+    mw = RuntimeConfigMiddleware(available_skills={_SKILL_NAME})
+    state = {"messages": [HumanMessage(content="go")]}
+
+    result = mw.before_agent(state, _runtime([_SKILL_NAME]))
+
+    content = result["messages"][0].content
+    assert _SKILL_MARKER in content
+    assert "outside this agent's normal scope" not in content  # in whitelist → no flag
+
+
+def test_none_whitelist_imposes_no_constraint(monkeypatch, tmp_path):
+    # available_skills=None means "full pool" → never flagged as out of scope.
+    _write_skill(tmp_path, "seedance", _SKILL_NAME, _SKILL_MARKER)
+    _patch_storage(monkeypatch, tmp_path)
+    mw = RuntimeConfigMiddleware(available_skills=None)
+    state = {"messages": [HumanMessage(content="go")]}
+
+    result = mw.before_agent(state, _runtime([_SKILL_NAME]))
+
+    content = result["messages"][0].content
+    assert _SKILL_MARKER in content
+    assert "outside this agent's normal scope" not in content
+
+
 # ── config.skills: idempotency ───────────────────────────────────────────────────
 
 

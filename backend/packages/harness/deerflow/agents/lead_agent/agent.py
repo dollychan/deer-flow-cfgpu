@@ -422,6 +422,7 @@ def build_middlewares(
         RuntimeConfigMiddleware(
             app_config=resolved_app_config,
             model_bindings=agent_config.model_bindings if agent_config else None,
+            available_skills=available_skills,
         )
     )
 
@@ -449,12 +450,48 @@ def build_middlewares(
     return middlewares
 
 
-def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
+def _expand_skill_dirs(skill_dirs, *, app_config: AppConfig | None) -> set[str]:
+    """Expand category-relative directory prefixes into enabled skill names.
+
+    Each entry matches a skill when its category-relative ``skill_path`` equals the
+    entry or is nested under it. An optional leading ``public/`` / ``custom/`` segment
+    pins the match to that category; otherwise the entry matches across both. Expansion
+    runs over the enabled-skills set, so resolved names are guaranteed enabled.
+    """
+    if not skill_dirs:
+        return set()
+    from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
+
+    skills = get_enabled_skills_for_config(app_config)
+    names: set[str] = set()
+    for raw in skill_dirs:
+        entry = str(raw).strip().strip("/")
+        if not entry:
+            continue
+        head, _, rest = entry.partition("/")
+        category = head if head in ("public", "custom") else None
+        prefix = (rest if category is not None else entry).strip("/")
+        for skill in skills:
+            if category is not None and skill.category != category:
+                continue
+            skill_path = skill.skill_path  # category-relative POSIX; "" at category root
+            if prefix == "" or skill_path == prefix or skill_path.startswith(prefix + "/"):
+                names.add(skill.name)
+    return names
+
+
+def _available_skill_names(agent_config, is_bootstrap: bool, *, app_config: AppConfig | None = None) -> set[str] | None:
     if is_bootstrap:
         return set(_BOOTSTRAP_SKILL_NAMES)
-    if agent_config and agent_config.skills is not None:
-        return set(agent_config.skills)
-    return None
+    if agent_config is None:
+        return None
+    skills = agent_config.skills
+    skill_dirs = getattr(agent_config, "skill_dirs", None)
+    if skills is None and skill_dirs is None:
+        return None
+    names = set(skills or [])
+    names |= _expand_skill_dirs(skill_dirs, app_config=app_config)
+    return names
 
 
 def _load_enabled_skills_for_tool_policy(available_skills: set[str] | None, *, app_config: AppConfig) -> list[Skill]:
@@ -498,7 +535,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
     agent_config = load_agent_config(agent_name) if not is_bootstrap else None
-    available_skills = _available_skill_names(agent_config, is_bootstrap)
+    available_skills = _available_skill_names(agent_config, is_bootstrap, app_config=resolved_app_config)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 

@@ -67,8 +67,18 @@ class AgentConfig(BaseModel):
     # skills controls which skills are loaded into the agent's prompt:
     # - None (or omitted): load all enabled skills (default fallback behavior)
     # - [] (explicit empty list): disable all skills
-    # - ["skill1", "skill2"]: load only the specified skills
+    # - ["skill1", "skill2"]: load only the specified skills (by frontmatter name)
     skills: list[str] | None = None
+    # skill_dirs: category-relative directory prefixes that whitelist skills by their
+    # on-disk location instead of by name. Unioned with ``skills`` to form the agent's
+    # available set (see cfgpu-docs/config.md "agent 白名单"). Each entry matches a skill
+    # whose category-relative ``skill_path`` equals the entry or is nested under it. An
+    # optional leading ``public/`` or ``custom/`` segment pins the match to that category;
+    # without it the entry matches across both categories.
+    # - None (or omitted): contributes nothing (whitelist comes from ``skills`` alone).
+    # - ["custom/director/public", "video"]: include skills under those subtrees.
+    # When BOTH ``skills`` and ``skill_dirs`` are None, the agent sees all enabled skills.
+    skill_dirs: list[str] | None = None
     # approval_required_tools: tool name patterns (fnmatch) that require human
     # confirmation before execution. Matched tools pause the graph via
     # LangGraph interrupt() until the client sends Command(resume={...}).
