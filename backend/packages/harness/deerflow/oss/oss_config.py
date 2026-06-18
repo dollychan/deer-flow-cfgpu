@@ -12,8 +12,10 @@ class OSSConfig(BaseModel):
     behaviour: virtual paths are written to ``artifacts`` as-is and served by
     the Gateway ``/api/threads/{id}/artifacts/{path}`` endpoint.
 
-    When ``enabled`` is true, ``present_files`` uploads each output file to AliOSS
-    and replaces the local path with a presigned URL before writing to ``artifacts``.
+    When ``enabled`` is true, ``present_files`` uploads each output file to AliOSS.
+    With ``presigned_url`` true (default) it replaces the local path with a presigned
+    URL before writing to ``artifacts``; with ``presigned_url`` false it writes the
+    bare object key (the path inside the bucket) instead.
 
     Config path: ``oss:`` section in config.yaml.
     All string fields support ``$ENV_VAR`` substitution via AppConfig.resolve_env_variables.
@@ -27,7 +29,7 @@ class OSSConfig(BaseModel):
           bucket: cf-dream
           region: cn-beijing
           presigned_url_expires_days: 7
-          cfgpu_url_refresh_threshold_hours: 2
+          presigned_url: true
     """
 
     enabled: bool = Field(default=False, description="Enable OSS upload for presented files")
@@ -41,10 +43,9 @@ class OSSConfig(BaseModel):
         le=7,
         description="Presigned URL validity in days (AliOSS V4 max: 7 days)",
     )
-    cfgpu_url_refresh_threshold_hours: int = Field(
-        default=2,
-        ge=0,
-        description="Re-upload cfgpu remote URLs when remaining validity is below this threshold (hours). 0 = never re-upload.",
+    presigned_url: bool = Field(
+        default=True,
+        description="When true, uploads return a presigned GET URL; when false, return the bare object key (bucket path).",
     )
 
 

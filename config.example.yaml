@@ -1493,4 +1493,4 @@ run_events:
 #   bucket: cf-dream
 #   region: cn-beijing                 # AliOSS region, required for V4 signing
 #   presigned_url_expires_days: 7      # max 7 days (AliOSS V4 limit)
-#   cfgpu_url_refresh_threshold_hours: 2   # re-upload cfgpu URLs expiring within N hours (0 = never)
+#   presigned_url: true                # true: return presigned URL; false: return bare object key (bucket path)

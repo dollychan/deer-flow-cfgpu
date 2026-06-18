@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import logging
 import mimetypes
 from datetime import timedelta
@@ -47,12 +46,17 @@ class OSSClient:
         self._client = oss.Client(cfg)
         self._bucket = config.bucket
         self._expires = timedelta(days=config.presigned_url_expires_days)
+        self._return_presigned = config.presigned_url
         self._check_bucket()
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def upload_file(self, object_key: str, local_path: str) -> str:
-        """Upload a local file and return a presigned GET URL."""
+        """Upload a local file and return a reference to it.
+
+        Returns a presigned GET URL when ``presigned_url`` is enabled, otherwise the
+        bare ``object_key`` (the file's path inside the bucket).
+        """
         content_type = _guess_content_type(Path(local_path).name)
         with open(local_path, "rb") as f:
             self._client.put_object(
@@ -63,20 +67,7 @@ class OSSClient:
                     content_type=content_type,
                 )
             )
-        return self._presigned_url(object_key)
-
-    def upload_bytes(self, object_key: str, data: bytes, content_type: str) -> str:
-        """Upload raw bytes and return a presigned GET URL."""
-        self._client.put_object(
-            self._oss.PutObjectRequest(
-                bucket=self._bucket,
-                key=object_key,
-                body=io.BytesIO(data),
-                content_length=len(data),
-                content_type=content_type,
-            )
-        )
-        return self._presigned_url(object_key)
+        return self._presigned_url(object_key) if self._return_presigned else object_key
 
     # ── Internals ──────────────────────────────────────────────────────────────
 
