@@ -361,11 +361,18 @@ def build_middlewares(
     if resolved_app_config.memory.enabled:
         middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
 
-    # Add ViewImageMiddleware only if the current model supports vision.
+    # Add vision middlewares only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
+    # AnalyseImageMiddleware (P9, materials subsystem) is the single-turn ephemeral injector for
+    # the analyse_image tool, added alongside ViewImageMiddleware (the latter retires with the P8
+    # breaking cleanup). It is INDEPENDENT of MaterialsMiddleware (§5 "P9 不并入"): tool-triggered,
+    # vision-gated, heavy pixel payload. See cfgpu-docs/materials.md §4.7.
     model_config = resolved_app_config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
+        from deerflow.agents.middlewares.analyse_image_middleware import AnalyseImageMiddleware
+
         middlewares.append(ViewImageMiddleware())
+        middlewares.append(AnalyseImageMiddleware())
 
     # Hide deferred tool schemas from model binding until tool_search promotes them.
     # The deferred set + catalog hash come from the build-time setup (assembled
