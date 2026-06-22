@@ -202,7 +202,7 @@ from deerflow.config import get_app_config
 
 Lead-agent middlewares are assembled in strict append order across `packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py` (`build_lead_runtime_middlewares`) and `packages/harness/deerflow/agents/lead_agent/agent.py` (`build_middlewares`):
 
-1. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); resolves `user_id` via `get_effective_user_id()` (falls back to `"default"` in no-auth mode); Web UI thread deletion now follows LangGraph thread removal with Gateway cleanup of the local thread directory
+1. **ThreadDataMiddleware** - Creates per-thread directories keyed by `thread_id` alone (`backend/.deer-flow/threads/{thread_id}/user-data/{workspace,uploads,outputs}`) and is the single source of truth for those paths (injected on `state["thread_data"]`; downstream path sites read them rather than re-resolving). Thread data is isolated by `thread_id`, never per-user, so multiple users sharing a thread share its materials (cfgpu-docs/thread-tenancy.md; `user_id` still scopes memory/agents/billing/tracing, just not thread-data disk). Web UI thread deletion follows LangGraph thread removal with Gateway cleanup of the local thread directory
 2. **UploadsMiddleware** - Tracks and injects newly uploaded files into conversation
 3. **SandboxMiddleware** - Acquires sandbox, stores `sandbox_id` in state
 4. **DanglingToolCallMiddleware** - Injects placeholder ToolMessages for AIMessage tool_calls that lack responses (e.g., due to user interruption), including raw provider tool-call payloads preserved only in `additional_kwargs["tool_calls"]`
@@ -303,7 +303,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 
 **Virtual Path System**:
 - Agent sees: `/mnt/user-data/{workspace,uploads,outputs}`, `/mnt/skills`
-- Physical: `backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/...`, `deer-flow/skills/`
+- Physical: `backend/.deer-flow/threads/{thread_id}/user-data/...` (thread-only tenancy; see cfgpu-docs/thread-tenancy.md), `deer-flow/skills/`
 - Translation: `LocalSandboxProvider` builds per-thread `PathMapping`s for the user-data prefixes at acquire time; `tools.py` keeps `replace_virtual_path()` / `replace_virtual_paths_in_command()` as a defense-in-depth layer (and for path validation). AIO has the directories volume-mounted at the same virtual paths inside its container, so both implementations accept `/mnt/user-data/...` natively.
 - Detection: `is_local_sandbox()` accepts both `sandbox_id == "local"` (legacy / no-thread) and `sandbox_id.startswith("local:")` (per-thread)
 
@@ -347,7 +347,7 @@ Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runti
 - `invoke_acp_agent` - Invokes external ACP-compatible agents from `config.yaml`
 - ACP launchers must be real ACP adapters. The standard `codex` CLI is not ACP-compatible by itself; configure a wrapper such as `npx -y @zed-industries/codex-acp` or an installed `codex-acp` binary
 - Missing ACP executables now return an actionable error message instead of a raw `[Errno 2]`
-- Each ACP agent uses a per-thread workspace at `{base_dir}/users/{user_id}/threads/{thread_id}/acp-workspace/`. The workspace is accessible to the lead agent via the virtual path `/mnt/acp-workspace/` (read-only). In docker sandbox mode, the directory is volume-mounted into the container at `/mnt/acp-workspace` (read-only); in local sandbox mode, path translation is handled by `tools.py`
+- Each ACP agent uses a per-thread workspace at `{base_dir}/threads/{thread_id}/acp-workspace/` (thread-only tenancy). The workspace is accessible to the lead agent via the virtual path `/mnt/acp-workspace/` (read-only). In docker sandbox mode, the directory is volume-mounted into the container at `/mnt/acp-workspace` (read-only); in local sandbox mode, path translation is handled by `tools.py`
 - `image_search/` - Image search via DuckDuckGo
 
 ### MCP System (`packages/harness/deerflow/mcp/`)

@@ -1591,12 +1591,10 @@ class TestUploads:
 
 class TestArtifacts:
     def test_get_artifact(self, client):
-        from deerflow.runtime.user_context import get_effective_user_id
 
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
-            user_id = get_effective_user_id()
-            outputs = paths.sandbox_outputs_dir("t1", user_id=user_id)
+            outputs = paths.sandbox_outputs_dir("t1")
             outputs.mkdir(parents=True)
             (outputs / "result.txt").write_text("artifact content")
 
@@ -1607,12 +1605,10 @@ class TestArtifacts:
             assert "text" in mime
 
     def test_get_artifact_not_found(self, client):
-        from deerflow.runtime.user_context import get_effective_user_id
 
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
-            user_id = get_effective_user_id()
-            paths.sandbox_outputs_dir("t1", user_id=user_id).mkdir(parents=True)
+            paths.sandbox_outputs_dir("t1").mkdir(parents=True)
 
             with patch("deerflow.client.get_paths", return_value=paths):
                 with pytest.raises(FileNotFoundError):
@@ -1623,12 +1619,10 @@ class TestArtifacts:
             client.get_artifact("t1", "bad/path/file.txt")
 
     def test_get_artifact_path_traversal(self, client):
-        from deerflow.runtime.user_context import get_effective_user_id
 
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
-            user_id = get_effective_user_id()
-            paths.sandbox_outputs_dir("t1", user_id=user_id).mkdir(parents=True)
+            paths.sandbox_outputs_dir("t1").mkdir(parents=True)
 
             with patch("deerflow.client.get_paths", return_value=paths):
                 with pytest.raises(PathTraversalError):
@@ -1812,7 +1806,6 @@ class TestScenarioFileLifecycle:
 
     def test_upload_then_read_artifact(self, client):
         """Upload a file, simulate agent producing artifact, read it back."""
-        from deerflow.runtime.user_context import get_effective_user_id
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1820,8 +1813,7 @@ class TestScenarioFileLifecycle:
             uploads_dir.mkdir()
 
             paths = Paths(base_dir=tmp_path)
-            user_id = get_effective_user_id()
-            outputs_dir = paths.sandbox_outputs_dir("t-artifact", user_id=user_id)
+            outputs_dir = paths.sandbox_outputs_dir("t-artifact")
             outputs_dir.mkdir(parents=True)
 
             # Upload phase
@@ -2071,14 +2063,12 @@ class TestScenarioThreadIsolation:
 
     def test_artifacts_isolated_per_thread(self, client):
         """Artifacts in thread-A are not accessible from thread-B."""
-        from deerflow.runtime.user_context import get_effective_user_id
 
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
-            user_id = get_effective_user_id()
-            outputs_a = paths.sandbox_outputs_dir("thread-a", user_id=user_id)
+            outputs_a = paths.sandbox_outputs_dir("thread-a")
             outputs_a.mkdir(parents=True)
-            paths.sandbox_outputs_dir("thread-b", user_id=user_id).mkdir(parents=True)
+            paths.sandbox_outputs_dir("thread-b").mkdir(parents=True)
             (outputs_a / "result.txt").write_text("thread-a artifact")
 
             with patch("deerflow.client.get_paths", return_value=paths):
@@ -3011,12 +3001,10 @@ class TestUploadDeleteSymlink:
 class TestArtifactHardening:
     def test_artifact_directory_rejected(self, client):
         """get_artifact rejects paths that resolve to a directory."""
-        from deerflow.runtime.user_context import get_effective_user_id
 
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
-            user_id = get_effective_user_id()
-            subdir = paths.sandbox_outputs_dir("t1", user_id=user_id) / "subdir"
+            subdir = paths.sandbox_outputs_dir("t1") / "subdir"
             subdir.mkdir(parents=True)
 
             with patch("deerflow.client.get_paths", return_value=paths):
@@ -3025,12 +3013,10 @@ class TestArtifactHardening:
 
     def test_artifact_leading_slash_stripped(self, client):
         """Paths with leading slash are handled correctly."""
-        from deerflow.runtime.user_context import get_effective_user_id
 
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
-            user_id = get_effective_user_id()
-            outputs = paths.sandbox_outputs_dir("t1", user_id=user_id)
+            outputs = paths.sandbox_outputs_dir("t1")
             outputs.mkdir(parents=True)
             (outputs / "file.txt").write_text("content")
 
@@ -3144,12 +3130,10 @@ class TestBugArtifactPrefixMatchTooLoose:
 
     def test_exact_prefix_without_subpath_accepted(self, client):
         """Bare 'mnt/user-data' is accepted (will later fail as directory, not at prefix)."""
-        from deerflow.runtime.user_context import get_effective_user_id
 
         with tempfile.TemporaryDirectory() as tmp:
             paths = Paths(base_dir=tmp)
-            user_id = get_effective_user_id()
-            paths.sandbox_outputs_dir("t1", user_id=user_id).mkdir(parents=True)
+            paths.sandbox_outputs_dir("t1").mkdir(parents=True)
 
             with patch("deerflow.client.get_paths", return_value=paths):
                 # Accepted at prefix check, but fails because it's a directory.

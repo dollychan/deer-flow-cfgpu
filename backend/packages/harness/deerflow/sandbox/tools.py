@@ -253,9 +253,13 @@ def _get_acp_workspace_host_path(thread_id: str | None = None) -> str | None:
     if thread_id is not None:
         try:
             from deerflow.config.paths import get_paths
-            from deerflow.runtime.user_context import get_effective_user_id
 
-            host_path = get_paths().acp_workspace_dir(thread_id, user_id=get_effective_user_id())
+            # Thread-only tenancy (thread-tenancy.md §4.3): the ACP workspace is keyed by
+            # thread_id alone (threads/{thread_id}/acp-workspace), matching the mount source
+            # and ThreadDataMiddleware. thread_id here is already derived purely from
+            # thread_data (_extract_thread_id_from_thread_data), so the whole ACP path chain
+            # carries zero user_id and is immune to the tenant model.
+            host_path = get_paths().acp_workspace_dir(thread_id)
             if host_path.exists():
                 return str(host_path)
         except Exception:

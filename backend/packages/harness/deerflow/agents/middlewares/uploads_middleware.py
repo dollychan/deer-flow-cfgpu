@@ -11,7 +11,6 @@ from langchain_core.runnables import run_in_executor
 from langgraph.runtime import Runtime
 
 from deerflow.config.paths import Paths, get_paths
-from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.file_conversion import extract_outline
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
@@ -215,16 +214,26 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         if not isinstance(last_message, HumanMessage):
             return None
 
-        # Resolve uploads directory for existence checks
-        thread_id = (runtime.context or {}).get("thread_id")
-        if thread_id is None:
-            try:
-                from langgraph.config import get_config
+        # Resolve uploads directory for existence checks. Prefer the path published by
+        # ThreadDataMiddleware on state["thread_data"] (the single source of truth, zero
+        # user_id — cfgpu-docs/thread-tenancy.md §4.3 / I3+). This middleware runs after
+        # ThreadDataMiddleware (factory.py append order), so the path is already present.
+        thread_data = state.get("thread_data") or {}
+        uploads_path = thread_data.get("uploads_path")
+        if uploads_path:
+            uploads_dir: Path | None = Path(uploads_path)
+        else:
+            # Fallback (e.g. unit tests without ThreadDataMiddleware): resolve thread-only
+            # from thread_id, still zero user_id — never split the bucket.
+            thread_id = (runtime.context or {}).get("thread_id")
+            if thread_id is None:
+                try:
+                    from langgraph.config import get_config
 
-                thread_id = get_config().get("configurable", {}).get("thread_id")
-            except RuntimeError:
-                pass  # get_config() raises outside a runnable context (e.g. unit tests)
-        uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=get_effective_user_id()) if thread_id else None
+                    thread_id = get_config().get("configurable", {}).get("thread_id")
+                except RuntimeError:
+                    pass  # get_config() raises outside a runnable context (e.g. unit tests)
+            uploads_dir = self._paths.sandbox_uploads_dir(thread_id) if thread_id else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files
         new_files = self._files_from_kwargs(last_message, uploads_dir) or []

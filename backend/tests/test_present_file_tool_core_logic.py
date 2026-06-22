@@ -55,17 +55,12 @@ def test_present_files_normalizes_host_outputs_path(tmp_path):
     assert result.update["messages"][0].content == "Successfully presented files"
 
 
-def test_present_files_keeps_virtual_outputs_path(tmp_path, monkeypatch):
+def test_present_files_keeps_virtual_outputs_path(tmp_path):
+    """A virtual outputs path is mapped onto the host user-data dir derived purely from
+    thread_data.outputs_path (thread-tenancy.md §4.3) — no get_paths / user_id involved."""
     outputs_dir = tmp_path / "threads" / "thread-1" / "user-data" / "outputs"
     outputs_dir.mkdir(parents=True)
-    artifact_path = outputs_dir / "summary.json"
-    artifact_path.write_text("{}")
-
-    monkeypatch.setattr(
-        present_file_tool_module,
-        "get_paths",
-        lambda: SimpleNamespace(resolve_virtual_path=lambda thread_id, path, *, user_id=None: artifact_path),
-    )
+    (outputs_dir / "summary.json").write_text("{}")
 
     result = _present(
         runtime=_make_runtime(str(outputs_dir)),
@@ -76,17 +71,10 @@ def test_present_files_keeps_virtual_outputs_path(tmp_path, monkeypatch):
     assert result.update["artifacts"] == ["/mnt/user-data/outputs/summary.json"]
 
 
-def test_present_files_uses_config_thread_id_when_context_missing(tmp_path, monkeypatch):
+def test_present_files_uses_config_thread_id_when_context_missing(tmp_path):
     outputs_dir = tmp_path / "threads" / "thread-from-config" / "user-data" / "outputs"
     outputs_dir.mkdir(parents=True)
-    artifact_path = outputs_dir / "summary.json"
-    artifact_path.write_text("{}")
-
-    monkeypatch.setattr(
-        present_file_tool_module,
-        "get_paths",
-        lambda: SimpleNamespace(resolve_virtual_path=lambda thread_id, path: artifact_path),
-    )
+    (outputs_dir / "summary.json").write_text("{}")
 
     runtime = SimpleNamespace(
         state={"thread_data": {"outputs_path": str(outputs_dir)}},
@@ -104,38 +92,18 @@ def test_present_files_uses_config_thread_id_when_context_missing(tmp_path, monk
     assert result.update["messages"][0].content == "Successfully presented files"
 
 
-def test_present_files_resolves_user_bucket_from_runtime_context(tmp_path, monkeypatch):
-    """Consumer regression (BUG-008): the user bucket must come from
-    runtime.context["user_id"], not the _current_user contextvar.
-
-    In the consumer there is no auth middleware, so get_effective_user_id()
-    resolves to "default" while ThreadDataMiddleware/cfgpu write under the real
-    user_id ("34"). present_files must resolve the virtual path under "34" so it
-    matches the thread's outputs_path; otherwise relative_to() splits the bucket
-    and raises "Only files can be presented".
+def test_present_files_is_decoupled_from_user_id_in_context(tmp_path):
+    """Thread-only tenancy (thread-tenancy.md §4.3 / I3+): present_files resolves the
+    virtual path purely from thread_data.outputs_path with ZERO user_id, even when
+    runtime.context carries a user_id. This retires the BUG-008 per-user-bucket
+    re-resolution: the bucket is whatever ThreadDataMiddleware published, full stop.
     """
-    # Real on-disk layout under the user-34 bucket.
-    outputs_dir = tmp_path / "users" / "34" / "threads" / "thread-1" / "user-data" / "outputs"
+    # Disk layout is thread-only; the file lives directly under the thread outputs dir.
+    outputs_dir = tmp_path / "threads" / "thread-1" / "user-data" / "outputs"
     outputs_dir.mkdir(parents=True)
-    artifact_path = outputs_dir / "doraemon_park.jpg"
-    artifact_path.write_bytes(b"jpg")
+    (outputs_dir / "doraemon_park.jpg").write_bytes(b"jpg")
 
-    captured: dict = {}
-
-    def fake_resolve_virtual_path(thread_id, path, *, user_id=None):
-        captured["user_id"] = user_id
-        # Resolve into the per-user bucket, mirroring Paths.resolve_virtual_path.
-        relative = path.split("/mnt/user-data/", 1)[1]
-        return tmp_path / "users" / str(user_id) / "threads" / thread_id / "user-data" / relative
-
-    monkeypatch.setattr(
-        present_file_tool_module,
-        "get_paths",
-        lambda: SimpleNamespace(resolve_virtual_path=fake_resolve_virtual_path),
-    )
-
-    # The contextvar is unset in the consumer (get_effective_user_id() -> "default");
-    # resolve_runtime_user_id must pick "34" from runtime.context instead.
+    # A user_id is present in context but MUST NOT influence resolution.
     runtime = SimpleNamespace(
         state={"thread_data": {"outputs_path": str(outputs_dir)}},
         context={"thread_id": "thread-1", "user_id": "34"},
@@ -148,7 +116,9 @@ def test_present_files_resolves_user_bucket_from_runtime_context(tmp_path, monke
         tool_call_id="tc-bucket",
     )
 
-    assert captured["user_id"] == "34"
+    # Presented successfully against the thread-only bucket (no "users/34/" path involved).
+    assert result.update["artifacts"] == ["/mnt/user-data/outputs/doraemon_park.jpg"]
+    assert result.update["messages"][0].content == "Successfully presented files"
     assert result.update["artifacts"] == ["/mnt/user-data/outputs/doraemon_park.jpg"]
     assert result.update["messages"][0].content == "Successfully presented files"
 

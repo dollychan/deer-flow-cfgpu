@@ -188,16 +188,16 @@ class LocalSandboxProvider(SandboxProvider):
     def _build_thread_path_mappings(thread_id: str) -> list[PathMapping]:
         """Build per-thread path mappings for /mnt/user-data and /mnt/acp-workspace.
 
-        Resolves ``user_id`` via :func:`get_effective_user_id` (the same path
-        :class:`AioSandboxProvider` uses) and ensures the backing host
-        directories exist before they are mapped into the sandbox view.
+        Thread-only tenancy (thread-tenancy.md §4.1): mappings are keyed by thread_id
+        alone (``threads/{thread_id}/...``), the same bucket :class:`AioSandboxProvider`
+        mounts and :class:`ThreadDataMiddleware` publishes — never a per-user bucket.
+        Ensures the backing host directories exist before they are mapped into the
+        sandbox view.
         """
         from deerflow.config.paths import get_paths
-        from deerflow.runtime.user_context import get_effective_user_id
 
         paths = get_paths()
-        user_id = get_effective_user_id()
-        paths.ensure_thread_dirs(thread_id, user_id=user_id)
+        paths.ensure_thread_dirs(thread_id)
 
         return [
             # Aggregate parent mapping so ``ls /mnt/user-data`` and other
@@ -207,27 +207,27 @@ class LocalSandboxProvider(SandboxProvider):
             # because ``_find_path_mapping`` sorts by container_path length.
             PathMapping(
                 container_path=_USER_DATA_VIRTUAL_PREFIX,
-                local_path=str(paths.sandbox_user_data_dir(thread_id, user_id=user_id)),
+                local_path=str(paths.sandbox_user_data_dir(thread_id)),
                 read_only=False,
             ),
             PathMapping(
                 container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/workspace",
-                local_path=str(paths.sandbox_work_dir(thread_id, user_id=user_id)),
+                local_path=str(paths.sandbox_work_dir(thread_id)),
                 read_only=False,
             ),
             PathMapping(
                 container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/uploads",
-                local_path=str(paths.sandbox_uploads_dir(thread_id, user_id=user_id)),
+                local_path=str(paths.sandbox_uploads_dir(thread_id)),
                 read_only=False,
             ),
             PathMapping(
                 container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/outputs",
-                local_path=str(paths.sandbox_outputs_dir(thread_id, user_id=user_id)),
+                local_path=str(paths.sandbox_outputs_dir(thread_id)),
                 read_only=False,
             ),
             PathMapping(
                 container_path=_ACP_WORKSPACE_VIRTUAL_PREFIX,
-                local_path=str(paths.acp_workspace_dir(thread_id, user_id=user_id)),
+                local_path=str(paths.acp_workspace_dir(thread_id)),
                 read_only=False,
             ),
         ]

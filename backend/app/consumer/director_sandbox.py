@@ -1,20 +1,19 @@
 """Director-specific AIO sandbox provider.
 
-The deerflow base ``AioSandboxProvider`` keys a thread's sandbox identity by ``thread_id``
-alone — correct for single-tenant use, but the director runs many users through one VM and
-bind-mounts per-``(user, thread)`` data (``users/{uid}/threads/{tid}/``). ``thread_id`` is
-not globally unique across users, so the base keying would let two users colliding on a
-thread_id reuse each other's sandbox and read into each other's bucket (D11 cross-user
-reuse leak).
+This subclass exists only to strip the deerflow base provider's autonomous container
+destroy power (P4 / I16) and to relocate the cross-process creation flock onto per-host
+local disk (R3 / I17). It does NOT customise the sandbox identity key.
 
-This subclass is the *single* override point: it folds the effective user into the one
-keying seam ``_identity_key``. Everything downstream — the container-name hash, the
-``_thread_sandboxes`` reuse map, the in-process thread lock, the cross-process file lock —
-inherits the composite key for free, because the base already routes all three sites
-through this method.
+Tenancy is by ``thread_id`` alone (cfgpu-docs/thread-tenancy.md D3). The former per-user
+composite ``_identity_key`` override — ``hash("{user_id}/{thread_id}")``, D11 — has been
+retired together with the per-user disk layout: thread data is now bind-mounted from the
+single shared ``threads/{thread_id}/...`` bucket, so a warm container reused across users
+serves the one shared disk (D4, intended), not a foreign one (the old "leak"). The base
+``_identity_key`` already keys by ``thread_id``, so removing the override is sufficient;
+the serial claim lock is itself thread_id-single-key, keeping same-thread runs serial.
 
 Wired via ``config.yaml`` ``sandbox.use: app.consumer.director_sandbox:DirectorAioProvider``.
-See ``cfgpu-docs/aio-localbackend-sandbox.md`` D11 / P2.5.
+See ``cfgpu-docs/aio-localbackend-sandbox.md`` (D11 retired) and ``thread-tenancy.md``.
 """
 
 from __future__ import annotations
@@ -25,28 +24,16 @@ from pathlib import Path
 from app.consumer import sandbox_locks
 from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
 from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
-from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
 
 class DirectorAioProvider(AioSandboxProvider):
-    """AIO sandbox provider whose sandbox identity is composite ``(user_id, thread_id)``."""
+    """AIO provider that yields its autonomous destroy power to the per-host janitor.
 
-    def _identity_key(self, thread_id: str, user_id: str | None = None) -> str:
-        """Fold the effective user into the sandbox identity key.
-
-        ``user_id`` is preferred when given (the cancel-into-container path passes it
-        explicitly, R1). Otherwise it is read from ``get_effective_user_id`` — the *same*
-        source ``_get_thread_mounts`` uses — so the identity key and the mounted data
-        bucket are always derived from one place (BUG-008). The two agree during a run:
-        the consumer sets the ContextVar from the same ``message.user_id`` it later hands
-        the cancel path. The composite ``"{user_id}/{thread_id}"`` is then hashed by the
-        base into the 8-char container suffix, keeping container names opaque to the
-        backend/discover/reconcile machinery while making them unique per user.
-        """
-        uid = user_id if user_id is not None else get_effective_user_id()
-        return f"{uid}/{thread_id}"
+    Identity is inherited from the base (``thread_id``-keyed); see module docstring and
+    cfgpu-docs/thread-tenancy.md for why the former per-user override (D11) was retired.
+    """
 
     # ── P4: strip autonomous destroy power (I16) ────────────────────────────────
 

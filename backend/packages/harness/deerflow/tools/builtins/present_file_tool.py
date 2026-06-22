@@ -9,8 +9,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.config import get_config
 from langgraph.types import Command
 
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
-from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
@@ -70,16 +69,17 @@ def _normalize_presented_filepath(
     virtual_prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
 
     if stripped == virtual_prefix or stripped.startswith(virtual_prefix + "/"):
-        # Resolve the user bucket from runtime.context first (resolve_runtime_user_id),
-        # not get_effective_user_id(): the consumer has no auth middleware, so the
-        # _current_user contextvar is unset and get_effective_user_id() would resolve
-        # to "default" while ThreadDataMiddleware/cfgpu write under the real user_id
-        # (e.g. "34"). Using the contextvar here split the bucket and made
-        # relative_to(outputs_dir) fail (see bugs-todo BUG-008).
-        try:
-            actual_path = get_paths().resolve_virtual_path(thread_id, filepath, user_id=resolve_runtime_user_id(runtime))
-        except TypeError:
-            actual_path = get_paths().resolve_virtual_path(thread_id, filepath)
+        # Decoupled resolution (cfgpu-docs/thread-tenancy.md §4.3 / I3+): map the virtual
+        # `/mnt/user-data/<rest>` path straight onto the host user-data dir derived from
+        # the thread_data outputs_path (outputs_dir.parent == .../user-data) — never
+        # re-resolving a user bucket. ThreadDataMiddleware is the single source of truth
+        # for which bucket this thread uses, so present_files inherits it for free and is
+        # immune to the tenant model (this also retires the BUG-008 user_id re-resolution
+        # fragility). The relative_to(outputs_dir) check below still confines presents to
+        # the outputs subtree, so workspace/uploads virtual paths are rejected as before.
+        user_data_dir = outputs_dir.parent
+        relative = stripped[len(virtual_prefix):].lstrip("/")
+        actual_path = (user_data_dir / relative).resolve()
     else:
         actual_path = Path(filepath).expanduser().resolve()
 

@@ -11,7 +11,6 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
-from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.uploads.manager import (
     PathTraversalError,
@@ -230,7 +229,8 @@ async def upload_files(
         uploads_dir = ensure_uploads_dir(thread_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
+    # Thread-only tenancy (thread-tenancy.md §4.1): sync target keyed by thread_id alone.
+    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id)
     uploaded_files = []
     written_paths = []
     sandbox_sync_targets = []
@@ -369,7 +369,8 @@ async def list_uploaded_files(thread_id: str, request: Request) -> UploadListRes
     enrich_file_listing(result, thread_id)
 
     # Gateway additionally includes the sandbox-relative path.
-    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
+    # Thread-only tenancy (thread-tenancy.md §4.1): sync target keyed by thread_id alone.
+    sandbox_uploads = get_paths().sandbox_uploads_dir(thread_id)
     for f in result["files"]:
         f["path"] = str(sandbox_uploads / f["filename"])
 

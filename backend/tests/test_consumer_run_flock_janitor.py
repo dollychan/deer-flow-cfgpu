@@ -113,16 +113,17 @@ def _provider(prefix: str = "deer-flow-sandbox"):
 
 
 @pytest.mark.asyncio
-async def test_runner_acquires_run_flock_with_composite_sid(monkeypatch):
+async def test_runner_acquires_run_flock_with_thread_only_sid(monkeypatch):
+    """Run-flock keys off the thread_id-only identity sid (thread-tenancy.md D3)."""
     runner = _bare_runner()
     provider = _provider()
-    expected_sid = provider._deterministic_sandbox_id(provider._identity_key("t-1", "alice"))
+    expected_sid = provider._deterministic_sandbox_id(provider._identity_key("t-1"))
     sentinel = object()
     with (
         patch("app.consumer.agent_runner._maybe_aio_local_provider", return_value=provider),
         patch("app.consumer.agent_runner.sandbox_locks.acquire_run_flock", return_value=sentinel) as acq,
     ):
-        handle = await runner._acquire_run_flock("alice", "t-1")
+        handle = await runner._acquire_run_flock("t-1")
     assert handle is sentinel
     acq.assert_called_once_with(expected_sid)
 
@@ -134,21 +135,30 @@ async def test_runner_skips_flock_when_not_aio_local(monkeypatch):
         patch("app.consumer.agent_runner._maybe_aio_local_provider", return_value=None),
         patch("app.consumer.agent_runner.sandbox_locks.acquire_run_flock") as acq,
     ):
-        handle = await runner._acquire_run_flock("alice", "t-1")
+        handle = await runner._acquire_run_flock("t-1")
     assert handle is None
     acq.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_runner_skips_flock_without_user(monkeypatch):
+async def test_runner_acquires_flock_independent_of_user_context(monkeypatch):
+    """Regression: the run-flock no longer depends on a user_id (thread-tenancy.md D3).
+
+    With no user ContextVar set at all, the flock is still acquired, keyed by the
+    thread-only sid — guards against re-introducing the retired per-user gating.
+    """
     runner = _bare_runner()
+    provider = _provider()
+    expected_sid = provider._deterministic_sandbox_id(provider._identity_key("t-1"))
+    sentinel = object()
+    # No ambient user ContextVar is set in this test — acquisition must not care.
     with (
-        patch("app.consumer.agent_runner._maybe_aio_local_provider", return_value=_provider()),
-        patch("app.consumer.agent_runner.sandbox_locks.acquire_run_flock") as acq,
+        patch("app.consumer.agent_runner._maybe_aio_local_provider", return_value=provider),
+        patch("app.consumer.agent_runner.sandbox_locks.acquire_run_flock", return_value=sentinel) as acq,
     ):
-        handle = await runner._acquire_run_flock(None, "t-1")
-    assert handle is None
-    acq.assert_not_called()
+        handle = await runner._acquire_run_flock("t-1")
+    assert handle is sentinel
+    acq.assert_called_once_with(expected_sid)
 
 
 @pytest.mark.asyncio

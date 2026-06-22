@@ -168,10 +168,16 @@ class ThreadHistoryRequest(BaseModel):
 
 
 def _delete_thread_data(thread_id: str, paths: Paths | None = None, *, user_id: str | None = None) -> ThreadDeleteResponse:
-    """Delete local persisted filesystem data for a thread."""
+    """Delete local persisted filesystem data for a thread.
+
+    Thread-only tenancy (thread-tenancy.md §5): a thread's disk data lives at the single
+    ``threads/{thread_id}/`` bucket, so deletion is keyed by thread_id alone. The
+    ``user_id`` parameter is retained for signature compatibility but no longer scopes
+    the on-disk path.
+    """
     path_manager = paths or get_paths()
     try:
-        path_manager.delete_thread_dir(thread_id, user_id=user_id)
+        path_manager.delete_thread_dir(thread_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except FileNotFoundError:

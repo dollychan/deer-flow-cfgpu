@@ -11,12 +11,13 @@ Order is the linchpin (R1): **kill before destroy**. ``provider.destroy`` calls
 ``sandbox.close()`` which needs ``AioSandbox._lock`` — held by the wedged exec thread until
 the kill frees it. Kill first, then destroy cleans the in-memory tracking.
 
-Identity (R1): the container name must match what *acquire* created, i.e. the composite
-``_identity_key(thread_id, user_id)`` (P2.5), never the legacy thread-only hash. The
-``user_id`` flows in explicitly through ``_cancel_watcher`` — it is NOT re-resolved inside
-the helper, so it cannot disagree with the mount bucket.
+Identity (thread-tenancy.md): the container name must match what *acquire* created. Since
+the D11 composite key ``hash(user, thread)`` was retired, identity is the **thread_id
+alone** (``_identity_key(thread_id)`` → ``thread_id``). The kill path therefore takes only
+``thread_id`` and is completely decoupled from any user — multiple users sharing one
+thread_id share the one container, and the user ContextVar never steers the kill.
 
-See ``cfgpu-docs/aio-localbackend-sandbox.md`` D7 / P3.
+See ``cfgpu-docs/aio-localbackend-sandbox.md`` D7 / P3 and ``cfgpu-docs/thread-tenancy.md``.
 """
 
 from __future__ import annotations
@@ -47,8 +48,8 @@ def _director_provider(prefix: str = PREFIX) -> DirectorAioProvider:
     return provider
 
 
-def _expected_container_name(provider, thread_id: str, user_id: str, prefix: str = PREFIX) -> str:
-    sid = provider._deterministic_sandbox_id(provider._identity_key(thread_id, user_id))
+def _expected_container_name(provider, thread_id: str, prefix: str = PREFIX) -> str:
+    sid = provider._deterministic_sandbox_id(provider._identity_key(thread_id))
     return f"{prefix}-{sid}"
 
 
@@ -61,22 +62,22 @@ async def test_c_noop_when_not_aio_local_provider():
     runner = _bare_runner()
     kill = MagicMock()
     with patch.object(ar_mod, "_maybe_aio_local_provider", lambda: None), patch.object(ar_mod, "_docker_kill", kill):
-        await runner._kill_thread_sandbox("userA", "t-1")
+        await runner._kill_thread_sandbox("t-1")
     kill.assert_not_called()
 
 
 @pytest.mark.anyio
-async def test_a_kills_container_with_composite_name():
-    """(a) The hard-cancel path docker-kills the right container name (prefix + composite sid)."""
+async def test_a_kills_container_with_thread_only_name():
+    """(a) The hard-cancel path docker-kills the right container name (prefix + thread-only sid)."""
     runner = _bare_runner()
     provider = _director_provider()
     provider.destroy = MagicMock()
     kill = MagicMock()
 
     with patch.object(ar_mod, "_maybe_aio_local_provider", lambda: provider), patch.object(ar_mod, "_docker_kill", kill):
-        await runner._kill_thread_sandbox("userA", "t-1")
+        await runner._kill_thread_sandbox("t-1")
 
-    kill.assert_called_once_with(_expected_container_name(provider, "t-1", "userA"))
+    kill.assert_called_once_with(_expected_container_name(provider, "t-1"))
 
 
 @pytest.mark.anyio
@@ -89,28 +90,28 @@ async def test_b_kill_precedes_destroy():
     kill = MagicMock(side_effect=lambda name: order.append("kill"))
 
     with patch.object(ar_mod, "_maybe_aio_local_provider", lambda: provider), patch.object(ar_mod, "_docker_kill", kill):
-        await runner._kill_thread_sandbox("userA", "t-1")
+        await runner._kill_thread_sandbox("t-1")
 
     assert order == ["kill", "destroy"]
 
 
 @pytest.mark.anyio
 async def test_destroy_receives_the_hashed_sandbox_id():
-    """destroy() takes the 8-char sandbox_id (not the composite key string)."""
+    """destroy() takes the 8-char sandbox_id (not the identity key string)."""
     runner = _bare_runner()
     provider = _director_provider()
     provider.destroy = MagicMock()
 
     with patch.object(ar_mod, "_maybe_aio_local_provider", lambda: provider), patch.object(ar_mod, "_docker_kill", MagicMock()):
-        await runner._kill_thread_sandbox("userA", "t-1")
+        await runner._kill_thread_sandbox("t-1")
 
-    expected_sid = provider._deterministic_sandbox_id(provider._identity_key("t-1", "userA"))
+    expected_sid = provider._deterministic_sandbox_id(provider._identity_key("t-1"))
     provider.destroy.assert_called_once_with(expected_sid)
 
 
 @pytest.mark.anyio
-async def test_e_two_users_same_thread_kill_distinct_containers():
-    """(e) userA and userB colliding on a thread_id kill their *own* containers."""
+async def test_e_two_users_same_thread_kill_the_one_shared_container():
+    """(e) D11 retired: users colliding on a thread_id share the *one* container (thread-only key)."""
     runner = _bare_runner()
     provider = _director_provider()
     provider.destroy = MagicMock()
@@ -118,21 +119,27 @@ async def test_e_two_users_same_thread_kill_distinct_containers():
     kill = MagicMock(side_effect=names.append)
 
     with patch.object(ar_mod, "_maybe_aio_local_provider", lambda: provider), patch.object(ar_mod, "_docker_kill", kill):
-        await runner._kill_thread_sandbox("userA", "shared-tid")
-        await runner._kill_thread_sandbox("userB", "shared-tid")
+        token = set_current_user(SimpleNamespace(id="userA"))
+        try:
+            await runner._kill_thread_sandbox("shared-tid")
+        finally:
+            reset_current_user(token)
+        token = set_current_user(SimpleNamespace(id="userB"))
+        try:
+            await runner._kill_thread_sandbox("shared-tid")
+        finally:
+            reset_current_user(token)
 
-    assert names[0] != names[1]
-    assert names[0] == _expected_container_name(provider, "shared-tid", "userA")
-    assert names[1] == _expected_container_name(provider, "shared-tid", "userB")
+    assert names[0] == names[1] == _expected_container_name(provider, "shared-tid")
 
 
 @pytest.mark.anyio
-async def test_f_explicit_user_id_wins_over_contextvar():
-    """(f) The passed user_id is used verbatim — never re-resolved from the ContextVar.
+async def test_kill_is_independent_of_user_contextvar():
+    """The kill target is derived purely from thread_id — the user ContextVar never steers it.
 
-    A sibling watcher task could carry a stale/absent user ContextVar; the helper must not
-    consult it, or the kill lands on the wrong bucket. Here the ContextVar says one user,
-    the explicit arg another — the explicit arg must decide the container.
+    A sibling watcher task could carry any user ContextVar; with the D11 composite key gone
+    the helper consults neither an explicit user arg nor the ContextVar, so the kill always
+    lands on the single thread-keyed container.
     """
     runner = _bare_runner()
     provider = _director_provider()
@@ -143,15 +150,14 @@ async def test_f_explicit_user_id_wins_over_contextvar():
     token = set_current_user(SimpleNamespace(id="ctxvar-user"))
     try:
         with patch.object(ar_mod, "_maybe_aio_local_provider", lambda: provider), patch.object(ar_mod, "_docker_kill", kill):
-            await runner._kill_thread_sandbox("explicit-user", "t-1")
+            await runner._kill_thread_sandbox("t-1")
     finally:
         reset_current_user(token)
 
-    assert names[0] == _expected_container_name(provider, "t-1", "explicit-user")
-    assert names[0] != _expected_container_name(provider, "t-1", "ctxvar-user")
+    assert names[0] == _expected_container_name(provider, "t-1")
 
 
-# ── _cancel_watcher: wiring user_id through to the helper ───────────────────────
+# ── _cancel_watcher: wiring through to the helper ───────────────────────────────
 
 
 def _watcher_runner_with_watermark(watermark: int) -> AgentRunner:
@@ -163,8 +169,8 @@ def _watcher_runner_with_watermark(watermark: int) -> AgentRunner:
 
 
 @pytest.mark.anyio
-async def test_watcher_invokes_kill_with_passed_user_id_on_hard_cancel():
-    """The watcher hard-cancels AND kills the container, passing the run's user_id (R1/f)."""
+async def test_watcher_invokes_kill_with_thread_id_on_hard_cancel():
+    """The watcher hard-cancels AND kills the container, passing only the thread_id (thread-only)."""
     runner = _watcher_runner_with_watermark(9)
     runner._kill_thread_sandbox = AsyncMock()
     cancel_state = CancelState(event=asyncio.Event())  # protected_in_flight=0 → hard cancel
@@ -174,15 +180,13 @@ async def test_watcher_invokes_kill_with_passed_user_id_on_hard_cancel():
 
     target = asyncio.create_task(_target())
     watcher = asyncio.create_task(
-        runner._cancel_watcher(
-            "t1", 3, target, cancel_state, poll_interval=0, user_id="userX"
-        )
+        runner._cancel_watcher("t1", 3, target, cancel_state, poll_interval=0)
     )
     with pytest.raises(asyncio.CancelledError):
         await target
     await watcher  # watcher returns after issuing kill
 
-    runner._kill_thread_sandbox.assert_awaited_once_with("userX", "t1")
+    runner._kill_thread_sandbox.assert_awaited_once_with("t1")
 
 
 @pytest.mark.anyio
@@ -197,9 +201,7 @@ async def test_watcher_does_not_kill_while_protected_in_flight():
 
     target = asyncio.create_task(_target())
     watcher = asyncio.create_task(
-        runner._cancel_watcher(
-            "t1", 3, target, cancel_state, poll_interval=0.01, user_id="userX"
-        )
+        runner._cancel_watcher("t1", 3, target, cancel_state, poll_interval=0.01)
     )
     await asyncio.sleep(0.08)
     assert cancel_state.event.is_set()  # cooperative flag raised

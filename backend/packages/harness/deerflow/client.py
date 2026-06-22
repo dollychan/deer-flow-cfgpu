@@ -1311,7 +1311,9 @@ class DeerFlowClient:
             ValueError: If the path is invalid.
         """
         try:
-            actual = get_paths().resolve_virtual_path(thread_id, path, user_id=get_effective_user_id())
+            # Thread-only tenancy (thread-tenancy.md §4.1): artifacts resolve by thread_id
+            # alone, matching the thread-only disk layout (no per-user bucket).
+            actual = get_paths().resolve_virtual_path(thread_id, path)
         except ValueError as exc:
             if "traversal" in str(exc):
                 from deerflow.uploads.manager import PathTraversalError

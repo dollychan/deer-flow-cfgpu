@@ -45,11 +45,13 @@ class _ConsumerUser:
     """Minimal ``CurrentUser`` (the Protocol needs only ``.id``) for consumer runs.
 
     The consumer has no auth middleware, so ``_current_user`` is never set and
-    ``get_effective_user_id()`` would resolve to ``"default"`` — splitting the
-    in-graph user bucket from ``resolve_runtime_user_id`` (which reads the real
-    ``user_id`` off ``runtime.context``). ``AgentRunner.run`` sets this for the
-    duration of the run so sandbox/uploads/acp/present all resolve to the same
-    real bucket (see cfgpu-docs/bugs-todo.md BUG-008).
+    ``get_effective_user_id()`` would resolve to ``"default"``. ``AgentRunner.run`` sets
+    this to the run's real ``user_id`` for the run's duration so the *user-scoped*
+    consumers — MLM / file memory, billing, and Langfuse ``langfuse_user_id`` tracing —
+    attribute to the right person (thread-tenancy.md D5). Thread-data path sites
+    (sandbox mounts, uploads, acp, present_files) no longer read this: they are keyed by
+    thread_id alone and read paths from ``state["thread_data"]`` (thread-tenancy.md I3+),
+    so user_id is decoupled from the disk layout but NOT collapsed at the resolver.
     """
 
     id: str
@@ -108,14 +110,12 @@ class AgentRunner:
         are caught, logged, published as MQ error messages, and closed out via finalize.
         """
         message = self._build_run_message(claimed)
-        # Set the run's real user_id on the _current_user contextvar so the in-graph
-        # stack (sandbox path mappings, uploads, acp, present_files) resolves
-        # get_effective_user_id() to the right bucket instead of "default". The
-        # consumer has no auth middleware to do this; runtime.context already carries
-        # user_id for resolve_runtime_user_id, but the contextvar channel covers the
-        # call sites that still use get_effective_user_id() (BUG-008). Task-local:
-        # each run is its own asyncio task (scheduler.py), so concurrent runs for
-        # different users do not cross-contaminate.
+        # Set the run's real user_id on the _current_user contextvar so the user-scoped
+        # stack (MLM / file memory, billing, Langfuse tracing) attributes to the right
+        # person instead of "default" (thread-tenancy.md D5). Thread-data path sites are
+        # thread-only and no longer depend on this. Task-local: each run is its own
+        # asyncio task (scheduler.py), so concurrent runs for different users do not
+        # cross-contaminate.
         user_token = set_current_user(_ConsumerUser(id=message.user_id)) if message.user_id else None
         try:
             await self._run(claimed, message)
@@ -157,7 +157,7 @@ class AgentRunner:
             name=f"heartbeat-{run_id[:8]}",
         )
         cancel_watcher_task = asyncio.create_task(
-            self._cancel_watcher(thread_id, seq, runner_task, cancel_state, poll_interval=2, user_id=message.user_id),
+            self._cancel_watcher(thread_id, seq, runner_task, cancel_state, poll_interval=2),
             name=f"cancel-watcher-{run_id[:8]}",
         )
 
@@ -165,7 +165,7 @@ class AgentRunner:
         # this thread's container while the run executes. Acquired here (before the graph
         # creates the container — the marker is keyed by the deterministic sid, not the
         # container's existence) and released in finally so a crash drops it via the kernel.
-        run_flock = await self._acquire_run_flock(message.user_id, thread_id)
+        run_flock = await self._acquire_run_flock(thread_id)
 
         agent: Any = None
         runnable_config: RunnableConfig | None = None
@@ -696,7 +696,7 @@ class AgentRunner:
             except Exception:
                 logger.debug("Heartbeat update failed for thread %s", thread_id, exc_info=True)
 
-    async def _kill_thread_sandbox(self, user_id: str | None, thread_id: str) -> None:
+    async def _kill_thread_sandbox(self, thread_id: str) -> None:
         """Hard-kill this thread's local sandbox container (D7 cancel-into-container).
 
         No-op unless the active provider is an AIO provider on a local docker backend.
@@ -706,16 +706,15 @@ class AgentRunner:
         thread returns and ``AioSandbox._lock`` releases. Only then can ``destroy`` —
         which needs that same lock to ``close()`` the client — run cleanly (cancel.md §4.4).
 
-        ``user_id`` flows in explicitly from the run message and is fed to the *same*
-        identity seam ``_identity_key`` that acquire used (P2.5), so the container name
-        matches — never the legacy thread-only hash, which would miss after P2.5 and leave
-        the container wedged. It is not re-resolved here (R1).
+        The container name is derived from the thread_id-keyed identity seam
+        ``_identity_key`` (thread-only tenancy, thread-tenancy.md D3), the same source
+        acquire / discover / run-flock use, so the name always matches.
         """
         provider = _maybe_aio_local_provider()
         if provider is None:
             return
-        # Same identity source as acquire/discover/run-flock → name parity (R1/I15).
-        sandbox_id = provider._deterministic_sandbox_id(provider._identity_key(thread_id, user_id))
+        # Same identity source as acquire/discover/run-flock → name parity (I15).
+        sandbox_id = provider._deterministic_sandbox_id(provider._identity_key(thread_id))
         prefix = provider._config.get("container_prefix") or "deer-flow-sandbox"
         container_name = f"{prefix}-{sandbox_id}"
         # ① kill first (SIGKILL → HTTP severed → wedged to_thread returns, lock released).
@@ -727,19 +726,19 @@ class AgentRunner:
         except Exception:
             logger.warning("Sandbox destroy failed after kill for thread %s", thread_id, exc_info=True)
 
-    async def _acquire_run_flock(self, user_id: str | None, thread_id: str) -> Any:
+    async def _acquire_run_flock(self, thread_id: str) -> Any:
         """Take this run's shared run-flock so the per-host janitor sees it as active (D13).
 
-        No-op (returns ``None``) unless the active provider is an AIO local-docker provider
-        and a real ``user_id`` is known — the sid is derived from the *same* identity seam
-        ``_identity_key`` that acquire and D7 cancel use, so the flock file, the container
-        name, and the creation lock all key off one ``sandbox_id`` (I15). Offloaded: open +
-        ``flock`` are blocking syscalls and must not run on the event loop.
+        No-op (returns ``None``) unless the active provider is an AIO local-docker provider.
+        The sid is derived from the *same* identity seam ``_identity_key`` (thread_id-keyed,
+        thread-tenancy.md D3) that acquire and D7 cancel use, so the flock file, the
+        container name, and the creation lock all key off one ``sandbox_id`` (I15).
+        Offloaded: open + ``flock`` are blocking syscalls and must not run on the event loop.
         """
         provider = _maybe_aio_local_provider()
-        if provider is None or not user_id:
+        if provider is None:
             return None
-        sandbox_id = provider._deterministic_sandbox_id(provider._identity_key(thread_id, user_id))
+        sandbox_id = provider._deterministic_sandbox_id(provider._identity_key(thread_id))
         return await asyncio.to_thread(sandbox_locks.acquire_run_flock, sandbox_id)
 
     async def _release_run_flock(self, run_flock: Any) -> None:
@@ -755,7 +754,6 @@ class AgentRunner:
         runner_task: asyncio.Task,
         cancel_state: CancelState | None = None,
         poll_interval: int = 2,
-        user_id: str | None = None,
     ) -> None:
         """Poll thread_run_state.cancel_watermark; cancel the run when it covers this seq (§7.1).
 
@@ -805,7 +803,7 @@ class AgentRunner:
                 runner_task.cancel()
                 # Break into the container (D7): runner_task.cancel() cannot reach a
                 # wedged execute_command offloaded via to_thread; docker kill frees it.
-                await self._kill_thread_sandbox(user_id, thread_id)
+                await self._kill_thread_sandbox(thread_id)
                 return
             except Exception:
                 logger.debug("Cancel watcher error for thread %s", thread_id, exc_info=True)

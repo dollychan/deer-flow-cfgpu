@@ -60,7 +60,6 @@ def test_get_thread_mounts_includes_acp_workspace(tmp_path, monkeypatch):
     """_get_thread_mounts must include /mnt/acp-workspace (read-only) for docker sandbox."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
-    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
 
     mounts = aio_mod.AioSandboxProvider._get_thread_mounts("thread-3")
 
@@ -99,7 +98,6 @@ def test_get_thread_mounts_preserves_windows_host_path_style(tmp_path, monkeypat
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     monkeypatch.setenv("DEER_FLOW_HOST_BASE_DIR", r"C:\Users\demo\deer-flow\backend\.deer-flow")
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
-    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
 
     mounts = aio_mod.AioSandboxProvider._get_thread_mounts("thread-10")
 
@@ -474,7 +472,6 @@ def test_acquire_drops_dead_cached_sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(aio_mod.AioSandboxProvider, "_sandbox_id_for_thread", lambda _self, _thread_id: "sandbox-dead")
     monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_extra_mounts", lambda _self, _thread_id: [])
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
-    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
     monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda _url, timeout=60: True)
 
     sandbox_id = provider.acquire("thread-dead")
@@ -563,7 +560,6 @@ def test_acquire_skips_dead_warm_pool_sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(aio_mod.AioSandboxProvider, "_sandbox_id_for_thread", lambda _self, _thread_id: "sandbox-warm-dead")
     monkeypatch.setattr(aio_mod.AioSandboxProvider, "_get_extra_mounts", lambda _self, _thread_id: [])
     monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
-    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: None)
     monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda _url, timeout=60: True)
 
     sandbox_id = provider.acquire("thread-warm-dead")

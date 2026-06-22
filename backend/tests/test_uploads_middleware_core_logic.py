@@ -35,9 +35,9 @@ def _runtime(thread_id: str | None = THREAD_ID) -> MagicMock:
 
 
 def _uploads_dir(tmp_path: Path, thread_id: str = THREAD_ID) -> Path:
-    from deerflow.runtime.user_context import get_effective_user_id
-
-    d = Paths(str(tmp_path)).sandbox_uploads_dir(thread_id, user_id=get_effective_user_id())
+    # Thread-only tenancy (thread-tenancy.md §4.3): the uploads dir is keyed by thread_id
+    # alone, matching what UploadsMiddleware reads from thread_data / resolves as fallback.
+    d = Paths(str(tmp_path)).sandbox_uploads_dir(thread_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -207,6 +207,22 @@ class TestCreateFilesMessage:
 class TestBeforeAgent:
     def _state(self, *messages):
         return {"messages": list(messages)}
+
+    def test_reads_uploads_path_from_thread_data(self, tmp_path):
+        """Primary path (thread-tenancy.md §4.3 / I3+): uploads dir comes from
+        state['thread_data']['uploads_path'] (the ThreadDataMiddleware SSOT), not from a
+        re-resolved user bucket. Point thread_data at a custom dir and prove it is used."""
+        mw = _middleware(tmp_path)
+        custom_uploads = tmp_path / "elsewhere" / "uploads"
+        custom_uploads.mkdir(parents=True)
+        (custom_uploads / "from_state.txt").write_text("hi")
+
+        msg = _human("analyse", files=[{"filename": "from_state.txt", "size": 2, "path": "/mnt/user-data/uploads/from_state.txt"}])
+        state = {"messages": [msg], "thread_data": {"uploads_path": str(custom_uploads)}}
+        result = mw.before_agent(state, _runtime())
+
+        assert result is not None
+        assert "from_state.txt" in result["messages"][-1].content
 
     def test_returns_none_when_messages_empty(self, tmp_path):
         mw = _middleware(tmp_path)

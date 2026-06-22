@@ -10,7 +10,6 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config.paths import Paths, get_paths
-from deerflow.runtime.user_context import resolve_runtime_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -89,14 +88,20 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         if thread_id is None:
             raise ValueError("Thread ID is required in runtime context or config.configurable")
 
-        user_id = resolve_runtime_user_id(runtime)
-
+        # Thread-only tenancy (cfgpu-docs/thread-tenancy.md D2/§4.1): thread data is
+        # isolated by thread_id alone (`{base_dir}/threads/{thread_id}/...`), never by
+        # user. This middleware is the single producer of the thread_data paths — every
+        # downstream path site (bash/file tools, present_files, uploads, acp) reads them
+        # from `state["thread_data"]` (I3+) instead of re-resolving a user bucket — so
+        # passing user_id=None here is what defines the tenant unit. user_id is NOT
+        # collapsed: it still flows to MLM memory / billing / tracing (D5), just not to
+        # the thread-data disk layout.
         if self._lazy_init:
             # Lazy initialization: only compute paths, don't create directories
-            paths = self._get_thread_paths(thread_id, user_id=user_id)
+            paths = self._get_thread_paths(thread_id)
         else:
             # Eager initialization: create directories immediately
-            paths = self._create_thread_directories(thread_id, user_id=user_id)
+            paths = self._create_thread_directories(thread_id)
             logger.debug("Created thread data directories for thread %s", thread_id)
 
         messages = list(state.get("messages", []))

@@ -18,6 +18,10 @@ class TestThreadDataMiddleware:
         assert _as_posix(result["thread_data"]["workspace_path"]).endswith("threads/thread-123/user-data/workspace")
         assert _as_posix(result["thread_data"]["uploads_path"]).endswith("threads/thread-123/user-data/uploads")
         assert _as_posix(result["thread_data"]["outputs_path"]).endswith("threads/thread-123/user-data/outputs")
+        # Thread-only tenancy (thread-tenancy.md D2): the producer never emits a per-user
+        # bucket — paths are rooted directly at threads/{thread_id}, zero user_id.
+        for key in ("workspace_path", "uploads_path", "outputs_path"):
+            assert "/users/" not in _as_posix(result["thread_data"][key])
 
     def test_before_agent_uses_thread_id_from_configurable_when_context_is_none(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)

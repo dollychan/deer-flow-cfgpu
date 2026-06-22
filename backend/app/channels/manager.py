@@ -29,7 +29,6 @@ from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, gene
 from app.gateway.internal_auth import create_internal_auth_headers
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.paths import make_safe_user_id
-from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
@@ -538,15 +537,15 @@ def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedA
 
     attachments: list[ResolvedAttachment] = []
     paths = get_paths()
-    user_id = get_effective_user_id()
-    outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=user_id).resolve()
+    # Thread-only tenancy (thread-tenancy.md §4.1): artifacts resolve by thread_id alone.
+    outputs_dir = paths.sandbox_outputs_dir(thread_id).resolve()
     for virtual_path in artifacts:
         # Security: only allow files from the agent outputs directory
         if not virtual_path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
             logger.warning("[Manager] rejected non-outputs artifact path: %s", virtual_path)
             continue
         try:
-            actual = paths.resolve_virtual_path(thread_id, virtual_path, user_id=user_id)
+            actual = paths.resolve_virtual_path(thread_id, virtual_path)
             # Verify the resolved path is actually under the outputs directory
             # (guards against path-traversal even after prefix check)
             try:

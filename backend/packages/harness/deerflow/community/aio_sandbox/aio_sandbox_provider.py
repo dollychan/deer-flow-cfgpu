@@ -30,7 +30,6 @@ except ImportError:  # pragma: no cover - Windows fallback
 
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
-from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
@@ -314,18 +313,23 @@ class AioSandboxProvider(SandboxProvider):
         Creates directories if they don't exist (lazy initialization).
         Mount sources use host_base_dir so that when running inside Docker with a
         mounted Docker socket (DooD), the host Docker daemon can resolve the paths.
+
+        Thread-only tenancy (cfgpu-docs/thread-tenancy.md §4.1): the mount source is
+        keyed by thread_id alone (``threads/{thread_id}/...``), never per-user. This
+        is the same bucket ThreadDataMiddleware computes for the in-graph path sites,
+        so the container's ``/mnt/user-data`` and the agent's resolved host paths
+        always agree, and multiple users sharing a thread share one mounted disk.
         """
         paths = get_paths()
-        user_id = get_effective_user_id()
-        paths.ensure_thread_dirs(thread_id, user_id=user_id)
+        paths.ensure_thread_dirs(thread_id)
 
         return [
-            (paths.host_sandbox_work_dir(thread_id, user_id=user_id), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
-            (paths.host_sandbox_uploads_dir(thread_id, user_id=user_id), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
-            (paths.host_sandbox_outputs_dir(thread_id, user_id=user_id), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
+            (paths.host_sandbox_work_dir(thread_id), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
+            (paths.host_sandbox_uploads_dir(thread_id), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
+            (paths.host_sandbox_outputs_dir(thread_id), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
             # ACP workspace: read-only inside the sandbox (lead agent reads results;
             # the ACP subprocess writes from the host side, not from within the container).
-            (paths.host_acp_workspace_dir(thread_id, user_id=user_id), "/mnt/acp-workspace", True),
+            (paths.host_acp_workspace_dir(thread_id), "/mnt/acp-workspace", True),
         ]
 
     @staticmethod
@@ -461,19 +465,14 @@ class AioSandboxProvider(SandboxProvider):
         the ``_thread_sandboxes`` reuse map, and the in-process thread lock — all route
         through this one method so they stay consistent with each other.
 
-        ``user_id`` is an *optional explicit override*. The acquire path omits it (the
-        effective user is read from the ambient ContextVar, co-located with the mounts);
-        the cancel-into-container path (D7) passes it explicitly, because the watcher is a
-        sibling task that must not re-resolve the user (R1).
-
-        The base implementation keys by ``thread_id`` alone — it ignores ``user_id``
-        entirely: behaviour-preserving, byte-for-byte identical to the historical
-        ``sha256(thread_id)`` derivation, and therefore safe to upstream. Subclasses that
-        bind-mount per-``(user, thread)`` data MUST override this to fold the user in
-        (preferring the explicit ``user_id`` when given, else the same source the mounts
-        use, e.g. ``get_effective_user_id``); otherwise two users colliding on a
-        ``thread_id`` reuse each other's sandbox and read into each other's bucket (D11
-        cross-user reuse leak).
+        Keyed by ``thread_id`` alone. ``thread_id`` is the sole tenancy unit: thread data
+        is bind-mounted from ``threads/{thread_id}/...`` (no per-user bucket), so a warm
+        container reused across users serves the one shared disk — by design, not a leak
+        (cfgpu-docs/thread-tenancy.md D3/D4, which retired the former per-user composite
+        ``_identity_key`` override). Concurrency is safe because the serial claim lock is
+        itself thread_id-single-key (``thread_run_state`` PK = thread_id), so two users on
+        one thread never run at once (§2). The vestigial ``user_id`` parameter is ignored
+        and retained only for call-site signature compatibility.
         """
         return thread_id
 
@@ -805,10 +804,11 @@ class AioSandboxProvider(SandboxProvider):
         The file lock serializes concurrent sandbox creation for the same thread_id
         across multiple processes, preventing container-name conflicts.
         """
+        # Thread-only tenancy (thread-tenancy.md §4.1): ensure dirs + lock path key off
+        # thread_id alone, matching the mount source and ThreadDataMiddleware bucket.
         paths = get_paths()
-        user_id = get_effective_user_id()
-        paths.ensure_thread_dirs(thread_id, user_id=user_id)
-        lock_path = self._creation_lock_path(thread_id, sandbox_id, user_id=user_id)
+        paths.ensure_thread_dirs(thread_id)
+        lock_path = self._creation_lock_path(thread_id, sandbox_id)
 
         with open(lock_path, "a", encoding="utf-8") as lock_file:
             locked = False
@@ -834,9 +834,8 @@ class AioSandboxProvider(SandboxProvider):
     async def _discover_or_create_with_lock_async(self, thread_id: str, sandbox_id: str) -> str:
         """Async counterpart to ``_discover_or_create_with_lock``."""
         paths = get_paths()
-        user_id = get_effective_user_id()
-        await asyncio.to_thread(paths.ensure_thread_dirs, thread_id, user_id=user_id)
-        lock_path = await asyncio.to_thread(self._creation_lock_path, thread_id, sandbox_id, user_id=user_id)
+        await asyncio.to_thread(paths.ensure_thread_dirs, thread_id)
+        lock_path = await asyncio.to_thread(self._creation_lock_path, thread_id, sandbox_id)
 
         lock_file = await asyncio.to_thread(_open_lock_file, lock_path)
         locked = False
