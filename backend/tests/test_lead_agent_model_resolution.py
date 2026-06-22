@@ -469,7 +469,7 @@ def test_create_summarization_middleware_uses_configured_model_alias(monkeypatch
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", _raise_get_app_config)
     monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
-    monkeypatch.setattr(lead_agent_module, "DeerFlowSummarizationMiddleware", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "MaterialsSummarizationMiddleware", lambda **kwargs: kwargs)  # P5: factory constructs the materials-aware subclass
 
     middleware = lead_agent_module._create_summarization_middleware(app_config=app_config)
 
@@ -494,7 +494,10 @@ def test_create_summarization_middleware_uses_frontend_supported_update_key(monk
     middleware = lead_agent_module._create_summarization_middleware(app_config=app_config)
 
     assert middleware is not None
-    update_key = f"{type(middleware).__name__}.before_model"
+    # LangGraph derives the node/update key from ``middleware.name`` (not the concrete
+    # class). The materials-aware subclass (P5) overrides ``name`` back to the parent's,
+    # so the frontend-recognized key stays ``DeerFlowSummarizationMiddleware.before_model``.
+    update_key = f"{middleware.name}.before_model"
     assert update_key == "DeerFlowSummarizationMiddleware.before_model"
 
 
@@ -515,7 +518,7 @@ def test_create_summarization_middleware_threads_resolved_app_config_to_model(mo
 
     monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: fallback_app_config)
     monkeypatch.setattr(lead_agent_module, "create_chat_model", _fake_create_chat_model)
-    monkeypatch.setattr(lead_agent_module, "DeerFlowSummarizationMiddleware", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "MaterialsSummarizationMiddleware", lambda **kwargs: kwargs)  # P5: factory constructs the materials-aware subclass
 
     lead_agent_module._create_summarization_middleware()
 

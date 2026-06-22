@@ -33,6 +33,7 @@ from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionM
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
+from deerflow.agents.materials.summarization import MaterialsSummarizationMiddleware
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
@@ -134,7 +135,9 @@ def _create_summarization_middleware(*, app_config: AppConfig | None = None) -> 
     # config is not expected to change after startup.
     skills_container_path = resolved_app_config.skills.container_path or "/mnt/skills"
 
-    return DeerFlowSummarizationMiddleware(
+    # P5（materials.md §7）：用 materials-aware 子类，摘要 prompt 末尾注入素材清单 + id 铁律，
+    # 让被压历史仍保留 id 级关联（地基不变：父类只压 messages，materials 注册表不受影响）。
+    return MaterialsSummarizationMiddleware(
         **kwargs,
         skills_container_path=skills_container_path,
         skill_file_read_tool_names=config.skill_file_read_tool_names,
