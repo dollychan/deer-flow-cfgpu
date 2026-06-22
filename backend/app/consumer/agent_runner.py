@@ -30,6 +30,8 @@ from app.consumer.constants import ProcessedStatus, QueuePolicy
 from app.consumer.run_registry import ClaimedRun, RunRegistry
 from app.consumer.schemas import ContentItem, TaskMessage, UserMessage
 from app.consumer.stream_bridge.mq import MQStreamBridge
+from deerflow.agents.materials.registry import resolve_or_register
+from deerflow.agents.materials.types import Material
 from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.runtime.cancel_signal import CancelState, get_cancel_state, install_cancel_event, reset_cancel_event
@@ -920,31 +922,72 @@ def _is_empty_message_chunk(chunk: Any) -> bool:
     return True
 
 
+# 上行结构化媒体 ContentItem.type → Material.kind（cfgpu-docs/materials.md §4.1）。
+_UPLINK_KIND: dict[str, str] = {
+    "image_url": "image",
+    "document_url": "document",
+    "audio_url": "audio",
+    "video_url": "video",
+}
+
+
+def _ref_basename(raw: str) -> str | None:
+    """url/object_key 的文件名，做 caption（帮台账指代）。"""
+    from urllib.parse import unquote, urlsplit
+
+    path = unquote(urlsplit(raw).path) if "://" in raw else raw
+    return path.rstrip("/").rsplit("/", 1)[-1] or None
+
+
 def _normalize_messages(messages: list[UserMessage]) -> dict[str, Any]:
-    """Convert MQ UserMessage list to a LangGraph graph_input dict."""
+    """Convert MQ UserMessage list to a LangGraph graph_input dict.
+
+    上行结构化媒体 (image/doc/audio/video_url) **一律登记为 material**，content 只留
+    id 形态、零 url（I9/I10，materials.md §4.1）。登记在消费侧 here（而非 before_agent）
+    完成，确保 url 永不进入持久化 HumanMessage / 首个 checkpoint。materials 经 graph_input
+    seed materials channel（merge_materials reducer）。
+    """
     from langchain_core.messages import HumanMessage
 
     lc_messages = []
+    materials: dict[str, Material] = {}
     for msg in messages:
         if isinstance(msg.content, str):
             lc_messages.append(HumanMessage(content=msg.content))
         else:
             blocks: list[dict] = []
             for item in msg.content:
-                _append_content_block(blocks, item)
+                _append_content_block(blocks, item, materials)
             if blocks:
                 lc_messages.append(HumanMessage(content=blocks))
 
-    return {"messages": lc_messages}
+    graph_input: dict[str, Any] = {"messages": lc_messages}
+    if materials:
+        graph_input["materials"] = materials
+    return graph_input
 
 
-def _append_content_block(blocks: list[dict], item: ContentItem) -> None:
-    """Append a single LangChain content block for a ContentItem."""
+def _append_content_block(blocks: list[dict], item: ContentItem, materials: dict[str, Material]) -> None:
+    """Append LangChain content block(s) for a ContentItem; register uplink media into ``materials``.
+
+    - ``text``：原样（human text 内嵌 url **不扫描不改写**，D11）。
+    - 媒体 ``*_url``：保留整个 ``url[]``（修 url[0] 局限），每个 url 经 ``resolve_or_register``
+      登记/去重 → 只在 content 留 ``[kind: m1 m2]`` id 形态，**绝不留 url**。image_url 不再
+      直注多模态 block（视觉改 analyse_image 按 id 拉取，§4.7/P9）；doc/audio/video 不再降级裸文本。
+    """
     if item.type == "text" and item.text:
         blocks.append({"type": "text", "text": item.text})
-    elif item.type == "image_url" and item.url:
-        blocks.append({"type": "image_url", "image_url": {"url": item.url[0]}})
-    elif item.type in ("document_url", "audio_url", "video_url") and item.url:
-        blocks.append({"type": "text", "text": f"[{item.type}: {item.url[0]}]"})
-    elif item.text:
+        return
+
+    kind = _UPLINK_KIND.get(item.type)
+    if kind and item.url:
+        ids: list[str] = []
+        for raw in item.url:
+            mid, update = resolve_or_register(materials, raw, kind=kind, origin="uplink", caption=_ref_basename(raw))  # type: ignore[arg-type]
+            materials.update(update)  # 累积：供同批后续 id 递增 + stable_ref 去重
+            ids.append(mid)
+        blocks.append({"type": "text", "text": f"[{kind}: {' '.join(ids)}]"})
+        return
+
+    if item.text:
         blocks.append({"type": "text", "text": item.text})

@@ -4,6 +4,24 @@
 P0：类型与 id 生成。后续阶段在本包内加 registry / middleware / policy / materialize。
 """
 
+from deerflow.agents.materials.registry import (
+    build_reverse_index,
+    classify_ref,
+    register,
+    resolve_or_register,
+    stable_ref,
+)
 from deerflow.agents.materials.types import Kind, Material, Origin, RefType, new_material_id
 
-__all__ = ["Kind", "Material", "Origin", "RefType", "new_material_id"]
+__all__ = [
+    "Kind",
+    "Material",
+    "Origin",
+    "RefType",
+    "new_material_id",
+    "build_reverse_index",
+    "classify_ref",
+    "register",
+    "resolve_or_register",
+    "stable_ref",
+]
