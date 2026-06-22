@@ -7,6 +7,7 @@ P0：类型与 id 生成。后续阶段在本包内加 registry / middleware / p
 from deerflow.agents.materials.registry import (
     build_reverse_index,
     classify_ref,
+    is_our_object_key,
     register,
     resolve_or_register,
     stable_ref,
@@ -21,6 +22,7 @@ __all__ = [
     "new_material_id",
     "build_reverse_index",
     "classify_ref",
+    "is_our_object_key",
     "register",
     "resolve_or_register",
     "stable_ref",

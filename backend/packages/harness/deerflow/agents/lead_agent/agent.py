@@ -436,6 +436,19 @@ def build_middlewares(
     visibility_patterns = list(agent_config.tool_visibility.items()) if agent_config and agent_config.tool_visibility else None
     middlewares.append(MessageStreamMiddleware(visibility_patterns=visibility_patterns))
 
+    # MaterialsMiddleware: unified materials registry subsystem (cfgpu-docs/materials.md §5).
+    # P2 = out-gate signing (_resolve_outgate): scan cfgpu MCP tool args for material-id /
+    # our-oss-object refs and resolve/presign them just before the call; reject unresolvable
+    # (dangling id / summarization-truncated url) residue with an error ToolMessage instead of
+    # billing cfgpu on a corrupt ref. Appended AFTER MessageStreamMiddleware so it is the INNER
+    # layer on the wrap_tool_call onion: _resolve_outgate sees the final args and (from P3)
+    # _capture stabilizes the ToolMessage before MessageStream emits. ArtifactUrlGuardMiddleware
+    # stays registered (outer) until P8 — harmless coexistence (ids carry no http for the guard
+    # to touch; both deterministically fix our-object URLs).
+    from deerflow.agents.materials.middleware import MaterialsMiddleware
+
+    middlewares.append(MaterialsMiddleware())
+
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider
     # safety-terminated the response. Appended after HumanApprovalMiddleware so
     # that LangChain's reverse-order after_model dispatch runs Safety first (before

@@ -69,6 +69,16 @@ class OSSClient:
             )
         return self._presigned_url(object_key) if self._return_presigned else object_key
 
+    def presign(self, object_key: str) -> str:
+        """Always return a presigned GET URL for ``object_key`` (local HMAC, no network IO).
+
+        Unlike :meth:`upload_file`'s return value, this **ignores** the ``presigned_url``
+        config toggle: a cfgpu tool consuming the ref needs a fetchable URL regardless of
+        the client-facing ``present_files`` default (BUG-027 deployment split). Used by
+        ``MaterialsMiddleware`` out-gate signing (cfgpu-docs/materials.md §4.3).
+        """
+        return self._presigned_url(object_key)
+
     # ── Internals ──────────────────────────────────────────────────────────────
 
     def _presigned_url(self, object_key: str) -> str:

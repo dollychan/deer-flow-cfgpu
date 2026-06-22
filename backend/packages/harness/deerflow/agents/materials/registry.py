@@ -21,6 +21,16 @@ from deerflow.agents.materials.types import Kind, Material, Origin, RefType, new
 _OUR_OSS_PREFIX = "agent-artifacts/"
 
 
+def is_our_object_key(key: str) -> bool:
+    """裸 object_key 是否指向我方 OSS 对象（``agent-artifacts/`` 前缀）。
+
+    ``classify_ref`` 对无 scheme 串一律判 oss_path（含第三方裸路径 / prose token），故
+    出口签发（§4.3 MaterialResolve）须用本 helper 再判一道：只有我方对象才现签 presigned，
+    非我方裸串不碰（避免把 prompt 里的 ``and/or`` 之类误当 object_key 去签）。
+    """
+    return key.lstrip("/").startswith(_OUR_OSS_PREFIX)
+
+
 def stable_ref(ref_type: RefType, ref: str) -> str:
     """归一键（§8 R4 反查索引主键）。带类型前缀避免 object_key 与 url path 撞键。
 
