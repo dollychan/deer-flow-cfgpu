@@ -14,6 +14,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+import deerflow.agents.materials.materialize as mz
 import deerflow.agents.materials.middleware as mw
 from deerflow.agents.materials.middleware import MaterialsMiddleware, _extract_artifact_urls, _infer_kind
 from deerflow.agents.materials.policy import resolve_capture_policy
@@ -70,7 +71,8 @@ def _cfgpu_result(urls, *, name="cfgpu_generate_image", artifact=True, extra=Non
 
 
 async def _run(result, *, fake_uploader, materials=None, metadata=None, name="cfgpu_generate_image", thread_id="t1"):
-    mw.get_oss_uploader = lambda: fake_uploader  # type: ignore[assignment]
+    # P6 收口：rehost 改经 materialize helper → 在 materialize 命名空间打桩 uploader。
+    mz.get_oss_uploader = lambda: fake_uploader  # type: ignore[assignment]
     request = FakeRequest(
         tool_call={"name": name, "args": {}, "id": "tc_1"},
         state={"materials": materials} if materials is not None else {},
@@ -86,7 +88,7 @@ async def _run(result, *, fake_uploader, materials=None, metadata=None, name="cf
 
 @pytest.fixture(autouse=True)
 def _restore_uploader(monkeypatch):
-    monkeypatch.setattr(mw, "get_oss_uploader", mw.get_oss_uploader)
+    monkeypatch.setattr(mz, "get_oss_uploader", mz.get_oss_uploader)
     yield
 
 

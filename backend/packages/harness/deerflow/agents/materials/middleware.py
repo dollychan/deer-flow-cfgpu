@@ -49,11 +49,11 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.materials.materialize import MaterializeOutcome, register_remote_url, rehost_remote_url
 from deerflow.agents.materials.policy import CapturePolicy, resolve_capture_policy
-from deerflow.agents.materials.registry import build_reverse_index, classify_ref, is_our_object_key, register, stable_ref
+from deerflow.agents.materials.registry import classify_ref, is_our_object_key, register
 from deerflow.agents.materials.types import Kind, Material
 from deerflow.oss.client import get_oss_client
-from deerflow.oss.uploader import get_oss_uploader
 
 logger = logging.getLogger(__name__)
 
@@ -226,14 +226,6 @@ def _thread_id_from_request(request: ToolCallRequest) -> str:
     return "default"
 
 
-async def _rehost(url: str, thread_id: str) -> str:
-    """fetch 临期 url → 落我方 OSS → object_key。OSS 未启用 / 失败均 raise（调用方置 stable=false）。"""
-    uploader = get_oss_uploader()
-    if uploader is None:
-        raise RuntimeError("OSS uploader unavailable — cannot re-host")
-    return await uploader.rehost_url(url, thread_id)
-
-
 def _rewrite_result(result: ToolMessage, ordered_urls: list[str], id_for_url: dict[str, str], items: list[dict]) -> ToolMessage:
     """双轨改写：``.content`` 去 url 留 id 形态（I10），``.artifact`` 写稳定 ref 供客户端。"""
     parsed = _parse_content_json(result)
@@ -359,42 +351,31 @@ class MaterialsMiddleware(AgentMiddleware):
         if not urls:
             return None
 
+        # 物化收口（§8 R3/R4）：逐 url 走统一 helper（地址反查去重 + rehost/register），
+        # ``working`` 滚动更新使同批重复 url / task_wait 重放幂等（不双计费）。
         working = dict(materials)
-        index = build_reverse_index(working)
         updates: dict[str, Material] = {}
         id_for_url: dict[str, str] = {}
         items: list[dict] = []
 
         for url in urls:
-            ref_type, ref = classify_ref(url)
-            skey = stable_ref(ref_type, ref)
-            hit = index.get(skey)
-            if hit is not None:
-                id_for_url[url] = hit  # 幂等：task_wait 重放 / 同批重复 url 不二次 rehost（不双计费）
-                continue
             kind = _infer_kind(url)
-            if ref_type == "oss_path":
-                # D4：已是我方对象 → 登记 oss_path，跳过 fetch
-                mid, upd = register(working, kind=kind, origin="generate", ref_type="oss_path", ref=ref, display=True, stable=True)
-            elif policy == "rehost":
-                object_key: str | None = None
+            if policy == "rehost":
                 try:
-                    object_key = await _rehost(url, thread_id)
+                    outcome = await rehost_remote_url(working, url, thread_id=thread_id, kind=kind, origin="generate", display=True)
                 except Exception as exc:  # noqa: BLE001 — rehost 失败不得阻断 run
                     logger.warning("MaterialsCapture: rehost failed for %s (%s) — marking unstable", url, exc)
-                if object_key is not None:
-                    mid, upd = register(working, kind=kind, origin="generate", ref_type="oss_path", ref=object_key, origin_url=url, display=True, stable=True)
-                else:
                     # 临期 url 落不了盘 → stable=false + 不作交付物（display 缺省，I5）
                     mid, upd = register(working, kind=kind, origin="generate", ref_type="global_url", ref=url, origin_url=url, stable=False)
+                    outcome = MaterializeOutcome(id=mid, update=upd, ref_type="global_url", ref=url, stable=False, deduped=False)
             else:  # register：仅准入，ref 保持 global_url，不 fetch/不 upload
-                mid, upd = register(working, kind=kind, origin="generate", ref_type="global_url", ref=url, display=True, stable=True)
-            updates.update(upd)
-            working.update(upd)
-            index[skey] = mid
-            id_for_url[url] = mid
-            mat = upd[mid]
-            items.append({"id": mid, "ref": mat["ref"], "kind": kind, "stable": mat.get("stable", True)})
+                outcome = register_remote_url(working, url, kind=kind, origin="generate", display=True)
+            id_for_url[url] = outcome.id
+            if outcome.update:
+                updates.update(outcome.update)
+                working.update(outcome.update)
+            if not outcome.deduped:
+                items.append({"id": outcome.id, "ref": outcome.ref, "kind": kind, "stable": outcome.stable})
 
         new_msg = _rewrite_result(result, urls, id_for_url, items)
         update: dict[str, Any] = {"messages": [new_msg]}
