@@ -65,7 +65,12 @@ def classify_ref(raw: str) -> tuple[RefType, str]:
 
 
 def build_reverse_index(materials: dict[str, Material] | None) -> dict[str, str]:
-    """``stable_ref → id`` 反查索引（§8 R4）。挂权威 ``ref``。"""
+    """``stable_ref → id`` 反查索引（§8 R4）。
+
+    挂权威 ``ref`` **以及** ``origin_url``（rehost 前的原始外链）——一个素材 rehost 后 ``ref``
+    变为 object_key（oss_path），但同一外链再浮现（task_wait 重放 / 上行复用）时带的是原 url
+    （global_url）；只挂 ``ref`` 会漏判致重复 rehost（双计费）。两个地址都指回同一 id 才幂等。
+    """
     index: dict[str, str] = {}
     if not materials:
         return index
@@ -74,6 +79,10 @@ def build_reverse_index(materials: dict[str, Material] | None) -> dict[str, str]
         ref = mat.get("ref")
         if ref_type and ref:
             index[stable_ref(ref_type, ref)] = mid
+        origin_url = mat.get("origin_url")
+        if origin_url:
+            o_type, o_ref = classify_ref(origin_url)
+            index.setdefault(stable_ref(o_type, o_ref), mid)
     return index
 
 

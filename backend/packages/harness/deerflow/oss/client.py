@@ -69,6 +69,23 @@ class OSSClient:
             )
         return self._presigned_url(object_key) if self._return_presigned else object_key
 
+    def upload_bytes(self, object_key: str, data: bytes, content_type: str | None = None) -> str:
+        """Upload an in-memory byte payload under ``object_key`` and return its **bare object key**.
+
+        Used by ``OSSUploader.rehost_url`` to re-host a remote (cfgpu temp) URL into our
+        bucket without staging a local file. Always returns the object_key (NOT a presigned
+        URL): materials store the stable object_key and presign at the out-gate (§4.2/§4.3).
+        """
+        self._client.put_object(
+            self._oss.PutObjectRequest(
+                bucket=self._bucket,
+                key=object_key,
+                body=data,
+                content_type=content_type or _guess_content_type(object_key),
+            )
+        )
+        return object_key
+
     def presign(self, object_key: str) -> str:
         """Always return a presigned GET URL for ``object_key`` (local HMAC, no network IO).
 

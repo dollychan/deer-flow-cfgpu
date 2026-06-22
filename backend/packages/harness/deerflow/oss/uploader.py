@@ -1,23 +1,29 @@
 """High-level OSS upload service.
 
-Provides ``upload_local_file``: upload a file from the server filesystem and return
-a reference (presigned URL or bare object key, per the ``presigned_url`` config).
-
-Lifecycle management of remote cfgpu URLs (refresh / re-upload) is intentionally out
-of scope here and is handled separately.
+Provides ``upload_local_file`` (stage a server-filesystem file) and ``rehost_url``
+(fetch a remote URL and re-host its bytes into our bucket). Both return a reference;
+``rehost_url`` always returns the bare object_key (materials presign at the out-gate).
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import mimetypes
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+import httpx
 
 from deerflow.oss.client import OSSClient, get_oss_client
 from deerflow.oss.oss_config import OSSConfig
 
 logger = logging.getLogger(__name__)
+
+# Re-host fetch limits: cfgpu temp media is bounded; a stuck CDN must not hang a run.
+_REHOST_TIMEOUT_S = 60.0
+_REHOST_MAX_BYTES = 256 * 1024 * 1024  # 256 MiB ceiling (video safety)
 
 _CATEGORY_BY_MIME_PREFIX: list[tuple[str, str]] = [
     ("image/", "images"),
@@ -71,6 +77,55 @@ class OSSUploader:
         )
         logger.info("OSSUploader: uploaded %s → %s", virtual_path, object_key)
         return ref
+
+    async def rehost_url(self, url: str, thread_id: str) -> str:
+        """Fetch a remote URL and re-host its bytes into our bucket; return the **object_key**.
+
+        Used by ``MaterialsMiddleware`` Capture (§4.2): a freshly generated cfgpu URL is
+        short-lived, so its bytes are pulled into our OSS once and thereafter referenced by
+        the stable object_key (presigned at the out-gate). The object_key embeds a stable
+        hash of the source URL so re-hosting the same URL (e.g. a ``task_wait`` replay) is
+        idempotent — same key, no duplicate object, dedup-friendly.
+
+        Network fetch is async (httpx); the blocking OSS ``put_object`` is offloaded to a
+        thread so the event loop is never blocked.
+
+        Raises on fetch / upload failure — the caller marks the material ``stable=false``.
+        """
+        async with httpx.AsyncClient(follow_redirects=True, timeout=_REHOST_TIMEOUT_S) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.content
+            content_type = (resp.headers.get("content-type") or "").split(";")[0].strip() or None
+        if len(data) > _REHOST_MAX_BYTES:
+            raise ValueError(f"re-host payload {len(data)} bytes exceeds {_REHOST_MAX_BYTES} ceiling")
+
+        filename = _filename_from_url(url, content_type)
+        category = _infer_category(filename)
+        object_key = f"agent-artifacts/{thread_id}/{category}/{filename}"
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._client.upload_bytes, object_key, data, content_type)
+        logger.info("OSSUploader: re-hosted %s → %s (%d bytes)", url, object_key, len(data))
+        return object_key
+
+
+def _filename_from_url(url: str, content_type: str | None) -> str:
+    """Stable, collision-resistant object filename for a re-hosted URL.
+
+    ``<sha1(url)[:8]>-<basename>``; basename comes from the URL path, with an extension
+    guessed from ``content_type`` when the path has none. The URL hash keeps distinct
+    sources apart and makes re-hosting the same URL deterministic (idempotent key).
+    """
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
+    name = Path(unquote(urlsplit(url).path)).name
+    if not name:
+        name = "file"
+    if not Path(name).suffix and content_type:
+        ext = mimetypes.guess_extension(content_type)
+        if ext:
+            name = f"{name}{ext}"
+    return f"{digest}-{name}"
 
 
 # ── Singleton ──────────────────────────────────────────────────────────────────
