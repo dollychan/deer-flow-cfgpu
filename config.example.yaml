@@ -1124,6 +1124,9 @@ mlm:
   enabled: false # Enable MlmMiddleware (multi-level DB memory)
   model_name: null # LLM for knowledge extraction (null = default model)
   debounce_seconds: 30 # Wait time before processing queued MLM extractions
+  fact_confidence_threshold: 0.6 # Drop candidate facts whose explicit confidence is below this (facts without confidence are kept)
+  max_facts_per_scope: 50 # Storage cap per memory row; on overflow keep the highest-confidence facts
+  max_injection_facts: 15 # Max facts injected into the prompt per row (top-N by confidence) to bound context footprint
 
 # ============================================================================
 # Custom Agent Management API

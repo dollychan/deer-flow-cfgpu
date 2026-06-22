@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete as sa_delete
@@ -22,23 +23,89 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.config.mlm_config import get_mlm_config
 from deerflow.persistence.memory.model import MemoryAgentRow, MemoryExtractionRow, MemoryProjectRow, MemoryUserRow
 
 logger = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
 
+# Neutral confidence used when a fact omits (or malforms) its ``confidence``
+# field. Applied only to the cap-sort ordering so un-annotated facts are
+# neither preferred nor evicted first; the write-time threshold gate
+# deliberately leaves such facts untouched (see ``merge_facts``).
+_DEFAULT_CONFIDENCE = 0.5
 
-def merge_facts(existing: list[dict], candidate: list[dict]) -> list[dict]:
+
+def _coerce_confidence(value: object) -> float | None:
+    """Return *value* as a finite float in [0, 1], or None if absent/invalid.
+
+    Booleans are rejected (``True``/``False`` are not confidences). Strings are
+    accepted when they parse as a float so model output that quotes the number
+    still counts. Out-of-range values are clamped into [0, 1].
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            value = float(value)
+        except ValueError:
+            return None
+    if not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    if not math.isfinite(value):
+        return None
+    return min(1.0, max(0.0, value))
+
+
+def _confidence_sort_key(fact: dict) -> float:
+    """Confidence used to rank facts when capping; missing → neutral default."""
+    conf = _coerce_confidence(fact.get("confidence"))
+    return conf if conf is not None else _DEFAULT_CONFIDENCE
+
+
+def merge_facts(
+    existing: list[dict],
+    candidate: list[dict],
+    *,
+    confidence_threshold: float = 0.0,
+    max_facts: int | None = None,
+) -> list[dict]:
     """Merge two fact lists, deduplicating by the ``content`` field.
 
     Candidate facts win when their content matches an existing fact, so
     newer extractions naturally overwrite stale ones.
+
+    Args:
+        existing: Facts already persisted for this row (never re-filtered).
+        candidate: Newly extracted facts to merge in.
+        confidence_threshold: A candidate fact whose *explicit* confidence is
+            below this value is dropped. Candidates that omit confidence are
+            kept (benefit of the doubt) so the gate can be rolled out before
+            every extraction skill emits the field.
+        max_facts: When set, the merged result is capped to this many facts,
+            keeping the highest-confidence ones (missing confidence sorts as
+            the neutral default). ``None`` leaves the list uncapped.
+
+    Returns:
+        The merged (and optionally filtered/capped) fact list.
     """
     seen: dict[str, dict] = {f.get("content", ""): f for f in existing}
     for fact in candidate:
+        conf = _coerce_confidence(fact.get("confidence"))
+        if conf is not None and conf < confidence_threshold:
+            continue
         seen[fact.get("content", "")] = fact
-    return list(seen.values())
+
+    merged = list(seen.values())
+    if max_facts is not None and len(merged) > max_facts:
+        merged.sort(key=_confidence_sort_key, reverse=True)
+        merged = merged[:max_facts]
+    return merged
 
 
 class MemoryRepository:
@@ -50,6 +117,12 @@ class MemoryRepository:
 
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
+
+    @staticmethod
+    def _fact_limits() -> tuple[float, int]:
+        """Read the active (confidence_threshold, max_facts) write-time limits."""
+        cfg = get_mlm_config()
+        return cfg.fact_confidence_threshold, cfg.max_facts_per_scope
 
     # ── Load ─────────────────────────────────────────────────────────────────
 
@@ -81,19 +154,23 @@ class MemoryRepository:
         """Write user-scope knowledge using optimistic locking.
 
         On each attempt: read current row → merge facts → CAS UPDATE.
+        Candidate facts are confidence-gated and the merged list is capped per
+        ``MlmConfig`` (``fact_confidence_threshold`` / ``max_facts_per_scope``).
         Returns True on success, False if all retries are exhausted.
         """
+        threshold, max_facts = self._fact_limits()
         now = datetime.now(UTC)
         for attempt in range(_MAX_RETRIES):
             try:
                 async with self._sf() as session:
                     row = await session.get(MemoryUserRow, (user_id, scope_key))
                     if row is None:
+                        new_facts = merge_facts([], candidate_facts, confidence_threshold=threshold, max_facts=max_facts)
                         session.add(
                             MemoryUserRow(
                                 user_id=user_id,
                                 scope_key=scope_key,
-                                facts=json.dumps(candidate_facts, ensure_ascii=False),
+                                facts=json.dumps(new_facts, ensure_ascii=False),
                                 summary=candidate_summary,
                                 version=0,
                                 updated_at=now,
@@ -102,7 +179,7 @@ class MemoryRepository:
                         await session.commit()
                         return True
 
-                    merged = merge_facts(json.loads(row.facts), candidate_facts)
+                    merged = merge_facts(json.loads(row.facts), candidate_facts, confidence_threshold=threshold, max_facts=max_facts)
                     result = await session.execute(
                         update(MemoryUserRow)
                         .where(
@@ -137,19 +214,22 @@ class MemoryRepository:
     ) -> bool:
         """Write project-scope knowledge using optimistic locking.
 
-        Same CAS strategy as ``upsert_user_scope``.
+        Same CAS strategy as ``upsert_user_scope``, including the per-``MlmConfig``
+        confidence gate and fact cap.
         """
+        threshold, max_facts = self._fact_limits()
         now = datetime.now(UTC)
         for attempt in range(_MAX_RETRIES):
             try:
                 async with self._sf() as session:
                     row = await session.get(MemoryProjectRow, (project_id, scope_key))
                     if row is None:
+                        new_facts = merge_facts([], candidate_facts, confidence_threshold=threshold, max_facts=max_facts)
                         session.add(
                             MemoryProjectRow(
                                 project_id=project_id,
                                 scope_key=scope_key,
-                                facts=json.dumps(candidate_facts, ensure_ascii=False),
+                                facts=json.dumps(new_facts, ensure_ascii=False),
                                 summary=candidate_summary,
                                 version=0,
                                 updated_at=now,
@@ -158,7 +238,7 @@ class MemoryRepository:
                         await session.commit()
                         return True
 
-                    merged = merge_facts(json.loads(row.facts), candidate_facts)
+                    merged = merge_facts(json.loads(row.facts), candidate_facts, confidence_threshold=threshold, max_facts=max_facts)
                     result = await session.execute(
                         update(MemoryProjectRow)
                         .where(
@@ -196,19 +276,22 @@ class MemoryRepository:
         ``memory_extraction_loop``, so multiple instances may write the same
         ``memory_agent`` row concurrently (the old single-writer Memory Update
         Worker is gone). Same CAS strategy as ``upsert_user_scope``: on each
-        attempt read current row → merge facts → version-CAS UPDATE.
+        attempt read current row → merge facts → version-CAS UPDATE. The same
+        per-``MlmConfig`` confidence gate and fact cap apply.
         Returns True on success, False if all retries are exhausted.
         """
+        threshold, max_facts = self._fact_limits()
         now = datetime.now(UTC)
         for attempt in range(_MAX_RETRIES):
             try:
                 async with self._sf() as session:
                     row = await session.get(MemoryAgentRow, agent_name)
                     if row is None:
+                        new_facts = merge_facts([], candidate_facts, confidence_threshold=threshold, max_facts=max_facts)
                         session.add(
                             MemoryAgentRow(
                                 agent_name=agent_name,
-                                facts=json.dumps(candidate_facts, ensure_ascii=False),
+                                facts=json.dumps(new_facts, ensure_ascii=False),
                                 summary=candidate_summary,
                                 version=0,
                                 updated_at=now,
@@ -217,7 +300,7 @@ class MemoryRepository:
                         await session.commit()
                         return True
 
-                    merged = merge_facts(json.loads(row.facts), candidate_facts)
+                    merged = merge_facts(json.loads(row.facts), candidate_facts, confidence_threshold=threshold, max_facts=max_facts)
                     result = await session.execute(
                         update(MemoryAgentRow)
                         .where(

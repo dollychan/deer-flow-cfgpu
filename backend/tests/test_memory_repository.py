@@ -12,8 +12,9 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from deerflow.config.mlm_config import MlmConfig
 from deerflow.persistence.base import Base
-from deerflow.persistence.memory.repository import _MAX_RETRIES, MemoryRepository, merge_facts
+from deerflow.persistence.memory.repository import _MAX_RETRIES, _coerce_confidence, MemoryRepository, merge_facts
 
 # ---------------------------------------------------------------------------
 # Shared fixture
@@ -73,6 +74,84 @@ class TestMergeFacts:
         assert by_content["A"]["v"] == 2  # updated
         assert by_content["B"]["v"] == 1  # untouched
         assert "C" in by_content
+
+    # ── confidence threshold ──────────────────────────────────────────────
+
+    def test_low_confidence_candidate_dropped(self):
+        candidate = [
+            {"content": "keep", "confidence": 0.9},
+            {"content": "drop", "confidence": 0.3},
+        ]
+        result = merge_facts([], candidate, confidence_threshold=0.6)
+        assert {f["content"] for f in result} == {"keep"}
+
+    def test_candidate_without_confidence_is_kept(self):
+        # Graceful rollout: un-annotated facts bypass the gate.
+        candidate = [{"content": "no-conf"}]
+        result = merge_facts([], candidate, confidence_threshold=0.9)
+        assert {f["content"] for f in result} == {"no-conf"}
+
+    def test_threshold_does_not_re_filter_existing(self):
+        existing = [{"content": "old", "confidence": 0.1}]
+        result = merge_facts(existing, [], confidence_threshold=0.9)
+        assert {f["content"] for f in result} == {"old"}
+
+    def test_confidence_at_threshold_is_kept(self):
+        candidate = [{"content": "boundary", "confidence": 0.6}]
+        result = merge_facts([], candidate, confidence_threshold=0.6)
+        assert {f["content"] for f in result} == {"boundary"}
+
+    # ── max_facts cap ─────────────────────────────────────────────────────
+
+    def test_cap_keeps_highest_confidence(self):
+        existing = [
+            {"content": "a", "confidence": 0.1},
+            {"content": "b", "confidence": 0.9},
+        ]
+        candidate = [{"content": "c", "confidence": 0.5}]
+        result = merge_facts(existing, candidate, max_facts=2)
+        assert len(result) == 2
+        assert {f["content"] for f in result} == {"b", "c"}  # 0.1 evicted
+
+    def test_cap_treats_missing_confidence_as_neutral(self):
+        existing = [
+            {"content": "high", "confidence": 0.9},
+            {"content": "neutral"},  # ranks at 0.5
+            {"content": "low", "confidence": 0.2},
+        ]
+        result = merge_facts(existing, [], max_facts=2)
+        assert {f["content"] for f in result} == {"high", "neutral"}
+
+    def test_no_cap_when_within_limit(self):
+        existing = [{"content": "a"}, {"content": "b"}]
+        result = merge_facts(existing, [], max_facts=5)
+        assert len(result) == 2
+
+    def test_defaults_preserve_legacy_behavior(self):
+        # No threshold, no cap → unchanged dedupe-only merge.
+        existing = [{"content": "a", "confidence": 0.01}]
+        candidate = [{"content": "b", "confidence": 0.02}]
+        result = merge_facts(existing, candidate)
+        assert {f["content"] for f in result} == {"a", "b"}
+
+
+class TestCoerceConfidence:
+    def test_valid_float(self):
+        assert _coerce_confidence(0.7) == 0.7
+
+    def test_int_accepted(self):
+        assert _coerce_confidence(1) == 1.0
+
+    def test_numeric_string(self):
+        assert _coerce_confidence("0.8") == 0.8
+
+    def test_clamped_to_unit_range(self):
+        assert _coerce_confidence(1.5) == 1.0
+        assert _coerce_confidence(-0.3) == 0.0
+
+    @pytest.mark.parametrize("value", [None, True, False, "", "abc", float("nan"), float("inf"), {}])
+    def test_invalid_returns_none(self, value):
+        assert _coerce_confidence(value) is None
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +458,46 @@ class TestUpsertAgentOptimisticLock:
         ok = await repo.upsert_agent("director", [{"content": "x"}], None)
         assert ok is False
         assert sf.calls == _MAX_RETRIES
+
+
+# ---------------------------------------------------------------------------
+# Config-driven confidence gate + fact cap through the upsert path
+# ---------------------------------------------------------------------------
+
+
+class TestUpsertFactLimits:
+    @pytest.mark.anyio
+    async def test_low_confidence_filtered_on_insert(self, repo, monkeypatch):
+        monkeypatch.setattr(
+            "deerflow.persistence.memory.repository.get_mlm_config",
+            lambda: MlmConfig(fact_confidence_threshold=0.6, max_facts_per_scope=50),
+        )
+        await repo.upsert_user_scope(
+            "u1",
+            "",
+            [{"content": "keep", "confidence": 0.9}, {"content": "drop", "confidence": 0.2}],
+            None,
+        )
+        rows = await repo.load_user_scopes("u1")
+        contents = {f["content"] for f in json.loads(rows[0].facts)}
+        assert contents == {"keep"}
+
+    @pytest.mark.anyio
+    async def test_cap_enforced_on_update(self, repo, monkeypatch):
+        monkeypatch.setattr(
+            "deerflow.persistence.memory.repository.get_mlm_config",
+            lambda: MlmConfig(fact_confidence_threshold=0.0, max_facts_per_scope=2),
+        )
+        await repo.upsert_agent("director", [{"content": "a", "confidence": 0.2}], None)
+        await repo.upsert_agent(
+            "director",
+            [{"content": "b", "confidence": 0.9}, {"content": "c", "confidence": 0.5}],
+            None,
+        )
+        row = await repo.load_agent("director")
+        contents = {f["content"] for f in json.loads(row.facts)}
+        assert len(contents) == 2
+        assert contents == {"b", "c"}  # lowest-confidence "a" evicted
 
 
 # ---------------------------------------------------------------------------

@@ -11,7 +11,8 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from deerflow.persistence.memory.repository import get_memory_repository
+from deerflow.config.mlm_config import get_mlm_config
+from deerflow.persistence.memory.repository import _confidence_sort_key, get_memory_repository
 
 if TYPE_CHECKING:
     from deerflow.persistence.memory.model import MemoryAgentRow, MemoryProjectRow, MemoryUserRow
@@ -51,13 +52,28 @@ def filter_by_scope(rows: list, active_dims: set[str]) -> list:
 
 
 def _format_facts(facts_json: str, *, indent: int = 2) -> str:
-    """Return a bullet list of fact contents from a JSON-encoded facts array."""
+    """Return a bullet list of fact contents from a JSON-encoded facts array.
+
+    Caps the rendered facts at ``MlmConfig.max_injection_facts`` per row,
+    keeping the highest-confidence facts so a large stored row does not bloat
+    the prompt. Facts without an explicit confidence rank at the neutral
+    default (see ``_confidence_sort_key``).
+    """
     try:
         facts = json.loads(facts_json)
     except (json.JSONDecodeError, TypeError):
         return ""
+    if not isinstance(facts, list):
+        return ""
+
+    limit = get_mlm_config().max_injection_facts
+    if len(facts) > limit:
+        facts = sorted(facts, key=_confidence_sort_key, reverse=True)[:limit]
+
     lines = []
     for fact in facts:
+        if not isinstance(fact, dict):
+            continue
         content = fact.get("content", "")
         if content:
             lines.append(f"{'  ' * indent}- {content}")

@@ -43,13 +43,21 @@ Return a JSON array. Each element corresponds to one scope group:
   {
     "scope_key": "",
     "facts": [
-      {"content": "<concise fact statement>", "category": "<goal|constraint|technical|domain|team|compliance>"},
+      {"content": "<concise fact statement>", "category": "<goal|constraint|technical|domain|team|compliance>", "confidence": <0.0-1.0>},
       ...
     ],
     "summary": "<1-2 sentence narrative summarizing this scope group>"
   }
 ]
 ```
+
+`confidence` is your certainty that this is a stable project fact worth remembering across future conversations (not transient task state). Use the scale:
+- `0.9-1.0` — explicitly stated as a firm decision or requirement
+- `0.7-0.9` — clearly established, unlikely to change
+- `0.6-0.7` — reasonable inference from the discussion
+- below `0.6` — speculative; prefer not to emit it at all
+
+Facts below the system's confidence threshold are discarded on write, so do not pad the list with low-confidence guesses.
 
 Return `[]` if no persistent project knowledge was found in this conversation.
 

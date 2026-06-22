@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from deerflow.agents.memory.injector import build_injection, filter_by_scope
+from deerflow.agents.memory.injector import _format_facts, build_injection, filter_by_scope
+from deerflow.config.mlm_config import MlmConfig
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +54,46 @@ class TestFilterByScope:
 
 # ---------------------------------------------------------------------------
 # build_injection — integration-level with in-memory SQLite
+# ---------------------------------------------------------------------------
+# _format_facts — injection-time cap
+# ---------------------------------------------------------------------------
+
+
+class TestFormatFacts:
+    def _patch_limit(self, monkeypatch, limit):
+        monkeypatch.setattr(
+            "deerflow.agents.memory.injector.get_mlm_config",
+            lambda: MlmConfig(max_injection_facts=limit),
+        )
+
+    def test_renders_all_when_within_limit(self, monkeypatch):
+        self._patch_limit(monkeypatch, 15)
+        facts = json.dumps([{"content": "a"}, {"content": "b"}])
+        out = _format_facts(facts, indent=1)
+        assert "- a" in out and "- b" in out
+
+    def test_caps_to_highest_confidence(self, monkeypatch):
+        self._patch_limit(monkeypatch, 2)
+        facts = json.dumps(
+            [
+                {"content": "low", "confidence": 0.1},
+                {"content": "high", "confidence": 0.9},
+                {"content": "mid", "confidence": 0.5},
+            ]
+        )
+        out = _format_facts(facts, indent=1)
+        assert "high" in out and "mid" in out
+        assert "low" not in out
+
+    def test_malformed_json_returns_empty(self, monkeypatch):
+        self._patch_limit(monkeypatch, 15)
+        assert _format_facts("not json", indent=1) == ""
+
+    def test_non_list_root_returns_empty(self, monkeypatch):
+        self._patch_limit(monkeypatch, 15)
+        assert _format_facts(json.dumps({"content": "x"}), indent=1) == ""
+
+
 # ---------------------------------------------------------------------------
 
 

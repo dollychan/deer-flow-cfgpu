@@ -26,6 +26,34 @@ class MlmConfig(BaseModel):
         le=300,
         description="Seconds to wait before processing queued MLM extractions (debounce).",
     )
+    fact_confidence_threshold: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum confidence a newly extracted fact must declare to be persisted. "
+            "Candidate facts whose explicit confidence is below this value are dropped at merge time. "
+            "Facts that omit confidence (e.g. from un-migrated extraction skills) are kept (graceful rollout)."
+        ),
+    )
+    max_facts_per_scope: int = Field(
+        default=50,
+        ge=1,
+        description=(
+            "Maximum number of facts retained per memory row (user/project scope or agent). "
+            "When a merge would exceed this, facts are sorted by confidence (desc) and the top N are kept. "
+            "This is the primary lever bounding how much memory each row can contribute to the prompt."
+        ),
+    )
+    max_injection_facts: int = Field(
+        default=15,
+        ge=1,
+        description=(
+            "Maximum number of facts injected into the prompt per memory row. "
+            "At injection time facts are ordered by confidence (desc) and only the top N are rendered, "
+            "so a high storage cap does not translate into an unbounded prompt footprint."
+        ),
+    )
 
 
 # Global configuration instance
