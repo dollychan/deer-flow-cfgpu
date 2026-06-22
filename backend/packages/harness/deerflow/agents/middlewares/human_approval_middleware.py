@@ -171,7 +171,19 @@ class HumanApprovalMiddleware(AgentMiddleware[AgentState]):
                 logger.info("HumanApproval: rejected tool=%s id=%s", tc["name"], tc["id"])
 
         new_msg = ai_msg.model_copy(update={"tool_calls": new_tool_calls})
-        return {"messages": [new_msg, *artificial_messages]}
+        # Reclaim tool_approvals: the decisions for this batch have now been consumed —
+        # approved args are baked into new_msg, rejected calls have their error ToolMessage.
+        # Nothing downstream (ToolNode / should_continue / future model) ever reads
+        # tool_approvals again, so we clear it in the SAME return dict that carries the
+        # rewritten AIMessage. Both land atomically in one super-step (merge_tool_approvals
+        # treats {} as a clear sentinel). This is the only safe reclaim point: it must not
+        # precede this line (approved args live ONLY in tool_approvals until baked above),
+        # and a full clear is safe because the graph is strictly serial (one suspend point
+        # per thread) so this never drops a concurrent batch — it also self-heals any
+        # historical residue. Reached on both terminal consumers: the decided==pending
+        # resume path and the Command(resume=...) fallback path.
+        # See cfgpu-docs/human_approval_middleware.md §9.
+        return {"messages": [new_msg, *artificial_messages], "tool_approvals": {}}
 
     @override
     def after_model(self, state: AgentState, runtime: Any) -> dict[str, Any] | None:

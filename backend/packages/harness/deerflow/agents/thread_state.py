@@ -55,11 +55,21 @@ def merge_tool_approvals(existing: dict[str, Any] | None, new: dict[str, Any] | 
     Used by HumanApprovalMiddleware to persist approval/rejection decisions across
     the interrupt→resume cycle. The client writes decisions via Command.update so
     that after_model can detect them on re-entry and skip re-emitting the SSE event.
+
+    Special case: an explicit empty dict {} clears all decisions (same convention as
+    merge_viewed_images). HumanApprovalMiddleware._build_response returns {} here once
+    a batch's decisions have been consumed (baked into the AIMessage), reclaiming the
+    otherwise unbounded per-thread accumulation. Clearing is safe because the graph is
+    strictly serial — one suspend point per thread — so at that apply moment the dict
+    holds only the just-consumed batch plus dead historical residue, both reclaimable.
+    See cfgpu-docs/human_approval_middleware.md §9.
     """
     if existing is None:
         return new or {}
     if new is None:
         return existing
+    if len(new) == 0:
+        return {}
     return {**existing, **new}
 
 

@@ -54,6 +54,19 @@ class TestMergeToolApprovals:
         result = merge_tool_approvals({"a": "old"}, {"a": "new"})
         assert result == {"a": "new"}
 
+    def test_empty_dict_clears(self):
+        # Explicit {} is the reclaim sentinel (see merge_tool_approvals §9 / _build_response):
+        # once a batch's decisions are consumed, the middleware returns {} to wipe the
+        # accumulated map and stop unbounded per-thread growth.
+        assert merge_tool_approvals({"a": 1, "b": 2}, {}) == {}
+
+    def test_empty_dict_on_empty_existing(self):
+        assert merge_tool_approvals({}, {}) == {}
+
+    def test_nonempty_new_still_merges(self):
+        # Guard the sentinel boundary: a non-empty update is still a union, not a clear.
+        assert merge_tool_approvals({"a": 1}, {"b": 2}) == {"a": 1, "b": 2}
+
 
 # ---------------------------------------------------------------------------
 # _needs_approval
@@ -385,3 +398,88 @@ class TestAfterModelFallbackResume:
         tool_msgs = [m for m in result["messages"] if isinstance(m, ToolMessage)]
         assert len(tool_msgs) == 1
         assert tool_msgs[0].tool_call_id == "tc1"
+
+
+# ---------------------------------------------------------------------------
+# tool_approvals reclaim (§9 — prevent unbounded per-thread accumulation)
+# ---------------------------------------------------------------------------
+
+class TestToolApprovalsReclaim:
+    """Once a batch's decisions are consumed, the terminal apply clears
+    tool_approvals in the SAME return dict that carries the rewritten AIMessage.
+
+    The clear must NOT precede args transfer (approved args live only in
+    tool_approvals until baked into the AIMessage), and must cover both
+    terminal consumers (decided==pending resume path and Command(resume=...)
+    fallback). The partial-resume path must NOT clear (it interrupts instead).
+    """
+
+    def test_approved_modified_args_then_reclaimed(self):
+        """Approved with modified args: the ToolNode-bound AIMessage carries the
+        modified args AND tool_approvals is reclaimed in the same return."""
+        m = _make_middleware()
+        new_args = {"prompt": "fluffy cat", "width": 1024}
+        msg = _ai_msg([{"id": "tc1", "name": "cfgpu__generate_image", "args": {"prompt": "cat"}}])
+        state = _make_state([msg], tool_approvals={"tc1": {"status": "approved", "args": new_args}})
+
+        with (
+            patch("deerflow.agents.middlewares.human_approval_middleware.get_stream_writer", return_value=lambda d: None),
+            patch("deerflow.agents.middlewares.human_approval_middleware.interrupt", side_effect=AssertionError("no interrupt on resume")),
+        ):
+            result = m.after_model(state, MagicMock())
+
+        # Reclaim sentinel present and empty
+        assert result["tool_approvals"] == {}
+        # And the modified args survived into the AIMessage (clear did NOT precede transfer)
+        ai_msg = next(mm for mm in result["messages"] if isinstance(mm, AIMessage))
+        assert ai_msg.tool_calls[0]["args"] == new_args
+
+    def test_rejected_end_path_reclaimed(self):
+        """All-rejected (routes to END, no next before/after_model) still
+        reclaims — this is the residue an every-turn sweep idea would miss."""
+        m = _make_middleware()
+        msg = _ai_msg([{"id": "tc1", "name": "cfgpu__generate_image", "args": {"prompt": "cat"}}])
+        state = _make_state([msg], tool_approvals={"tc1": {"status": "rejected", "reason": "no"}})
+
+        with (
+            patch("deerflow.agents.middlewares.human_approval_middleware.get_stream_writer", return_value=lambda d: None),
+            patch("deerflow.agents.middlewares.human_approval_middleware.interrupt", side_effect=AssertionError("no interrupt on resume")),
+        ):
+            result = m.after_model(state, MagicMock())
+
+        assert result["tool_approvals"] == {}
+
+    def test_fallback_resume_reclaimed(self):
+        """Command(resume=...) fallback path (interrupt returns a value) also reclaims."""
+        m = _make_middleware()
+        msg = _ai_msg([{"id": "tc1", "name": "cfgpu__generate_image", "args": {"prompt": "cat"}}])
+        state = _make_state([msg])  # no state decisions → fallback path
+
+        resume_value = {"approved": [{"id": "tc1", "args": {"prompt": "x"}}], "rejected": []}
+        with (
+            patch("deerflow.agents.middlewares.human_approval_middleware.get_stream_writer", return_value=lambda d: None),
+            patch("deerflow.agents.middlewares.human_approval_middleware.interrupt", return_value=resume_value),
+        ):
+            result = m.after_model(state, MagicMock())
+
+        assert result["tool_approvals"] == {}
+
+    def test_partial_resume_does_not_reclaim(self):
+        """Partial resume re-interrupts (raises) without emitting any clear, so
+        already-decided tc1 survives in state across the next interrupt."""
+        m = _make_middleware({"cfgpu__generate_*"})
+        msg = _ai_msg([
+            {"id": "tc1", "name": "cfgpu__generate_image", "args": {}},
+            {"id": "tc2", "name": "cfgpu__generate_video", "args": {}},
+        ])
+        state = _make_state([msg], tool_approvals={"tc1": {"status": "approved", "args": {}}})
+
+        with (
+            patch("deerflow.agents.middlewares.human_approval_middleware.get_stream_writer", return_value=lambda d: None),
+            patch("deerflow.agents.middlewares.human_approval_middleware.interrupt", side_effect=Exception("interrupted")),
+        ):
+            with pytest.raises(Exception, match="interrupted"):
+                m.after_model(state, MagicMock())
+
+        # No return value means no {"tool_approvals": {}} update was produced;
+        # the reducer never sees a clear, so tc1's decision persists for the resume.
