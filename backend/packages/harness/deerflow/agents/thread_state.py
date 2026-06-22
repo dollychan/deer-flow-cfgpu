@@ -2,6 +2,8 @@ from typing import Annotated, Any, NotRequired, TypedDict
 
 from langchain.agents import AgentState
 
+from deerflow.agents.materials.types import Material
+
 
 class SandboxState(TypedDict):
     sandbox_id: NotRequired[str | None]
@@ -47,6 +49,55 @@ def merge_artifacts(existing: list[str] | None, new: list[str] | None) -> list[s
         return existing
     # Use dict.fromkeys to deduplicate while preserving order
     return list(dict.fromkeys(existing + new))
+
+
+def _attach_material(existing: Material, new: Material) -> Material:
+    """同 id 字段级合并（cfgpu-docs/materials.md §2.1）：新出现的非 None 字段补入现有项，
+    不整体替换。ref_type/ref 受约束：
+
+    - ``asset_url`` immutable —— ref_type/ref 不可变，冲突即 raise（fail-closed）。
+    - 仅放行升级 ``global_url -> oss_path``（rehost 后 ref 改写为 object_key）。
+    - 其余 ref_type 跨值改写视为非法，raise。
+    """
+    old_rt = existing.get("ref_type")
+    new_rt = new.get("ref_type")
+
+    if old_rt == "asset_url":
+        if new_rt is not None and new_rt != "asset_url":
+            raise ValueError(f"asset_url material {existing.get('id')!r} ref_type is immutable: {old_rt!r} -> {new_rt!r}")
+        if "ref" in new and new["ref"] != existing.get("ref"):
+            raise ValueError(f"asset_url material {existing.get('id')!r} ref is immutable")
+    elif new_rt is not None and new_rt != old_rt and not (old_rt == "global_url" and new_rt == "oss_path"):
+        raise ValueError(f"illegal ref_type transition for {existing.get('id')!r}: {old_rt!r} -> {new_rt!r}")
+
+    merged: dict[str, Any] = dict(existing)
+    for key, value in new.items():
+        if value is not None:
+            merged[key] = value
+    return merged  # type: ignore[return-value]
+
+
+def merge_materials(existing: dict[str, Material] | None, new: dict[str, Material] | None) -> dict[str, Material]:
+    """Reducer for the materials registry — only-growing, field-level attach.
+
+    materials 是唯一进 checkpoint 的增长 registry（SSOT，summarization 物理碰不到）。
+    同 id 走 ``_attach_material`` 字段级合并（放行 global_url→oss_path 升级、asset_url
+    immutable）。空 dict 视为 no-op（registry 永不清空；D9 淘汰为后续优化）——刻意不沿用
+    viewed_images/tool_approvals 的"空=清空"约定，避免误清整份注册表。
+    """
+    if new is None:
+        return existing or {}
+    if existing is None:
+        return new or {}
+    if len(new) == 0:
+        return existing
+    merged = dict(existing)
+    for mid, new_mat in new.items():
+        if mid in merged:
+            merged[mid] = _attach_material(merged[mid], new_mat)
+        else:
+            merged[mid] = new_mat
+    return merged
 
 
 def merge_tool_approvals(existing: dict[str, Any] | None, new: dict[str, Any] | None) -> dict[str, Any]:
@@ -133,7 +184,8 @@ class ThreadState(AgentState):
     sandbox: Annotated[NotRequired[SandboxState | None], merge_sandbox]
     thread_data: NotRequired[ThreadDataState | None]
     title: NotRequired[str | None]
-    artifacts: Annotated[list[str], merge_artifacts]
+    artifacts: Annotated[list[str], merge_artifacts]  # P8(D8) 将删除：降为 materials display 投影
+    materials: Annotated[dict[str, Material], merge_materials]  # id -> Material；唯一进 checkpoint 的增长 registry(SSOT)
     todos: Annotated[list | None, merge_todos]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> {base64, mime_type}
