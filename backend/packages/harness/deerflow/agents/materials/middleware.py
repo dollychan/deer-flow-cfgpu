@@ -7,7 +7,7 @@
 
 - ``before_agent``      = Ingest（§4.1）—— **见下方说明，消费侧已承载，故暂空**。
 - ``wrap_tool_call``    = pre ``_resolve_outgate``（§4.3, P2 ✓）+ post ``_capture``（§4.2, P3 ✓）。
-- ``wrap_model_call``   = ``<materials>`` 台账注入（§6, P4）。
+- ``wrap_model_call``   = ``<materials>`` 台账注入（§6, P4 ✓）。
 
 洋葱位（§5）：放 MessageStream **内层**（factory 中 append 在 MessageStreamMiddleware 之后
 = wrap_tool_call 洋葱的内层），使 ``_resolve_outgate`` 见最终入参（无人再改 url）、``_capture``
@@ -44,7 +44,8 @@ from typing import Any, override
 from urllib.parse import urlsplit
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import ToolMessage
+from langchain.agents.middleware.types import ModelRequest, ModelResponse
+from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
@@ -255,8 +256,97 @@ def _rewrite_result(result: ToolMessage, ordered_urls: list[str], id_for_url: di
     )
 
 
+# ── 台账注入（§6，P4）：每轮重建的 `<materials>` hidden current-turn context ──────────
+
+_ORIGIN_LABELS: dict[str, str] = {"uplink": "上行", "generate": "生成", "tool": "工具", "local": "本地"}
+
+# 全量列出阈值：素材数 ≤ 此值全列；超出则只列最近 N + 折叠早期为一行。D9：默认大，实际不折叠
+# （id 是注册表主键永久可解析，折叠不丢可用性，只省 token）；windowing 留接口，调大默认即关闭。
+_LEDGER_WINDOW = 50
+
+# hidden 台账消息的标记（additional_kwargs）：仅注入 request override、不写回 history，故无需
+# 靠它去重；保留供下游识别/审计（与 DynamicContext / SkillActivation 的 reminder 标记同惯例）。
+_LEDGER_MARKER_KEY = "materials_ledger"
+
+
+def _material_sort_key(mid: str) -> int:
+    return int(mid[1:]) if mid[1:].isdigit() else 0
+
+
+def _render_material_line(mat: Material) -> str:
+    """单行：``- [id] kind (来源,第N轮) "caption" ref_type``——**零 url/object_key**（I9）。
+
+    asset_url 带 scope 时尾标 ``※仅 {scope} 可用``（替 ref_type，对齐 §6 示例）；其余尾标 ref_type。
+    """
+    mid = mat.get("id", "?")
+    kind = mat.get("kind", "?")
+    origin = _ORIGIN_LABELS.get(str(mat.get("origin", "")), str(mat.get("origin", "")))
+    turn = mat.get("turn")
+    turn_part = f",第{turn}轮" if turn else ""
+    caption = mat.get("caption")
+    caption_part = f' "{caption}"' if caption else ""
+    ref_type = mat.get("ref_type", "")
+    scope = mat.get("scope")
+    tail = f"※仅 {scope} 可用" if ref_type == "asset_url" and scope else ref_type
+    if not mat.get("stable", True):
+        tail = f"{tail} ⚠未落盘".strip()
+    return f"- [{mid}] {kind} ({origin}{turn_part}){caption_part} {tail}".rstrip()
+
+
+def render_materials_ledger(materials: dict[str, Material] | None, *, window: int = _LEDGER_WINDOW) -> str | None:
+    """渲染 `<materials>` 台账块（§6）。空表→None（不注入）。**绝不含 url/object_key**（I9）。
+
+    每轮重建（区别于 DynamicContext 冻结首轮）：素材会增长，台账须反映当前全量。按 id 数值升序。
+    """
+    if not materials:
+        return None
+    ordered = sorted(materials.values(), key=lambda m: _material_sort_key(str(m.get("id", "m0"))))
+    lines = ["<materials>"]
+    if len(ordered) > window:
+        folded = ordered[:-window]
+        ordered = ordered[-window:]
+        lines.append(f"- 另有 {len(folded)} 个早期素材，按 id 引用（id 永久可解析）")
+    lines.extend(_render_material_line(mat) for mat in ordered)
+    lines.append("用法: 引用素材请填其 material id（如 m3）；不要复述 url/object_key。")
+    lines.append("</materials>")
+    return "\n".join(lines)
+
+
+def _build_ledger_message(materials: dict[str, Material] | None) -> HumanMessage | None:
+    body = render_materials_ledger(materials)
+    if body is None:
+        return None
+    return HumanMessage(
+        content=f"<system-reminder>\n{body}\n</system-reminder>",
+        additional_kwargs={"hide_from_ui": True, _LEDGER_MARKER_KEY: True},
+    )
+
+
 class MaterialsMiddleware(AgentMiddleware):
-    """Registry 子系统的统一中间件（P2 出口签发 + P3 Capture 准入/转存；台账自 P4 起加）。"""
+    """Registry 子系统的统一中间件（P2 出口签发 + P3 Capture 准入/转存 + P4 台账注入）。"""
+
+    def _inject_ledger(self, request: ModelRequest) -> ModelRequest | None:
+        """读 state.materials 渲染台账，作为 hidden current-turn 消息追加进 request override。
+
+        只活在流向模型的 ``request``，不返回 state 更新 → **不写回 history**（每轮自动重建）。
+        空台账 → None（原样放行）。追加在末尾＝最新上下文，紧贴模型生成。
+        """
+        state = getattr(request, "state", None)
+        materials = state.get("materials") if isinstance(state, dict) else None
+        msg = _build_ledger_message(materials)
+        if msg is None:
+            return None
+        return request.override(messages=[*request.messages, msg])
+
+    @override
+    def wrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]) -> ModelResponse:
+        prepared = self._inject_ledger(request)
+        return handler(prepared if prepared is not None else request)
+
+    @override
+    async def awrap_model_call(self, request: ModelRequest, handler: Callable[[ModelRequest], Awaitable[ModelResponse]]) -> ModelResponse:
+        prepared = self._inject_ledger(request)
+        return await handler(prepared if prepared is not None else request)
 
     async def _capture(self, result: ToolMessage | Command, *, policy: CapturePolicy, materials: dict[str, Material], thread_id: str) -> Command | None:
         """工具产物 Capture：rehost/register + 双轨改写。无可捕获产物 → None（原样放行）。
