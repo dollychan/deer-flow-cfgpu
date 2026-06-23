@@ -39,6 +39,7 @@ from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
+from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import AgentConfig, load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
@@ -356,17 +357,13 @@ def build_middlewares(
     if resolved_app_config.memory.enabled:
         middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
 
-    # Add the vision middleware only if the current model supports vision.
+    # Add the vision middleware only if the current model supports vision (deerflow original).
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
-    # P8 (materials §4.7): AnalyseImageMiddleware is now the SOLE vision injector — ViewImageMiddleware
-    # is retired from the gate (single-turn ephemeral base64 replaces view_image's multi-turn
-    # resident injection, killing the token re-pay + final_state.messages leak). Independent of
-    # MaterialsMiddleware (§5 "P9 不并入"): tool-triggered, vision-gated, heavy pixel payload.
+    # Image *analysis* for a text-only lead is delegated to the cfgpu MCP `understand_vision`
+    # tool (materials §4.7, paradigm C) — no deerflow-side analysis middleware/tool.
     model_config = resolved_app_config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
-        from deerflow.agents.middlewares.analyse_image_middleware import AnalyseImageMiddleware
-
-        middlewares.append(AnalyseImageMiddleware())
+        middlewares.append(ViewImageMiddleware())
 
     # Hide deferred tool schemas from model binding until tool_search promotes them.
     # The deferred set + catalog hash come from the build-time setup (assembled

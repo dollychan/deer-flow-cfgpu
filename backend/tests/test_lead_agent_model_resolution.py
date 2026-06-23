@@ -335,9 +335,7 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
         app_config=app_config,
     )
 
-    from deerflow.agents.middlewares.analyse_image_middleware import AnalyseImageMiddleware
-
-    assert any(isinstance(m, AnalyseImageMiddleware) for m in middlewares)
+    assert any(isinstance(m, lead_agent_module.ViewImageMiddleware) for m in middlewares)
     # verify the custom middleware is injected before ClarificationMiddleware.
     # The director-agent chain inserts HumanApproval / UninterruptibleTool /
     # RuntimeConfig / MessageStream (and Safety) after the custom middleware, so it

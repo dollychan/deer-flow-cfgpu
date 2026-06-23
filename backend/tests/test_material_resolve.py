@@ -175,6 +175,28 @@ def test_list_args_resolved(fake_oss):
     assert all(u.startswith("https://oss.test/") for u in out)
 
 
+def test_understand_vision_images_and_video_resolved(fake_oss):
+    """Paradigm C (materials §4.7): vision analysis is the cfgpu MCP `understand_vision` tool.
+
+    The lead passes only material ids; this seam (cfgpu_* prefix) signs `images` (list) and
+    `video` (scalar) to URLs before the call reaches the MCP, and the prose `prompt` is untouched.
+    The MCP owns model selection + base64 — no deerflow-side analysis tool exists.
+    """
+    materials = {
+        "m1": _img("oss_path", "agent-artifacts/t1/a.png"),
+        "m2": {"id": "m2", "kind": "video", "origin": "generate", "ref_type": "global_url", "ref": "https://third.cdn/clip.mp4"},
+    }
+    handler, box = _capturing_handler()
+    MaterialsMiddleware().wrap_tool_call(
+        _request({"prompt": "describe m1 and m2", "images": ["m1"], "video": "m2"}, materials, name="cfgpu_understand_vision"),
+        handler,
+    )
+    args = box["req"].tool_call["args"]
+    assert args["images"] == ["https://oss.test/agent-artifacts/t1/a.png?Signature=SIG"]
+    assert args["video"] == "https://third.cdn/clip.mp4"
+    assert args["prompt"] == "describe m1 and m2"  # prose 整段不碰
+
+
 # --- 安全护栏：presigned 只活在 request，不回灌下行 content/.artifact --------
 
 

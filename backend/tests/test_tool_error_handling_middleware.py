@@ -5,11 +5,11 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphInterrupt
 
-from deerflow.agents.middlewares.analyse_image_middleware import AnalyseImageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
     ToolErrorHandlingMiddleware,
     build_subagent_runtime_middlewares,
 )
+from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.config.app_config import AppConfig, CircuitBreakerConfig
 from deerflow.config.guardrails_config import GuardrailsConfig
 from deerflow.config.model_config import ModelConfig
@@ -228,31 +228,31 @@ async def test_awrap_tool_call_reraises_graph_interrupt():
         await middleware.awrap_tool_call(req, _interrupt)
 
 
-def test_subagent_runtime_middlewares_include_analyse_image_for_vision_model(monkeypatch):
+def test_subagent_runtime_middlewares_include_view_image_for_vision_model(monkeypatch):
     app_config = _make_app_config(supports_vision=True)
     _stub_runtime_middleware_imports(monkeypatch)
 
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
 
-    assert any(isinstance(middleware, AnalyseImageMiddleware) for middleware in middlewares)
+    assert any(isinstance(middleware, ViewImageMiddleware) for middleware in middlewares)
 
 
-def test_subagent_runtime_middlewares_include_analyse_image_for_default_vision_model(monkeypatch):
+def test_subagent_runtime_middlewares_include_view_image_for_default_vision_model(monkeypatch):
     app_config = _make_app_config(supports_vision=True)
     _stub_runtime_middleware_imports(monkeypatch)
 
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name=None)
 
-    assert any(isinstance(middleware, AnalyseImageMiddleware) for middleware in middlewares)
+    assert any(isinstance(middleware, ViewImageMiddleware) for middleware in middlewares)
 
 
-def test_subagent_runtime_middlewares_skip_analyse_image_for_text_model(monkeypatch):
+def test_subagent_runtime_middlewares_skip_view_image_for_text_model(monkeypatch):
     app_config = _make_app_config(supports_vision=False)
     _stub_runtime_middleware_imports(monkeypatch)
 
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
 
-    assert not any(isinstance(middleware, AnalyseImageMiddleware) for middleware in middlewares)
+    assert not any(isinstance(middleware, ViewImageMiddleware) for middleware in middlewares)
 
 
 def test_subagent_runtime_middlewares_attach_deferred_filter_when_setup_has_names(monkeypatch):
