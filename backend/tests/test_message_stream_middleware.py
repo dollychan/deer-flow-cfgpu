@@ -100,9 +100,9 @@ class TestTruncate:
 
 class TestResolveVisibility:
     def test_metadata_wins(self):
-        mw = _middleware(visibility_patterns=[("present_urls", "progress")])
+        mw = _middleware(visibility_patterns=[("present_files", "progress")])
         # metadata says artifact, pattern says progress → metadata wins
-        assert mw._resolve_visibility(_tool("present_urls", "artifact"), "present_urls") == "artifact"
+        assert mw._resolve_visibility(_tool("present_files", "artifact"), "present_files") == "artifact"
 
     def test_pattern_fallback_when_no_metadata(self):
         mw = _middleware(visibility_patterns=[("cfgpu_generate_*", "progress")])
@@ -198,10 +198,10 @@ class TestWrapModelCallSync:
             content="working",
             tool_calls=[
                 {"id": "tc_1", "name": "bash", "args": {}},          # internal (default)
-                {"id": "tc_2", "name": "present_urls", "args": {}},  # artifact (metadata)
+                {"id": "tc_2", "name": "present_files", "args": {}},  # artifact (metadata)
             ],
         )
-        req = _model_request(tools=[_tool("bash"), _tool("present_urls", "artifact")])
+        req = _model_request(tools=[_tool("bash"), _tool("present_files", "artifact")])
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
@@ -357,9 +357,9 @@ class TestWrapToolCallSync:
         from langgraph.types import Command
         mw = _middleware()
         items = [{"ref": "https://cdn.cfgpu.com/gen/hero.png", "kind": "url", "expires_at": None}]
-        tm = _tool_msg(content="Successfully presented URLs", name="present_urls", tool_call_id="tc_p", artifact={"items": items})
+        tm = _tool_msg(content="Successfully presented URLs", name="present_files", tool_call_id="tc_p", artifact={"items": items})
         cmd = Command(update={"artifacts": ["https://cdn.cfgpu.com/gen/hero.png"], "messages": [tm]})
-        req = _tool_request(_tool("present_urls", "artifact"))
+        req = _tool_request(_tool("present_files", "artifact"))
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
@@ -370,7 +370,7 @@ class TestWrapToolCallSync:
         assert len(captured) == 1
         evt = captured[0]
         assert evt["type"] == "artifact"
-        assert evt["name"] == "present_urls"
+        assert evt["name"] == "present_files"
         assert evt["tool_call_id"] == "tc_p"
         assert evt["items"] == items
         assert evt["status"] == "success"
@@ -379,9 +379,9 @@ class TestWrapToolCallSync:
         """An artifact tool that errors (no artifact payload) surfaces as tool_result."""
         from langgraph.types import Command
         mw = _middleware()
-        tm = _tool_msg(content="Error: urls and expires_at_list must have the same length", name="present_urls", status="success")
+        tm = _tool_msg(content="Error: urls and expires_at_list must have the same length", name="present_files", status="success")
         cmd = Command(update={"messages": [tm]})
-        req = _tool_request(_tool("present_urls", "artifact"))
+        req = _tool_request(_tool("present_files", "artifact"))
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:

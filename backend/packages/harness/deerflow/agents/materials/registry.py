@@ -118,6 +118,26 @@ def register(
     return mid, {mid: mat}
 
 
+def project_display_refs(materials: dict[str, Material] | None) -> list[str]:
+    """artifacts 投影（§4.6, P8/D8）：取 ``display=true`` 子集的**稳定 ref**，按 id 升序去重。
+
+    交付物投影出口之一（非流式 result.final_state，由 consumer 注入）。返回 ``Material.ref``
+    （oss_path→object_key / global_url→url），**绝不 presigned、绝不含 id**——wire `artifacts`
+    一贯是稳定 ref 的 list。registry（dict）本体绝不下行（I8，consumer 显式 strip ``materials`` 键）。
+    """
+    if not materials:
+        return []
+    ordered = sorted(materials.values(), key=lambda m: int(str(m.get("id", "m0"))[1:]) if str(m.get("id", "m0"))[1:].isdigit() else 0)
+    refs: list[str] = []
+    for mat in ordered:
+        if not mat.get("display"):
+            continue
+        ref = mat.get("ref")
+        if ref and ref not in refs:
+            refs.append(ref)
+    return refs
+
+
 def resolve_or_register(
     materials: dict[str, Material] | None,
     raw: str,

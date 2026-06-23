@@ -7,6 +7,7 @@
 from deerflow.agents.materials.registry import (
     build_reverse_index,
     classify_ref,
+    project_display_refs,
     register,
     resolve_or_register,
     stable_ref,
@@ -118,3 +119,37 @@ def test_resolve_miss_then_hit_same_batch():
     mid2, up2 = resolve_or_register(materials, _THIRD, kind="image")
     assert mid1 == mid2 == "m1"
     assert up2 == {}  # 第二次去重命中
+
+
+# --- project_display_refs (P8/D8 §4.6 投影) ---------------------------------
+
+
+def _mat(mid, ref, *, ref_type="oss_path", display=None):
+    m = {"id": mid, "kind": "image", "origin": "generate", "ref_type": ref_type, "ref": ref}
+    if display is not None:
+        m["display"] = display
+    return m
+
+
+def test_project_display_refs_only_display_true_in_id_order():
+    materials = {
+        "m2": _mat("m2", "agent-artifacts/t/b.png", display=True),
+        "m1": _mat("m1", "agent-artifacts/t/a.png", display=True),
+        "m3": _mat("m3", "agent-artifacts/t/c.png"),  # 非交付物（无 display）→ 不投影
+        "m4": _mat("m4", "agent-artifacts/t/d.png", display=False),  # 显式 false → 不投影
+    }
+    assert project_display_refs(materials) == ["agent-artifacts/t/a.png", "agent-artifacts/t/b.png"]
+
+
+def test_project_display_refs_dedup_and_global_url():
+    materials = {
+        "m1": _mat("m1", "https://cdn/x.png", ref_type="global_url", display=True),
+        "m2": _mat("m2", "https://cdn/x.png", ref_type="global_url", display=True),  # 同 ref → 去重
+    }
+    assert project_display_refs(materials) == ["https://cdn/x.png"]
+
+
+def test_project_display_refs_empty():
+    assert project_display_refs(None) == []
+    assert project_display_refs({}) == []
+    assert project_display_refs({"m1": _mat("m1", "k")}) == []  # 全无 display

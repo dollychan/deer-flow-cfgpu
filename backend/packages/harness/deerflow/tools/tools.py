@@ -6,7 +6,7 @@ from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
-from deerflow.tools.builtins import analyse_image_tool, ask_clarification_tool, present_file_tool, present_urls_tool, stage_material_tool, task_tool, view_image_tool
+from deerflow.tools.builtins import analyse_image_tool, ask_clarification_tool, present_file_tool, stage_material_tool, task_tool
 from deerflow.tools.mcp_metadata import tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 
@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 BUILTIN_TOOLS = [
     present_file_tool,
-    present_urls_tool,
     stage_material_tool,
     ask_clarification_tool,
 ]
@@ -110,15 +109,14 @@ def get_available_tools(
     if model_name is None and config.models:
         model_name = config.models[0].name
 
-    # Add vision tools only if the model supports vision. analyse_image (P9, materials
-    # subsystem) is added alongside view_image: it is the id-based, multi-image, single-turn
-    # ephemeral evolution wired to AnalyseImageMiddleware; view_image stays bound until its
-    # retirement (deferred with the P8 breaking cleanup). See cfgpu-docs/materials.md §4.7.
+    # Add the vision tool only if the model supports vision. P8 (materials §4.7): analyse_image
+    # (id-based, multi-image, single-turn ephemeral; wired to AnalyseImageMiddleware) is now the
+    # SOLE vision tool — view_image is retired from the gate (its code stays for any external
+    # caller, just not bound here). This is our fork's deliberate swap; no config toggle.
     model_config = config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
-        builtin_tools.append(view_image_tool)
         builtin_tools.append(analyse_image_tool)
-        logger.info(f"Including view_image_tool + analyse_image_tool for model '{model_name}' (supports_vision=True)")
+        logger.info(f"Including analyse_image_tool for model '{model_name}' (supports_vision=True)")
 
     # Get cached MCP tools if enabled
     # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions

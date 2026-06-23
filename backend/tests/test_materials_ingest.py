@@ -4,7 +4,7 @@
 保留整个 url[]、id 形态、human text url 不扫描、materials 经 graph_input seed。
 """
 
-from app.consumer.agent_runner import _normalize_messages
+from app.consumer.agent_runner import _normalize_messages, _project_materials_into_artifacts
 from app.consumer.schemas import ContentItem, UserMessage
 
 
@@ -96,3 +96,44 @@ def test_uplink_object_key_is_oss_path():
     msg = UserMessage(role="user", content=[ContentItem(type="image_url", url=["agent-artifacts/t1/images/hero.png"])])
     gi = _normalize_messages([msg])
     assert gi["materials"]["m1"]["ref_type"] == "oss_path"
+
+
+# --- result 接缝投影（P8/D8 §4.6）---------------------------------------------
+
+
+def _disp(mid, ref, ref_type="oss_path"):
+    return {"id": mid, "kind": "image", "origin": "generate", "ref_type": ref_type, "ref": ref, "display": True}
+
+
+def test_seam_unions_present_artifacts_with_display_projection():
+    """present_file 写的 artifacts channel ∪ materials.display 投影（去重），materials 键剔除。"""
+    materials = {
+        "m1": _disp("m1", "agent-artifacts/t/gen.png"),  # 生成媒体（Capture，只在 materials）
+        "m2": {"id": "m2", "kind": "image", "origin": "generate", "ref_type": "oss_path", "ref": "agent-artifacts/t/mid.png"},  # 中间产物，非交付
+    }
+    fsd = {"artifacts": ["agent-artifacts/t/local.png"], "materials": materials, "messages": []}
+    _project_materials_into_artifacts(fsd, {"artifacts": ["agent-artifacts/t/local.png"], "materials": materials})
+    assert fsd["artifacts"] == ["agent-artifacts/t/local.png", "agent-artifacts/t/gen.png"]  # union，中间产物 m2 不入
+    assert "materials" not in fsd  # registry 不下行（I8）
+
+
+def test_seam_dedup_when_present_and_display_overlap():
+    materials = {"m1": _disp("m1", "agent-artifacts/t/x.png")}
+    fsd = {"artifacts": ["agent-artifacts/t/x.png"], "materials": materials}
+    _project_materials_into_artifacts(fsd, {"artifacts": ["agent-artifacts/t/x.png"], "materials": materials})
+    assert fsd["artifacts"] == ["agent-artifacts/t/x.png"]  # 同 ref 不重复
+
+
+def test_seam_strips_materials_even_without_display():
+    """无 display 投影也必须剔除 materials 键（防 blanket-dump 泄漏 registry）。"""
+    fsd = {"materials": {"m1": {"id": "m1", "kind": "image", "origin": "generate", "ref_type": "oss_path", "ref": "k"}}, "title": "x"}
+    _project_materials_into_artifacts(fsd, {"materials": fsd["materials"]})
+    assert "materials" not in fsd
+    assert "artifacts" not in fsd  # 无 display 投影 + 原无 artifacts → 不凭空造
+
+
+def test_seam_noop_when_no_materials():
+    fsd = {"artifacts": ["a"], "messages": []}
+    _project_materials_into_artifacts(fsd, {"artifacts": ["a"]})
+    assert fsd["artifacts"] == ["a"]
+    assert "materials" not in fsd

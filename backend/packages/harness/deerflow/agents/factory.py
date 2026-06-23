@@ -171,7 +171,7 @@ def _assemble_from_features(
       7.   TodoMiddleware (plan_mode parameter)
       8.   TitleMiddleware (auto_title feature)
       9.   MemoryMiddleware (memory feature)
-      10.  ViewImageMiddleware (vision feature)
+      10.  AnalyseImageMiddleware (vision feature)
       11.  SubagentLimitMiddleware (subagent feature)
       12.  LoopDetectionMiddleware (loop_detection feature)
       13.  ClarificationMiddleware (always last)
@@ -247,18 +247,21 @@ def _assemble_from_features(
             chain.append(MemoryMiddleware(agent_name=name))
 
     # --- [10] Vision ---
+    # P8 (materials §4.7): analyse_image (id-based, single-turn ephemeral; AnalyseImageMiddleware)
+    # is the sole vision path — view_image retired from the gate. A caller-supplied custom vision
+    # middleware (feat.vision is an AgentMiddleware) still wins.
     if feat.vision is not False:
         if isinstance(feat.vision, AgentMiddleware):
             chain.append(feat.vision)
         else:
-            from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+            from deerflow.agents.middlewares.analyse_image_middleware import AnalyseImageMiddleware
 
-            chain.append(ViewImageMiddleware())
+            chain.append(AnalyseImageMiddleware())
 
         if feat.sandbox is not False:
-            from deerflow.tools.builtins import view_image_tool
+            from deerflow.tools.builtins import analyse_image_tool
 
-            extra_tools.append(view_image_tool)
+            extra_tools.append(analyse_image_tool)
 
     # --- [11] Subagent ---
     if feat.subagent is not False:

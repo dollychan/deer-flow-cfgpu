@@ -27,19 +27,18 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
+from deerflow.agents.materials.summarization import MaterialsSummarizationMiddleware
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
-from deerflow.agents.materials.summarization import MaterialsSummarizationMiddleware
 from deerflow.agents.middlewares.summarization_middleware import BeforeSummarizationHook, DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
-from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.agents_config import AgentConfig, load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
@@ -327,14 +326,10 @@ def build_middlewares(
     if resolved_app_config.mlm.enabled:
         middlewares.append(MlmMiddleware(agent_name=agent_name))
 
-    # Deterministically repair stale/cross-object presigned URLs in tool-call args
-    # (e.g. a bash `curl` whose URL kept the correct object path but borrowed another
-    # object's Expires/Signature after summarization). Matches by object identity
-    # (scheme+host+path, query ignored) against the authoritative ThreadState.artifacts
-    # and rewrites to the correct full URL. See the middleware docstring for details.
-    from deerflow.agents.middlewares.artifact_url_guard_middleware import ArtifactUrlGuardMiddleware
-
-    middlewares.append(ArtifactUrlGuardMiddleware())
+    # P8 (materials §4.3): ArtifactUrlGuardMiddleware retired — MaterialsMiddleware._resolve_outgate
+    # (out-gate signing) supersedes it. The model never holds presigned URLs to corrupt: cfgpu tool
+    # args carry material ids, signed just-in-time at the out-gate; stale/truncated refs are rejected
+    # with an error ToolMessage rather than billed. No stale-URL repair is needed.
 
     # Add summarization middleware if enabled
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
@@ -361,17 +356,16 @@ def build_middlewares(
     if resolved_app_config.memory.enabled:
         middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
 
-    # Add vision middlewares only if the current model supports vision.
+    # Add the vision middleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
-    # AnalyseImageMiddleware (P9, materials subsystem) is the single-turn ephemeral injector for
-    # the analyse_image tool, added alongside ViewImageMiddleware (the latter retires with the P8
-    # breaking cleanup). It is INDEPENDENT of MaterialsMiddleware (§5 "P9 不并入"): tool-triggered,
-    # vision-gated, heavy pixel payload. See cfgpu-docs/materials.md §4.7.
+    # P8 (materials §4.7): AnalyseImageMiddleware is now the SOLE vision injector — ViewImageMiddleware
+    # is retired from the gate (single-turn ephemeral base64 replaces view_image's multi-turn
+    # resident injection, killing the token re-pay + final_state.messages leak). Independent of
+    # MaterialsMiddleware (§5 "P9 不并入"): tool-triggered, vision-gated, heavy pixel payload.
     model_config = resolved_app_config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
         from deerflow.agents.middlewares.analyse_image_middleware import AnalyseImageMiddleware
 
-        middlewares.append(ViewImageMiddleware())
         middlewares.append(AnalyseImageMiddleware())
 
     # Hide deferred tool schemas from model binding until tool_search promotes them.
@@ -452,9 +446,8 @@ def build_middlewares(
     # (dangling id / summarization-truncated url) residue with an error ToolMessage instead of
     # billing cfgpu on a corrupt ref. Appended AFTER MessageStreamMiddleware so it is the INNER
     # layer on the wrap_tool_call onion: _resolve_outgate sees the final args and (from P3)
-    # _capture stabilizes the ToolMessage before MessageStream emits. ArtifactUrlGuardMiddleware
-    # stays registered (outer) until P8 — harmless coexistence (ids carry no http for the guard
-    # to touch; both deterministically fix our-object URLs).
+    # _capture stabilizes the ToolMessage before MessageStream emits. (P8: ArtifactUrlGuardMiddleware
+    # removed — _resolve_outgate out-gate signing supersedes it; the model never holds presigned URLs.)
     from deerflow.agents.materials.middleware import MaterialsMiddleware
 
     middlewares.append(MaterialsMiddleware())

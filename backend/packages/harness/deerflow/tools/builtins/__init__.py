@@ -5,7 +5,6 @@
 from .clarification_tool import ask_clarification_tool  # noqa: I001
 from .analyse_image_tool import analyse_image_tool
 from .present_file_tool import present_file_tool
-from .present_urls_tool import present_urls_tool
 from .setup_agent_tool import setup_agent
 from .stage_material_tool import stage_material_tool
 from .task_tool import task_tool
@@ -17,7 +16,6 @@ __all__ = [
     "setup_agent",
     "update_agent",
     "present_file_tool",
-    "present_urls_tool",
     "stage_material_tool",
     "ask_clarification_tool",
     "view_image_tool",

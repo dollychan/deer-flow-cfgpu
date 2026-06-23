@@ -30,7 +30,7 @@ from app.consumer.constants import ProcessedStatus, QueuePolicy
 from app.consumer.run_registry import ClaimedRun, RunRegistry
 from app.consumer.schemas import ContentItem, TaskMessage, UserMessage
 from app.consumer.stream_bridge.mq import MQStreamBridge
-from deerflow.agents.materials.registry import resolve_or_register
+from deerflow.agents.materials.registry import project_display_refs, resolve_or_register
 from deerflow.agents.materials.types import Material
 from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
 from deerflow.config.app_config import AppConfig, get_app_config
@@ -57,6 +57,7 @@ class _ConsumerUser:
     """
 
     id: str
+
 
 # LangGraph's RESUME pending-write channel (== langgraph.constants.RESUME). Hardcoded to
 # the stable channel name so fork_init does not import the now-private constant (§7.4).
@@ -331,9 +332,7 @@ class AgentRunner:
             stream_input = _normalize_messages(message.messages or [])
 
         rc = message.reply_config
-        stream_mode: list[str] = (
-            rc.stream_event_types if rc.stream_events and rc.stream_event_types else ["custom"]
-        )
+        stream_mode: list[str] = rc.stream_event_types if rc.stream_events and rc.stream_event_types else ["custom"]
         # Add "updates" as an internal-only super-step boundary signal for cooperative
         # cancel (BUG-009 / cancel.md §4.3). It fires once per completed super-step — the
         # only point where no node is in flight and the just-committed step (incl. a
@@ -350,9 +349,7 @@ class AgentRunner:
         # from state). Finalizing here flushes *this* run's pending write without forcing
         # global durability="sync" (which would serialize every super-step of every run).
         # Normal completion exhausts the generator first, so the flush is then a no-op.
-        async with aclosing(
-            agent.astream(stream_input, config=runnable_config, stream_mode=effective_stream_mode)
-        ) as agen:
+        async with aclosing(agent.astream(stream_input, config=runnable_config, stream_mode=effective_stream_mode)) as agen:
             async for mode, chunk in agen:
                 if mode == "updates":
                     # Super-step boundary. If a cancel was folded while a shielded tool was
@@ -436,6 +433,8 @@ class AgentRunner:
                 final_state_data = serialize_channel_values(dict(final_state.values or {}))
             except Exception:
                 logger.debug("Run %s: could not serialize final state", run_id, exc_info=True)
+            else:
+                _project_materials_into_artifacts(final_state_data, final_state.values or {})
 
         await self._bridge.publish_result(
             run_id,
@@ -479,9 +478,7 @@ class AgentRunner:
             if pending_ids:
                 from langgraph.types import Command as LGCommand
 
-                approvals = {
-                    tid: {"status": "rejected", "reason": "cancelled"} for tid in pending_ids
-                }
+                approvals = {tid: {"status": "rejected", "reason": "cancelled"} for tid in pending_ids}
                 async for _mode, _chunk in agent.astream(
                     LGCommand(update={"tool_approvals": approvals}),
                     config=runnable_config,
@@ -521,9 +518,7 @@ class AgentRunner:
             src_cfg["configurable"]["checkpoint_id"] = message.fork_checkpoint_id
         src = await self._checkpointer.aget_tuple(src_cfg)
         if src is None:
-            raise RuntimeError(
-                f"fork parent checkpoint not found: {parent}@{message.fork_checkpoint_id}"
-            )
+            raise RuntimeError(f"fork parent checkpoint not found: {parent}@{message.fork_checkpoint_id}")
 
         clean = [w for w in (src.pending_writes or []) if w[1] != _RESUME_CHANNEL]
         await self._checkpointer.aput(new_cfg, src.checkpoint, src.metadata, {})
@@ -604,8 +599,7 @@ class AgentRunner:
             context["user_id"] = message.user_id
         if message.project_id:
             context["project_id"] = message.project_id
-        for key in ("agent_name", "thinking_enabled", "is_plan_mode", "ask",
-                    "web_search_enabled", "model_name", "subagent_enabled", "reasoning_effort"):
+        for key in ("agent_name", "thinking_enabled", "is_plan_mode", "ask", "web_search_enabled", "model_name", "subagent_enabled", "reasoning_effort"):
             if configurable.get(key) is not None:
                 context[key] = configurable[key]
         # Consumed per-run by RuntimeConfigMiddleware: config.models constrains cfgpu generate
@@ -920,6 +914,26 @@ def _is_empty_message_chunk(chunk: Any) -> bool:
     if getattr(msg, "tool_calls", None):
         return False
     return True
+
+
+def _project_materials_into_artifacts(final_state_data: dict[str, Any], raw_values: dict[str, Any]) -> None:
+    """result 接缝投影（cfgpu-docs/materials.md §4.6, P8/D8）：原地改写 ``final_state_data``。
+
+    - **注入**：把 ``materials`` 的 ``display=true`` 子集投影成稳定 ref，**并入** ``artifacts``
+      （**union** 而非替换——present_file（deerflow 原生）仍直写 ``artifacts`` channel 装本地交付物，
+      生成媒体走 Capture 只进 ``materials.display``；二者并集才是客户端完整交付视图，去重保序）。
+    - **剔除**：删 ``materials`` 键——内部 registry（全集 dict）绝不下行（I8），方向 fail-safe
+      （``artifacts`` 只由投影显式构造，registry 不会 blanket-dump 泄漏）。
+
+    wire 契约 ``final_state.artifacts`` 仍是稳定 ref 的 list，形态不变 → MQ 协议无需改。
+    """
+    projected = project_display_refs(raw_values.get("materials"))
+    if projected:
+        existing = final_state_data.get("artifacts")
+        existing = list(existing) if isinstance(existing, list) else []
+        merged = existing + [ref for ref in projected if ref not in existing]
+        final_state_data["artifacts"] = merged
+    final_state_data.pop("materials", None)
 
 
 # 上行结构化媒体 ContentItem.type → Material.kind（cfgpu-docs/materials.md §4.1）。

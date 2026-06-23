@@ -223,10 +223,8 @@ def build_subagent_runtime_middlewares(
     model_config = app_config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
         from deerflow.agents.middlewares.analyse_image_middleware import AnalyseImageMiddleware
-        from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 
-        # analyse_image (P9) single-turn ephemeral injector, alongside view_image (retires with P8).
-        middlewares.append(ViewImageMiddleware())
+        # P8 (materials §4.7): AnalyseImageMiddleware is the sole vision injector; view_image retired from the gate.
         middlewares.append(AnalyseImageMiddleware())
 
     # Hide deferred (MCP) tool schemas from the subagent's model binding until

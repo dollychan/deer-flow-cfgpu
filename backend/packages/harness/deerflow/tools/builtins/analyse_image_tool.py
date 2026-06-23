@@ -135,5 +135,5 @@ async def analyse_image_tool(
 # Client-facing visibility: analyse_image is an INPUT step — it only signals the middleware
 # to inject pixels for the model (vision) and returns a tiny id-only ToolMessage with no
 # deliverable artifact. Mark internal so MessageStreamMiddleware emits no tool_result event
-# (mirrors view_image; output-side delivery stays with present_files / present_urls).
+# (mirrors view_image; output-side delivery stays with present_files / materials Capture).
 analyse_image_tool.metadata = {"visibility": "internal"}
