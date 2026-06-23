@@ -215,14 +215,14 @@ class MessageStreamMiddleware(AgentMiddleware):
 
         The on-wire ``content`` is *always* an object so the client never has to guess
         whether to parse it:
-          - JSON object  → used as-is (e.g. cfgpu generate_*/task_* flat result, error dict).
+          - JSON object  → used as-is (e.g. cfdream generate_*/task_* flat result, error dict).
           - JSON array   → wrapped as ``{"items": [...]}`` (e.g. list_models).
           - anything else (prose, markdown, non-JSON) → ``{"message": <text>}``.
 
         ``max_content_chars`` stays the size gate: structured parsing only applies when the
         raw JSON text fits the limit, otherwise the result degrades to a truncated
         ``{"message": ...}``. This keeps the MQ message-size guard intact while still
-        delivering structure for the common (small) case — cfgpu media results are tiny.
+        delivering structure for the common (small) case — cfdream media results are tiny.
 
         A tool that needs to report token cost adds a ``usage`` key inside its own result
         payload (it lands in the JSON object here); the middleware does not synthesise one.

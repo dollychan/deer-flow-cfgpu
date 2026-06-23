@@ -2,7 +2,7 @@
 
 把 agent 在沙盒里造出的本地文件（``/mnt/user-data/*``）登记进素材注册表：rehost 到我方 OSS →
 ``object_key``，登记 ``origin=local`` 的 oss_path material，回 **id 形态** ToolMessage（零 url，I3）。
-此后该文件可用 material id（如 m7）在 cfgpu 工具入参里引用，出口由 MaterialResolve 现签。
+此后该文件可用 material id（如 m7）在 cfdream 工具入参里引用，出口由 MaterialResolve 现签。
 
 bash 产物无自动准入（§11 缺口⑤，按设计）——本工具是 agent 把本地产物显式入册的唯一入口；
 present_files 只投影交付物、不进注册表，二者职责不同。重复 stage 同一文件经 ``rehost_local_file``

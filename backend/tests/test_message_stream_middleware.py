@@ -105,8 +105,8 @@ class TestResolveVisibility:
         assert mw._resolve_visibility(_tool("present_files", "artifact"), "present_files") == "artifact"
 
     def test_pattern_fallback_when_no_metadata(self):
-        mw = _middleware(visibility_patterns=[("cfgpu_generate_*", "progress")])
-        assert mw._resolve_visibility(_tool("cfgpu_generate_image"), "cfgpu_generate_image") == "progress"
+        mw = _middleware(visibility_patterns=[("cfdream_generate_*", "progress")])
+        assert mw._resolve_visibility(_tool("cfdream_generate_image"), "cfdream_generate_image") == "progress"
 
     def test_first_pattern_wins(self):
         mw = _middleware(visibility_patterns=[("web_*", "progress"), ("*", "artifact")])
@@ -393,11 +393,11 @@ class TestWrapToolCallSync:
         assert "Error" in captured[0]["content"]["message"]
 
     def test_json_object_content_passes_through(self):
-        """A tool whose content is a JSON object (e.g. cfgpu generate_image) is emitted as-is."""
+        """A tool whose content is a JSON object (e.g. cfdream generate_image) is emitted as-is."""
         mw = _middleware()
         payload = {"urls": ["https://cdn.cfgpu.com/img-abc.png"], "task_id": "task-1", "cost_tokens": 100, "artifact": True}
-        tm = _tool_msg(content=json.dumps(payload), name="cfgpu_generate_image", tool_call_id="tc_g")
-        req = _tool_request(_tool("cfgpu_generate_image", "progress"))
+        tm = _tool_msg(content=json.dumps(payload), name="cfdream_generate_image", tool_call_id="tc_g")
+        req = _tool_request(_tool("cfdream_generate_image", "progress"))
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
@@ -410,8 +410,8 @@ class TestWrapToolCallSync:
         """A tool whose content is a JSON array (e.g. list_models) is wrapped as {"items": [...]}."""
         mw = _middleware()
         models = [{"adapter_id": "wan-2-0-fast"}, {"adapter_id": "doubao-seedream"}]
-        tm = _tool_msg(content=json.dumps(models), name="cfgpu_list_models", tool_call_id="tc_l")
-        req = _tool_request(_tool("cfgpu_list_models", "progress"))
+        tm = _tool_msg(content=json.dumps(models), name="cfdream_list_models", tool_call_id="tc_l")
+        req = _tool_request(_tool("cfdream_list_models", "progress"))
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
@@ -423,8 +423,8 @@ class TestWrapToolCallSync:
     def test_oversized_json_degrades_to_message(self):
         """JSON beyond max_content_chars degrades to a truncated message object (MQ size guard)."""
         mw = _middleware(max_content_chars=20)
-        tm = _tool_msg(content=json.dumps({"k": "v" * 100}), name="cfgpu_generate_image", tool_call_id="tc_b")
-        req = _tool_request(_tool("cfgpu_generate_image", "progress"))
+        tm = _tool_msg(content=json.dumps({"k": "v" * 100}), name="cfdream_generate_image", tool_call_id="tc_b")
+        req = _tool_request(_tool("cfdream_generate_image", "progress"))
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:

@@ -110,10 +110,10 @@ def get_available_tools(
         model_name = config.models[0].name
 
     # Add view_image_tool only if the lead model supports vision (deerflow original gate).
-    # Image *analysis* for a text-only lead (e.g. GLM5) is delegated entirely to the cfgpu MCP
-    # `understand_vision` tool (surfaced as `cfgpu_understand_vision`): material ids in its
+    # Image *analysis* for a text-only lead (e.g. GLM5) is delegated entirely to the cfdream MCP
+    # `understand_vision` tool (surfaced as `cfdream_understand_vision`): material ids in its
     # `images`/`video` args are resolved to presigned/global URLs by MaterialsMiddleware's
-    # `_resolve_outgate` (cfgpu_* prefix), and the MCP owns model selection + base64 internally,
+    # `_resolve_outgate` (cfdream_* prefix), and the MCP owns model selection + base64 internally,
     # returning a TEXT finding. No deerflow-side analysis tool is bound (materials §4.7, paradigm C).
     model_config = config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:

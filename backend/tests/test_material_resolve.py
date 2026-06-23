@@ -1,8 +1,8 @@
 """P2 — MaterialResolve 出口签发（cfgpu-docs/materials.md §4.3, materials-impl-plan.md P2）。
 
 覆盖 MaterialsMiddleware._resolve_outgate / wrap_tool_call：
-id→presigned、oss_path→presigned、完整 url 透传、截断 url/悬空 id→error 且 cfgpu 未被调用、
-prose 不被篡改、非 cfgpu 工具放行，以及 resolve+capture 合并的安全护栏（presigned 不回灌 content）。
+id→presigned、oss_path→presigned、完整 url 透传、截断 url/悬空 id→error 且 cfdream 未被调用、
+prose 不被篡改、非 cfdream 工具放行，以及 resolve+capture 合并的安全护栏（presigned 不回灌 content）。
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ class FakeRequest:
         return replace(self, **overrides)
 
 
-def _request(args, materials=None, name="cfgpu_edit_image"):
+def _request(args, materials=None, name="cfdream_edit_image"):
     return FakeRequest(
         tool_call={"name": name, "args": args, "id": "tc_1"},
         state={"materials": materials} if materials is not None else {},
@@ -116,29 +116,29 @@ def test_non_our_bare_path_untouched(fake_oss):
     assert box["req"].tool_call["args"]["image"] == "some/other/key.png"
 
 
-# --- error：截断 url / 悬空 id → cfgpu 未被调用 -----------------------------
+# --- error：截断 url / 悬空 id → cfdream 未被调用 -----------------------------
 
 
-def test_unknown_id_errors_without_calling_cfgpu(fake_oss):
+def test_unknown_id_errors_without_calling_cfdream(fake_oss):
     called = {"n": 0}
 
     def handler(_request):
         called["n"] += 1
-        return ToolMessage(content="done", tool_call_id="tc_1", name="cfgpu_edit_image")
+        return ToolMessage(content="done", tool_call_id="tc_1", name="cfdream_edit_image")
 
     out = MaterialsMiddleware().wrap_tool_call(_request({"image": "m99"}, materials={}), handler)
     assert isinstance(out, ToolMessage)
     assert out.status == "error"
     assert "m99" in out.content
-    assert called["n"] == 0  # 解析失败短路，绝不调 cfgpu(计费)
+    assert called["n"] == 0  # 解析失败短路，绝不调 cfdream(计费)
 
 
-def test_truncated_url_errors_without_calling_cfgpu(fake_oss):
+def test_truncated_url_errors_without_calling_cfdream(fake_oss):
     called = {"n": 0}
 
     def handler(_request):
         called["n"] += 1
-        return ToolMessage(content="done", tool_call_id="tc_1", name="cfgpu_edit_image")
+        return ToolMessage(content="done", tool_call_id="tc_1", name="cfdream_edit_image")
 
     out = MaterialsMiddleware().wrap_tool_call(_request({"image": "https://oss.cfgpu.com"}), handler)
     assert isinstance(out, ToolMessage)
@@ -146,7 +146,7 @@ def test_truncated_url_errors_without_calling_cfgpu(fake_oss):
     assert called["n"] == 0
 
 
-# --- prose / 非 cfgpu 工具不被触碰 -----------------------------------------
+# --- prose / 非 cfdream 工具不被触碰 -----------------------------------------
 
 
 def test_prompt_prose_not_corrupted(fake_oss):
@@ -159,7 +159,7 @@ def test_prompt_prose_not_corrupted(fake_oss):
     assert box["req"].tool_call["args"]["image"].startswith("https://oss.test/")
 
 
-def test_non_cfgpu_tool_untouched(fake_oss):
+def test_non_cfdream_tool_untouched(fake_oss):
     materials = {"m1": _img("oss_path", "agent-artifacts/t1/a.png")}
     handler, box = _capturing_handler()
     MaterialsMiddleware().wrap_tool_call(_request({"image": "m1"}, materials, name="bash"), handler)
@@ -176,9 +176,9 @@ def test_list_args_resolved(fake_oss):
 
 
 def test_understand_vision_images_and_video_resolved(fake_oss):
-    """Paradigm C (materials §4.7): vision analysis is the cfgpu MCP `understand_vision` tool.
+    """Paradigm C (materials §4.7): vision analysis is the cfdream MCP `understand_vision` tool.
 
-    The lead passes only material ids; this seam (cfgpu_* prefix) signs `images` (list) and
+    The lead passes only material ids; this seam (cfdream_* prefix) signs `images` (list) and
     `video` (scalar) to URLs before the call reaches the MCP, and the prose `prompt` is untouched.
     The MCP owns model selection + base64 — no deerflow-side analysis tool exists.
     """
@@ -188,7 +188,7 @@ def test_understand_vision_images_and_video_resolved(fake_oss):
     }
     handler, box = _capturing_handler()
     MaterialsMiddleware().wrap_tool_call(
-        _request({"prompt": "describe m1 and m2", "images": ["m1"], "video": "m2"}, materials, name="cfgpu_understand_vision"),
+        _request({"prompt": "describe m1 and m2", "images": ["m1"], "video": "m2"}, materials, name="cfdream_understand_vision"),
         handler,
     )
     args = box["req"].tool_call["args"]
@@ -207,17 +207,17 @@ def test_guardrail_presigned_only_in_request_not_in_result(fake_oss):
 
     def handler(request):
         captured["signed"] = request.tool_call["args"]["image"]
-        # cfgpu 回 ToolMessage：content/.artifact 是产物 object_key，绝不回声入参 presigned
+        # cfdream 回 ToolMessage：content/.artifact 是产物 object_key，绝不回声入参 presigned
         return ToolMessage(
             content="已编辑：agent-artifacts/t1/out.png",
             tool_call_id="tc_1",
-            name="cfgpu_edit_image",
+            name="cfdream_edit_image",
             artifact="agent-artifacts/t1/out.png",
         )
 
     result = MaterialsMiddleware().wrap_tool_call(_request({"image": "m1"}, materials), handler)
 
-    # presigned 确实进了流向 cfgpu 的 request
+    # presigned 确实进了流向 cfdream 的 request
     assert "Signature=SIG" in captured["signed"]
     # 但 P2 post 段不读 request、不回灌：下行 content/.artifact 零 presigned
     assert "Signature" not in result.content
@@ -245,7 +245,7 @@ async def test_awrap_resolves_and_short_circuits(fake_oss):
 
     async def handler(request):
         box["req"] = request
-        return ToolMessage(content="done", tool_call_id="tc_1", name="cfgpu_edit_image")
+        return ToolMessage(content="done", tool_call_id="tc_1", name="cfdream_edit_image")
 
     await MaterialsMiddleware().awrap_tool_call(_request({"image": "m1"}, materials), handler)
     assert box["req"].tool_call["args"]["image"].startswith("https://oss.test/")
@@ -255,7 +255,7 @@ async def test_awrap_resolves_and_short_circuits(fake_oss):
 
     async def handler2(_request):
         called["n"] += 1
-        return ToolMessage(content="x", tool_call_id="tc_1", name="cfgpu_edit_image")
+        return ToolMessage(content="x", tool_call_id="tc_1", name="cfdream_edit_image")
 
     out = await MaterialsMiddleware().awrap_tool_call(_request({"image": "m99"}, materials={}), handler2)
     assert isinstance(out, ToolMessage) and out.status == "error"

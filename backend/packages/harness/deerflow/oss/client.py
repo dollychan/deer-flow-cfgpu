@@ -72,7 +72,7 @@ class OSSClient:
     def upload_bytes(self, object_key: str, data: bytes, content_type: str | None = None) -> str:
         """Upload an in-memory byte payload under ``object_key`` and return its **bare object key**.
 
-        Used by ``OSSUploader.rehost_url`` to re-host a remote (cfgpu temp) URL into our
+        Used by ``OSSUploader.rehost_url`` to re-host a remote (cfdream temp) URL into our
         bucket without staging a local file. Always returns the object_key (NOT a presigned
         URL): materials store the stable object_key and presign at the out-gate (§4.2/§4.3).
         """
@@ -90,7 +90,7 @@ class OSSClient:
         """Always return a presigned GET URL for ``object_key`` (local HMAC, no network IO).
 
         Unlike :meth:`upload_file`'s return value, this **ignores** the ``presigned_url``
-        config toggle: a cfgpu tool consuming the ref needs a fetchable URL regardless of
+        config toggle: a cfdream tool consuming the ref needs a fetchable URL regardless of
         the client-facing ``present_files`` default (BUG-027 deployment split). Used by
         ``MaterialsMiddleware`` out-gate signing (cfgpu-docs/materials.md §4.3).
         """

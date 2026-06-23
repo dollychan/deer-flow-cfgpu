@@ -12,17 +12,17 @@
 洋葱位（§5）：放 MessageStream **内层**（factory 中 append 在 MessageStreamMiddleware 之后
 = wrap_tool_call 洋葱的内层），使 ``_resolve_outgate`` 见最终入参（无人再改 url）、``_capture``
 在 MessageStream emit 前已稳定化。护栏：``_resolve_outgate`` 签发的 presigned 只活在流向
-cfgpu 的 ``request``，``_capture``（P3）只读 ``result.artifact`` 不读 ``request`` → 凭证不
+cfdream 的 ``request``，``_capture``（P3）只读 ``result.artifact`` 不读 ``request`` → 凭证不
 回灌 content（I9）。本类不引用已签 url 做任何下行写入，是单中间件合并 resolve+capture 的安全前提。
 
-P2（出口签发，取代 ArtifactUrlGuard）：``_resolve_outgate`` 扫 cfgpu MCP 工具入参的**整叶
+P2（出口签发，取代 ArtifactUrlGuard）：``_resolve_outgate`` 扫 cfdream MCP 工具入参的**整叶
 引用 token**——material id → 查台账解析 ref；我方 oss_path → 现签 presigned（本地 HMAC）；
 完整第三方 url / asset_url → 原样透传；id 形但台账无 / http 形但非完整 url（summarization
-截断残骸）→ 不静默、不调 cfgpu(计费)，回 error ToolMessage 引导用台账 id 重引用。**只动整叶
+截断残骸）→ 不静默、不调 cfdream(计费)，回 error ToolMessage 引导用台账 id 重引用。**只动整叶
 单 token，带内部空白的 prose（prompt 文本）一律不碰**，避免篡改作者内容。
 
 P3（产物准入⊥转存，取代 present_urls 手动 rehost）：``_capture`` 在 awrap post 段（async-only，
-rehost 是 fetch+upload 网络）按 per-tool policy 三态（policy.py）处理工具产物。**准入信号=cfgpu
+rehost 是 fetch+upload 网络）按 per-tool policy 三态（policy.py）处理工具产物。**准入信号=cfdream
 自声明的顶层 ``artifact: true`` + ``urls``**（result_structure.json 权威），非媒体结果（status/
 error/list_models）无此标志 → 抽不到 url → no-op。命中后：我方对象(D4)登记 oss_path 跳过 fetch /
 ``rehost`` policy fetch+upload→object_key / ``register`` policy 保持 global_url 不落盘 / rehost
@@ -57,14 +57,14 @@ from deerflow.oss.client import get_oss_client
 
 logger = logging.getLogger(__name__)
 
-# cfgpu MCP 工具名前缀（langchain-mcp-adapters 命名 = server_name + "_" + tool，
-# server 名为 "cfgpu" → cfgpu_generate_image / cfgpu_task_wait / ...）。出口签发只作用于
+# cfdream MCP 工具名前缀（langchain-mcp-adapters 命名 = server_name + "_" + tool，
+# server 名为 "cfdream" → cfdream_generate_image / cfdream_task_wait / ...）。出口签发只作用于
 # 这些工具的入参，普通工具（bash/present_files/...）原样放行。
-_CFGPU_PREFIX = "cfgpu_"
+_CFDREAM_PREFIX = "cfdream_"
 
 
 class _UnresolvableRef(Exception):
-    """整叶引用 token 既非可解析 id、又非完整 url、又非我方 object_key —— 挡在调用 cfgpu 之前。"""
+    """整叶引用 token 既非可解析 id、又非完整 url、又非我方 object_key —— 挡在调用 cfdream 之前。"""
 
     def __init__(self, token: str, reason: str) -> None:
         super().__init__(reason)
@@ -80,7 +80,7 @@ def _is_id_token(token: str) -> bool:
 def _is_full_url(token: str) -> bool:
     """完整可取 url：http(s) scheme + 非空 host + 非空对象 path（非仅 ``/``）。
 
-    截断残骸（``https://`` / ``http://host`` 无 path）判 False → 出口报错，不放给 cfgpu。
+    截断残骸（``https://`` / ``http://host`` 无 path）判 False → 出口报错，不放给 cfdream。
     """
     parts = urlsplit(token)
     return parts.scheme in ("http", "https") and bool(parts.netloc) and parts.path not in ("", "/")
@@ -90,7 +90,7 @@ def _presign(object_key: str) -> str:
     """我方 object_key → presigned GET url（本地 HMAC，无网络）。
 
     OSS 未启用（本地 dev）时回裸 object_key 兜底（BUG-027 bare-key 模式）——不报错，
-    保 OSS-off 环境可跑；该模式下客户端/cfgpu 按约定自取，属已知限制。
+    保 OSS-off 环境可跑；该模式下客户端/cfdream 按约定自取，属已知限制。
     """
     oss = get_oss_client()
     if oss is None:
@@ -99,7 +99,7 @@ def _presign(object_key: str) -> str:
 
 
 def _resolve_token(token: str, materials: dict[str, Material]) -> str:
-    """归一单个整叶引用 token 为流向 cfgpu 的 ref；无法解析则 raise ``_UnresolvableRef``。
+    """归一单个整叶引用 token 为流向 cfdream 的 ref；无法解析则 raise ``_UnresolvableRef``。
 
     - id ``m3``：台账命中 → 解析其 ref（oss_path 现签 / 其余原样）；台账无 → 报错（悬空/截断）。
     - 完整 http(s) url：我方对象 → 现签 presigned；第三方 → 原样透传。
@@ -185,11 +185,11 @@ def _parse_content_json(result: Any) -> Any:
 
 
 def _extract_artifact_urls(result: Any) -> list[str]:
-    """cfgpu 媒体产物 url 抽取——**只认 cfgpu 自声明的 `artifact: true` + `urls`**。
+    """cfdream 媒体产物 url 抽取——**只认 cfdream 自声明的 `artifact: true` + `urls`**。
 
-    cfgpu 四个媒体工具在结果带生成媒体时加顶层 ``artifact: true``（result_structure.json 权威，
+    cfdream 四个媒体工具在结果带生成媒体时加顶层 ``artifact: true``（result_structure.json 权威，
     由 tool_registry.annotate_artifact() 添加）；status-only 信封 / error dict / list_models
-    从不带。故探测既非扫自由文本（§4.2 禁），也不靠工具名猜字段路径——读 cfgpu 自声明信号即可。
+    从不带。故探测既非扫自由文本（§4.2 禁），也不靠工具名猜字段路径——读 cfdream 自声明信号即可。
     """
     parsed = _parse_content_json(result)
     if not isinstance(parsed, dict) or parsed.get("artifact") is not True:
@@ -211,7 +211,7 @@ def _infer_kind(url: str) -> Kind:
 
 
 def _thread_id_from_request(request: ToolCallRequest) -> str:
-    """cfgpu rehost 的 object_key 前缀。runtime.context → config → 兜底 default。"""
+    """cfdream rehost 的 object_key 前缀。runtime.context → config → 兜底 default。"""
     runtime = getattr(request, "runtime", None)
     if runtime is not None:
         ctx = getattr(runtime, "context", None)
@@ -343,7 +343,7 @@ class MaterialsMiddleware(AgentMiddleware):
     async def _capture(self, result: ToolMessage | Command, *, policy: CapturePolicy, materials: dict[str, Material], thread_id: str) -> Command | None:
         """工具产物 Capture：rehost/register + 双轨改写。无可捕获产物 → None（原样放行）。
 
-        只作用于 ToolMessage（cfgpu MCP 结果）；Command（present_* 自管 artifact）暂不接管。
+        只作用于 ToolMessage（cfdream MCP 结果）；Command（present_* 自管 artifact）暂不接管。
         """
         if policy == "off" or not isinstance(result, ToolMessage):
             return None
@@ -384,10 +384,10 @@ class MaterialsMiddleware(AgentMiddleware):
         return Command(update=update)
 
     def _resolve_outgate(self, request: ToolCallRequest) -> ToolCallRequest | ToolMessage:
-        """cfgpu 工具入参出口签发。返回改写后的 request，或解析失败的 error ToolMessage。"""
+        """cfdream 工具入参出口签发。返回改写后的 request，或解析失败的 error ToolMessage。"""
         tool_call = request.tool_call
         name = tool_call.get("name") or ""
-        if not name.startswith(_CFGPU_PREFIX):
+        if not name.startswith(_CFDREAM_PREFIX):
             return request
 
         args = tool_call.get("args")
@@ -430,10 +430,10 @@ class MaterialsMiddleware(AgentMiddleware):
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
         # 同步路径只做出口签发，不做 Capture：Capture 的 rehost 是 fetch+upload（网络），
-        # 须 async；cfgpu/MCP 媒体工具走 awrap（async）路径，同步路径不承载可 rehost 的产物。
+        # 须 async；cfdream/MCP 媒体工具走 awrap（async）路径，同步路径不承载可 rehost 的产物。
         resolved = self._resolve_outgate(request)
         if isinstance(resolved, ToolMessage):
-            return resolved  # 解析失败：短路，不调 cfgpu(计费)
+            return resolved  # 解析失败：短路，不调 cfdream(计费)
         return handler(resolved)
 
     @override

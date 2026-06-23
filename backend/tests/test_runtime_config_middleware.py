@@ -3,7 +3,7 @@
 Covers:
 - config.skills (Model B): eager full-content injection, str-as-single-skill, missing-skill
   strategy B (warn + visible note), partial found/missing, idempotency, async offload path.
-- config.models (方案 3): cfgpu generate-tool model arg constrained to the client-allowed range
+- config.models (方案 3): cfdream generate-tool model arg constrained to the client-allowed range
   via wrap_tool_call — keep LLM choice when in range, else fall back to the allowed range.
 - consumer `_build_config` transport (config.skills/config.models → runtime.context).
 
@@ -267,9 +267,9 @@ async def test_async_noop_when_empty(monkeypatch, tmp_path):
 def test_task_type_for_tool_matches_native_and_mcp_names():
     b = _DEFAULT_MODEL_BINDINGS
     assert _task_type_for_tool("generate_image", b) == "image"
-    assert _task_type_for_tool("cfgpu_generate_image", b) == "image"  # MCP prefix matches *generate_image
+    assert _task_type_for_tool("cfdream_generate_image", b) == "image"  # MCP prefix matches *generate_image
     assert _task_type_for_tool("generate_video", b) == "video"
-    assert _task_type_for_tool("cfgpu_generate_video", b) == "video"
+    assert _task_type_for_tool("cfdream_generate_video", b) == "video"
     assert _task_type_for_tool("list_models", b) is None
     assert _task_type_for_tool("", b) is None
 
@@ -379,7 +379,7 @@ def _model_of(result: dict) -> object:
 
 def test_after_model_constrains_out_of_range_model():
     mw = RuntimeConfigMiddleware()
-    state = {"messages": [_ai_with_tool_call("cfgpu_generate_video", {"prompt": "x", "model": "forbidden"})]}
+    state = {"messages": [_ai_with_tool_call("cfdream_generate_video", {"prompt": "x", "model": "forbidden"})]}
 
     result = mw.after_model(state, _models_runtime(_models_cfg("video", ["wan-2-0-fast"])))
 
@@ -417,7 +417,7 @@ def test_after_model_noop_when_no_models_config():
 def test_after_model_defaults_null_model_to_auto_without_whitelist(model_arg):
     # No config.models at all, but an empty/null generate model must not reach the tool as null.
     mw = RuntimeConfigMiddleware()
-    state = {"messages": [_ai_with_tool_call("cfgpu_generate_image", {"prompt": "x", "model": model_arg})]}
+    state = {"messages": [_ai_with_tool_call("cfdream_generate_image", {"prompt": "x", "model": model_arg})]}
 
     result = mw.after_model(state, _models_runtime(None))
 

@@ -82,24 +82,24 @@ class AgentConfig(BaseModel):
     # approval_required_tools: tool name patterns (fnmatch) that require human
     # confirmation before execution. Matched tools pause the graph via
     # LangGraph interrupt() until the client sends Command(resume={...}).
-    # e.g. ["cfgpu__generate_image", "cfgpu__generate_video", "*generate*"]
+    # e.g. ["cfdream__generate_image", "cfdream__generate_video", "*generate*"]
     approval_required_tools: list[str] | None = None
     # non_interruptible_tools: tool name patterns (fnmatch) whose in-flight calls
     # must NOT be hard-cancelled mid-execution. Used by UninterruptibleToolMiddleware
     # to shield matched tool calls: on cancel the underlying tool is allowed to run
     # to completion (and checkpoint its result) before the run stops cooperatively
     # at the next super-step boundary. Targets tools that spawn non-cancellable
-    # remote work — e.g. cfgpu generate has no cancel API, so a hard cancel mid-poll
+    # remote work — e.g. cfdream generate has no cancel API, so a hard cancel mid-poll
     # orphans the remote task (billed, result discarded). See cfgpu-docs/cancel.md.
     # - None (or omitted): no tool is shielded (every call is hard-cancellable).
-    # - ["cfgpu_generate_*"]: shield matched calls; others stay hard-cancellable.
+    # - ["cfdream_generate_*"]: shield matched calls; others stay hard-cancellable.
     non_interruptible_tools: list[str] | None = None
     # tool_visibility: maps tool-name fnmatch patterns to the client-facing
     # visibility used by MessageStreamMiddleware ("internal" | "progress" |
     # "artifact"). First matching pattern wins; unmatched tools fall back to
     # the middleware default ("internal"). Built-in tools that declare
     # metadata={"visibility": ...} take precedence over these patterns.
-    # e.g. {"cfgpu_generate_*": "progress", "web_search": "progress"}
+    # e.g. {"cfdream_generate_*": "progress", "web_search": "progress"}
     tool_visibility: dict[str, str] | None = None
     # model_bindings: maps tool-name fnmatch patterns to the config.models task-type
     # slice ("image" | "video") whose model_names constrain that tool's `model` arg.

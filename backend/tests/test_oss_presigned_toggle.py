@@ -1,4 +1,4 @@
-"""OSS ``presigned_url`` toggle + removal of ``cfgpu_url_refresh_threshold_hours``.
+"""OSS ``presigned_url`` toggle + removal of ``cfdream_url_refresh_threshold_hours``.
 
 `OSSClient.upload_file` returns a presigned GET URL when ``presigned_url`` is true
 (default) and the bare object key when it is false. The SDK client is faked via
@@ -23,10 +23,10 @@ def test_presigned_url_can_be_disabled():
     assert OSSConfig(presigned_url=False).presigned_url is False
 
 
-def test_cfgpu_refresh_threshold_field_removed():
-    # The re-upload threshold knob is gone; cfgpu URL lifecycle is handled elsewhere.
-    assert not hasattr(OSSConfig(), "cfgpu_url_refresh_threshold_hours")
-    assert "cfgpu_url_refresh_threshold_hours" not in OSSConfig.model_fields
+def test_cfdream_refresh_threshold_field_removed():
+    # The re-upload threshold knob is gone; cfdream URL lifecycle is handled elsewhere.
+    assert not hasattr(OSSConfig(), "cfdream_url_refresh_threshold_hours")
+    assert "cfdream_url_refresh_threshold_hours" not in OSSConfig.model_fields
 
 
 # ── OSSClient.upload_file toggle ─────────────────────────────────────────────────

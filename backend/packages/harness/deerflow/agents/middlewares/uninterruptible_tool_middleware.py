@@ -1,13 +1,13 @@
 """UninterruptibleToolMiddleware — shield non-cancellable tool calls (BUG-009).
 
-cfgpu generate has no remote cancel API: a task that starts always produces a billed
+cfdream generate has no remote cancel API: a task that starts always produces a billed
 result. A hard ``runner_task.cancel()`` landing mid-poll therefore orphans that remote
 task — its ``task_id`` never reaches a checkpoint, so the consumer cannot reclaim what
 it paid for (``cfgpu-docs/cancel.md`` §1).
 
 This middleware hooks ``awrap_tool_call`` — the only LangGraph layer with a per-tool
 execution boundary — and, for tool names matching ``non_interruptible_tools`` (fnmatch,
-e.g. ``cfgpu_generate_*``), runs the inner handler on its own task behind an
+e.g. ``cfdream_generate_*``), runs the inner handler on its own task behind an
 ``asyncio.shield``. When a cancel lands while the tool is in flight it is **swallowed**:
 the tool is allowed to drain to completion, then one of two stop paths runs.
 
@@ -59,7 +59,7 @@ class UninterruptibleToolMiddleware(AgentMiddleware):
 
     Args:
         patterns: fnmatch tool-name patterns whose in-flight calls must drain to
-            completion before the run stops (e.g. ``["cfgpu_generate_*"]``). An empty
+            completion before the run stops (e.g. ``["cfdream_generate_*"]``). An empty
             or ``None`` list protects nothing (every tool stays hard-cancellable).
     """
 
@@ -144,6 +144,6 @@ class UninterruptibleToolMiddleware(AgentMiddleware):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
-        # cfgpu MCP tools are async, so protected tools never take the sync path. Pass
+        # cfdream MCP tools are async, so protected tools never take the sync path. Pass
         # through so any sync tool keeps its default (hard-cancellable) behavior.
         return handler(request)

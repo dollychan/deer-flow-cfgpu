@@ -1,11 +1,11 @@
 ---
 name: seedance-video
-description: Generate videos with the Doubao Seedance model family (Seedance 2.0 / 2.0 fast / 1.5 Pro) by calling the cfgpu MCP tools — text-to-video, image-to-video (first/last frame), multimodal reference, video edit/extend, and synchronized audio. Use when the user wants to create, animate, edit, or extend a video, or asks which Seedance model to pick.
+description: Generate videos with the Doubao Seedance model family (Seedance 2.0 / 2.0 fast / 1.5 Pro) by calling the cfdream MCP tools — text-to-video, image-to-video (first/last frame), multimodal reference, video edit/extend, and synchronized audio. Use when the user wants to create, animate, edit, or extend a video, or asks which Seedance model to pick.
 ---
 
 # Generating videos with Seedance (MCP)
 
-This skill is for an agent that calls the **cfgpu MCP server** tools. The relevant tools:
+This skill is for an agent that calls the **cfdream MCP server** tools. The relevant tools:
 
 - `generate_video(...)` — create a video task (this is the main one)
 - `task_status(task_id)` — poll an async task's status
@@ -13,7 +13,7 @@ This skill is for an agent that calls the **cfgpu MCP server** tools. The releva
 - `list_models(task_type="video")` — enumerate video models
 - `get_model_card(model_name)` — fetch a model's full parameter/usage doc
 
-> Tool names may be namespaced by the host (e.g. `mcp__cfgpu__generate_video`). Use whatever prefix your environment exposes; the parameters below are identical.
+> Tool names may be namespaced by the host (e.g. `mcp__cfdream__generate_video`). Use whatever prefix your environment exposes; the parameters below are identical.
 
 Generation is **asynchronous**. By default `generate_video` runs with `wait=true`, so it polls internally and returns the finished result in one call. Only switch to `wait=false` + `task_wait` when you need to fire-and-forget or run several jobs concurrently.
 

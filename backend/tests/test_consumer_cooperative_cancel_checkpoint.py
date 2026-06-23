@@ -9,7 +9,7 @@ closing the astream generator. Under the default ``durability="async"`` LangGrap
 each super-step's checkpoint write to a background executor and only awaits it when the
 Pregel loop is *finalized* (``AsyncBackgroundExecutor.__aexit__``). A bare break leaves the
 generator suspended at its ``yield`` — the pending write never gets awaited — so the just-
-drained cfgpu ToolMessage races that write and can be **missing** from the checkpoint. The
+drained cfdream ToolMessage races that write and can be **missing** from the checkpoint. The
 next turn then sees a dangling tool_call (DanglingToolCallMiddleware injects a placeholder)
 and the already-billed, already-downlinked result is lost from state.
 
@@ -95,7 +95,7 @@ async def test_cooperative_cancel_persists_protected_tool_message_to_checkpoint(
 
     @tool
     async def slow_generate(prompt: str) -> str:
-        """Slow non-cancellable tool (stand-in for cfgpu generate)."""
+        """Slow non-cancellable tool (stand-in for cfdream generate)."""
         seen_in_flight.append(get_cancel_state().protected_in_flight)
         await asyncio.sleep(0.2)
         return f"GENERATED:{prompt}"

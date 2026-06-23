@@ -248,7 +248,7 @@ def _assemble_from_features(
 
     # --- [10] Vision ---
     # deerflow original: vision-capable leads get ViewImageMiddleware + view_image_tool. Image
-    # *analysis* for a text-only lead is delegated to the cfgpu MCP `understand_vision` tool
+    # *analysis* for a text-only lead is delegated to the cfdream MCP `understand_vision` tool
     # (materials §4.7, paradigm C) — no deerflow-side analysis tool/middleware. A caller-supplied
     # custom vision middleware (feat.vision is an AgentMiddleware) still wins.
     if feat.vision is not False:

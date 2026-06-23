@@ -30,7 +30,7 @@ from deerflow.oss.uploader import get_oss_uploader
 
 logger = logging.getLogger(__name__)
 
-# fetch 上限：与 uploader.rehost_url 同口径（cfgpu 临期媒体有界，卡死的 CDN 不得吊住一次 run）。
+# fetch 上限：与 uploader.rehost_url 同口径（cfdream 临期媒体有界，卡死的 CDN 不得吊住一次 run）。
 _FETCH_TIMEOUT_S = 60.0
 _FETCH_MAX_BYTES = 256 * 1024 * 1024  # 256 MiB（视频安全上限）
 
@@ -132,7 +132,7 @@ async def rehost_remote_url(
     turn: int | None = None,
     display: bool = True,
 ) -> MaterializeOutcome:
-    """Capture 远程路径：cfgpu 临期 url → 我方 OSS object_key（oss_path）。
+    """Capture 远程路径：cfdream 临期 url → 我方 OSS object_key（oss_path）。
 
     查重 R3/R4：先按 ``classify_ref(url)`` 地址反查；命中既有 → 跳过 IO。我方对象（D4，url 已
     是 ``agent-artifacts/`` 我方域）→ 登记 oss_path 跳过 fetch。第三方临期 url → fetch+upload。

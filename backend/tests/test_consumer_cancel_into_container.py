@@ -191,7 +191,7 @@ async def test_watcher_invokes_kill_with_thread_id_on_hard_cancel():
 
 @pytest.mark.anyio
 async def test_watcher_does_not_kill_while_protected_in_flight():
-    """(d) cfgpu in flight → cooperative defer branch; no docker kill yet."""
+    """(d) cfdream in flight → cooperative defer branch; no docker kill yet."""
     runner = _watcher_runner_with_watermark(9)
     runner._kill_thread_sandbox = AsyncMock()
     cancel_state = CancelState(event=asyncio.Event(), protected_in_flight=1)

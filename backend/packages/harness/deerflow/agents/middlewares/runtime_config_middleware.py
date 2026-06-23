@@ -11,13 +11,13 @@ Two independent client-controlled parameters from the MQ task message are surfac
    (suppressed for the director agent via its ``config.yaml: skills: []``).
 
 2. ``config.models`` → ``runtime.context["models"]`` — **方案 3 (router-whitelist), human-final**.
-   The client UI restricts the *selection range* of cfgpu generate models per task type. In
-   ``(a)after_model`` the ``model`` argument of each cfgpu ``generate_image`` / ``generate_video``
-   tool call in the freshly produced AIMessage is constrained to the allowed cfgpu model IDs: the
+   The client UI restricts the *selection range* of cfdream generate models per task type. In
+   ``(a)after_model`` the ``model`` argument of each cfdream ``generate_image`` / ``generate_video``
+   tool call in the freshly produced AIMessage is constrained to the allowed cfdream model IDs: the
    LLM's preference is kept when it is inside the range, otherwise the whole allowed range is
-   written down so cfgpu's own router (``select_model(allowed=...)``) scores within it. Even with
+   written down so cfdream's own router (``select_model(allowed=...)``) scores within it. Even with
    **no** ``config.models`` whitelist, a null/empty generate ``model`` is defaulted to ``"auto"``
-   so the cfgpu tool never receives ``null`` (its own ``model`` default is ``"auto"``).
+   so the cfdream tool never receives ``null`` (its own ``model`` default is ``"auto"``).
 
    **Ordering matters.** This runs in ``after_model`` and is registered *after*
    ``HumanApprovalMiddleware`` (HAM) so that — because LangChain dispatches ``after_model`` in
@@ -60,7 +60,7 @@ _SUMMARY_MESSAGE_NAME = "summary"
 
 # Built-in default model_bindings: tool-name fnmatch pattern → config.models task-type slice.
 # Patterns use a leading ``*`` so they match both the native tool names (``generate_image`` /
-# ``generate_video``) and MCP-prefixed names (``cfgpu_generate_image``). An agent's
+# ``generate_video``) and MCP-prefixed names (``cfdream_generate_image``). An agent's
 # ``config.yaml: model_bindings`` replaces this default entirely when set.
 _DEFAULT_MODEL_BINDINGS: dict[str, str] = {
     "*generate_image": "image",
@@ -136,10 +136,10 @@ def _task_type_for_tool(name: str, bindings: dict[str, str]) -> str | None:
 
 
 def _allowed_models_for_task(models_cfg: object, task_type: str) -> list[str]:
-    """Extract the allowed cfgpu model IDs for *task_type* from ``config.models``.
+    """Extract the allowed cfdream model IDs for *task_type* from ``config.models``.
 
     ``config.models`` shape: ``{"type": "auto"|"manual", "content": [{"type": "image"|"video",
-    "model_names": [<cfgpu model id>, ...]}]}``. Returns the (de-duplicated) model_names for the
+    "model_names": [<cfdream model id>, ...]}]}``. Returns the (de-duplicated) model_names for the
     matching task type, or ``[]`` when the field is absent/malformed for that type.
     """
     if not isinstance(models_cfg, dict):
@@ -160,7 +160,7 @@ def _restrict_model_arg(args: dict, allowed: list[str]) -> dict | None:
     """Constrain the tool ``model`` argument to *allowed*; return new args or None if unchanged.
 
     Rule: effective = (LLM-requested ids) ∩ allowed; if empty (LLM said "auto" or chose outside
-    the range) fall back to the whole allowed range so cfgpu's router scores within it. A single
+    the range) fall back to the whole allowed range so cfdream's router scores within it. A single
     surviving id is passed as a string, multiple as a list — matching the tool's ``str|list[str]``
     ``model`` schema.
     """
@@ -182,7 +182,7 @@ def _restrict_model_arg(args: dict, allowed: list[str]) -> dict | None:
 def _normalize_empty_model(args: dict) -> dict | None:
     """Default a missing/null/empty ``model`` arg to the ``"auto"`` sentinel.
 
-    Independent of ``config.models`` (applies even when the client sent no whitelist): cfgpu's
+    Independent of ``config.models`` (applies even when the client sent no whitelist): cfdream's
     generate tools default ``model`` to ``"auto"`` and treat it as "let the router pick", so a
     generate call must never reach the tool carrying ``null`` / ``""`` / an all-empty list.
     Returns new args when a rewrite is needed, else None (``model`` already usable).
@@ -354,7 +354,7 @@ class RuntimeConfigMiddleware(AgentMiddleware):
         return {**tool_call, "args": new_args}
 
     def _apply_models(self, state, runtime: Runtime) -> dict | None:
-        """Constrain/normalize cfgpu generate ``model`` args in the latest AIMessage.
+        """Constrain/normalize cfdream generate ``model`` args in the latest AIMessage.
 
         Applies the ``config.models`` whitelist when present; always defaults a null/empty
         generate ``model`` to ``"auto"`` so the tool never receives ``null``.

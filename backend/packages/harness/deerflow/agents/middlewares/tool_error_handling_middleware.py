@@ -225,7 +225,7 @@ def build_subagent_runtime_middlewares(
         from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 
         # deerflow original: vision-capable subagent models get ViewImageMiddleware. Image
-        # *analysis* for a text-only model is delegated to the cfgpu MCP `understand_vision`
+        # *analysis* for a text-only model is delegated to the cfdream MCP `understand_vision`
         # tool (materials §4.7, paradigm C) — no deerflow-side analysis middleware.
         middlewares.append(ViewImageMiddleware())
 

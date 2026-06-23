@@ -2,7 +2,7 @@
 
 Why this exists
 ---------------
-cfgpu generate has **no remote cancel API**: once a task runs it always produces a
+cfdream generate has **no remote cancel API**: once a task runs it always produces a
 billed result. A hard ``runner_task.cancel()`` landing mid-poll orphans that remote
 task — its ``task_id`` never reaches a checkpoint, so the consumer can neither read
 nor reclaim the result it paid for (see ``cfgpu-docs/cancel.md`` §1).

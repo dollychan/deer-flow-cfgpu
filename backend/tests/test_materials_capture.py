@@ -1,7 +1,7 @@
 """P3 — MaterialsCapture 准入⊥转存三态 + 双轨改写（cfgpu-docs/materials.md §4.2, impl-plan P3）。
 
 覆盖 policy.resolve_capture_policy / middleware._capture（经 awrap_tool_call）：
-cfgpu artifact 信号探测、rehost 落盘、register 不落盘、rehost 失败 stable=false、
+cfdream artifact 信号探测、rehost 落盘、register 不落盘、rehost 失败 stable=false、
 task_wait 重放去重、D4 我方对象短路、双轨改写（content 零 url / artifact 带 object_key）。
 """
 
@@ -61,7 +61,7 @@ class _FakeUploader:
         return f"agent-artifacts/{thread_id}/images/{url.rsplit('/', 1)[-1]}"
 
 
-def _cfgpu_result(urls, *, name="cfgpu_generate_image", artifact=True, extra=None):
+def _cfdream_result(urls, *, name="cfdream_generate_image", artifact=True, extra=None):
     body = {"urls": urls, "expires_at": "2026-06-06T10:00:00+00:00", "model_used": "doubao", "usage": {"total_tokens": 100}}
     if artifact:
         body["artifact"] = True
@@ -70,7 +70,7 @@ def _cfgpu_result(urls, *, name="cfgpu_generate_image", artifact=True, extra=Non
     return ToolMessage(content=json.dumps(body), tool_call_id="tc_1", name=name)
 
 
-async def _run(result, *, fake_uploader, materials=None, metadata=None, name="cfgpu_generate_image", thread_id="t1"):
+async def _run(result, *, fake_uploader, materials=None, metadata=None, name="cfdream_generate_image", thread_id="t1"):
     # P6 收口：rehost 改经 materialize helper → 在 materialize 命名空间打桩 uploader。
     mz.get_oss_uploader = lambda: fake_uploader  # type: ignore[assignment]
     request = FakeRequest(
@@ -95,14 +95,14 @@ def _restore_uploader(monkeypatch):
 # --- policy 解析 ------------------------------------------------------------
 
 
-def test_policy_cfgpu_default_rehost():
-    assert resolve_capture_policy("cfgpu_generate_image") == "rehost"
-    assert resolve_capture_policy("cfgpu_task_wait") == "rehost"
+def test_policy_cfdream_default_rehost():
+    assert resolve_capture_policy("cfdream_generate_image") == "rehost"
+    assert resolve_capture_policy("cfdream_task_wait") == "rehost"
 
 
 def test_policy_metadata_override():
     assert resolve_capture_policy("image_search", {"materials_capture": "register"}) == "register"
-    assert resolve_capture_policy("cfgpu_generate_image", {"materials_capture": "off"}) == "off"
+    assert resolve_capture_policy("cfdream_generate_image", {"materials_capture": "off"}) == "off"
 
 
 def test_policy_default_off():
@@ -114,23 +114,23 @@ def test_policy_default_off():
 
 
 def test_extract_requires_artifact_flag():
-    with_flag = _cfgpu_result(["https://cdn.cfgpu.com/a.png"])
+    with_flag = _cfdream_result(["https://cdn.cfgpu.com/a.png"])
     assert _extract_artifact_urls(with_flag) == ["https://cdn.cfgpu.com/a.png"]
 
 
 def test_extract_skips_without_flag():
     # status-only 信封 / 无 artifact 标志 → 不准入
-    no_flag = _cfgpu_result(["https://cdn.cfgpu.com/a.png"], artifact=False)
+    no_flag = _cfdream_result(["https://cdn.cfgpu.com/a.png"], artifact=False)
     assert _extract_artifact_urls(no_flag) == []
 
 
 def test_extract_skips_error_dict():
-    err = ToolMessage(content=json.dumps({"error": True, "error_type": "content_blocked", "message": "x"}), tool_call_id="tc_1", name="cfgpu_generate_image")
+    err = ToolMessage(content=json.dumps({"error": True, "error_type": "content_blocked", "message": "x"}), tool_call_id="tc_1", name="cfdream_generate_image")
     assert _extract_artifact_urls(err) == []
 
 
 def test_extract_skips_async_stub():
-    stub = ToolMessage(content=json.dumps({"task_id": "task-abc", "status": "pending"}), tool_call_id="tc_1", name="cfgpu_generate_image")
+    stub = ToolMessage(content=json.dumps({"task_id": "task-abc", "status": "pending"}), tool_call_id="tc_1", name="cfdream_generate_image")
     assert _extract_artifact_urls(stub) == []
 
 
@@ -146,7 +146,7 @@ def test_infer_kind_by_ext():
 @pytest.mark.asyncio
 async def test_rehost_registers_oss_path_and_dual_track():
     up = _FakeUploader()
-    result = _cfgpu_result(["https://cdn.cfgpu.com/img-abc.png"])
+    result = _cfdream_result(["https://cdn.cfgpu.com/img-abc.png"])
     out = await _run(result, fake_uploader=up)
 
     assert isinstance(out, Command)
@@ -169,7 +169,7 @@ async def test_rehost_registers_oss_path_and_dual_track():
 @pytest.mark.asyncio
 async def test_register_policy_keeps_global_url_no_upload():
     up = _FakeUploader()
-    result = _cfgpu_result(["https://third.cdn/x.png"], name="image_search")
+    result = _cfdream_result(["https://third.cdn/x.png"], name="image_search")
     out = await _run(result, fake_uploader=up, metadata={"materials_capture": "register"}, name="image_search")
 
     mats = out.update["materials"]
@@ -181,7 +181,7 @@ async def test_register_policy_keeps_global_url_no_upload():
 @pytest.mark.asyncio
 async def test_rehost_failure_marks_unstable_not_deliverable():
     up = _FakeUploader(fail=True)
-    result = _cfgpu_result(["https://cdn.cfgpu.com/img-abc.png"])
+    result = _cfdream_result(["https://cdn.cfgpu.com/img-abc.png"])
     out = await _run(result, fake_uploader=up)
 
     mats = out.update["materials"]
@@ -194,9 +194,9 @@ async def test_rehost_failure_marks_unstable_not_deliverable():
 
 @pytest.mark.asyncio
 async def test_our_object_url_shortcuts_no_rehost():
-    # D4：cfgpu 结果里若已是我方 OSS 对象 → 登记 oss_path，跳过 fetch
+    # D4：cfdream 结果里若已是我方 OSS 对象 → 登记 oss_path，跳过 fetch
     up = _FakeUploader()
-    result = _cfgpu_result(["https://oss.cfgpu.com/agent-artifacts/t1/x.png"])
+    result = _cfdream_result(["https://oss.cfgpu.com/agent-artifacts/t1/x.png"])
     out = await _run(result, fake_uploader=up)
 
     mats = out.update["materials"]
@@ -209,10 +209,10 @@ async def test_our_object_url_shortcuts_no_rehost():
 async def test_task_wait_replay_dedup_no_double_rehost():
     up = _FakeUploader()
     url = "https://cdn.cfgpu.com/vid-abc.mp4"
-    first = await _run(_cfgpu_result([url], name="cfgpu_task_wait"), fake_uploader=up, name="cfgpu_task_wait")
+    first = await _run(_cfdream_result([url], name="cfdream_task_wait"), fake_uploader=up, name="cfdream_task_wait")
     mats = dict(first.update["materials"])
     # 重放：同 url 再浮现，materials 已含 m1
-    second = await _run(_cfgpu_result([url], name="cfgpu_task_wait"), fake_uploader=up, materials=mats, name="cfgpu_task_wait")
+    second = await _run(_cfdream_result([url], name="cfdream_task_wait"), fake_uploader=up, materials=mats, name="cfdream_task_wait")
 
     assert len(up.calls) == 1  # 只 rehost 一次（不双计费）
     assert "materials" not in second.update  # 无新建
@@ -222,7 +222,7 @@ async def test_task_wait_replay_dedup_no_double_rehost():
 @pytest.mark.asyncio
 async def test_off_policy_passes_result_through():
     up = _FakeUploader()
-    result = _cfgpu_result(["https://cdn.cfgpu.com/a.png"], name="bash")
+    result = _cfdream_result(["https://cdn.cfgpu.com/a.png"], name="bash")
     out = await _run(result, fake_uploader=up, name="bash")
     assert out is result  # off：不接管，原样放行
     assert up.calls == []
@@ -231,7 +231,7 @@ async def test_off_policy_passes_result_through():
 @pytest.mark.asyncio
 async def test_multi_url_sequential_ids():
     up = _FakeUploader()
-    result = _cfgpu_result(["https://cdn.cfgpu.com/a.png", "https://cdn.cfgpu.com/b.png"])
+    result = _cfdream_result(["https://cdn.cfgpu.com/a.png", "https://cdn.cfgpu.com/b.png"])
     out = await _run(result, fake_uploader=up)
     assert set(out.update["materials"]) == {"m1", "m2"}
     assert json.loads(out.update["messages"][0].content)["materials"] == ["m1", "m2"]

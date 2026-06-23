@@ -140,7 +140,7 @@ class AgentRunner:
 
         # Cooperative-cancel signal (BUG-009 / cancel.md §4.3). Shared with
         # UninterruptibleToolMiddleware — which swallows a hard cancel that lands on a
-        # non-cancellable tool (e.g. cfgpu generate, no remote cancel API) and drains it
+        # non-cancellable tool (e.g. cfdream generate, no remote cancel API) and drains it
         # — and with the _execute astream loop, which stops at the next super-step
         # boundary once this is set. Installed on a task-local ContextVar so the in-graph
         # middleware reads the same Event: it runs in this run task, or in the wait_for
@@ -336,7 +336,7 @@ class AgentRunner:
         # Add "updates" as an internal-only super-step boundary signal for cooperative
         # cancel (BUG-009 / cancel.md §4.3). It fires once per completed super-step — the
         # only point where no node is in flight and the just-committed step (incl. a
-        # drained cfgpu ToolMessage) has gone through after_tick. It is never downlinked.
+        # drained cfdream ToolMessage) has gone through after_tick. It is never downlinked.
         effective_stream_mode = stream_mode if "updates" in stream_mode else [*stream_mode, "updates"]
         cooperative_cancel = False
         # aclosing() guarantees the astream generator is finalized on every exit path
@@ -344,7 +344,7 @@ class AgentRunner:
         # super-step's checkpoint write to a background executor and only awaits it when the
         # Pregel loop is finalized (AsyncBackgroundExecutor.__aexit__). A bare
         # `async for ... break` would leave that write pending, and the aget_state below / in
-        # _run's CancelledError handler would race it — the drained cfgpu ToolMessage missing
+        # _run's CancelledError handler would race it — the drained cfdream ToolMessage missing
         # from the checkpoint, the next turn seeing a dangling tool_call (billed result lost
         # from state). Finalizing here flushes *this* run's pending write without forcing
         # global durability="sync" (which would serialize every super-step of every run).
@@ -602,7 +602,7 @@ class AgentRunner:
         for key in ("agent_name", "thinking_enabled", "is_plan_mode", "ask", "web_search_enabled", "model_name", "subagent_enabled", "reasoning_effort"):
             if configurable.get(key) is not None:
                 context[key] = configurable[key]
-        # Consumed per-run by RuntimeConfigMiddleware: config.models constrains cfgpu generate
+        # Consumed per-run by RuntimeConfigMiddleware: config.models constrains cfdream generate
         # model selection (方案 3 whitelist); config.skills is eager-injected (Model B).
         if task_cfg.get("models"):
             context["models"] = task_cfg["models"]
@@ -762,7 +762,7 @@ class AgentRunner:
         shielded tool's already-emitted ``tool_result`` (langgraph runs nodes in their own
         tasks, so the cancel never lands inside the shield — it just unwinds the stream).
         So:
-          - protected tool (cfgpu) in flight → set the Event, do NOT hard-cancel; the run
+          - protected tool (cfdream) in flight → set the Event, do NOT hard-cancel; the run
             stops cooperatively at the next super-step boundary, after the result has been
             downlinked and checkpointed. Keep polling: once it drains (and if the run has
             not already stopped on the cooperative flag) a later iteration hard-cancels.

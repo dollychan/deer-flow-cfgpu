@@ -16,7 +16,7 @@ from deerflow.agents.thread_state import ThreadState, merge_tool_approvals
 # ---------------------------------------------------------------------------
 
 def _make_middleware(patterns=None):
-    return HumanApprovalMiddleware(patterns or {"cfgpu__generate_*", "cfgpu__generate_image"})
+    return HumanApprovalMiddleware(patterns or {"cfdream__generate_*", "cfdream__generate_image"})
 
 
 def _make_state(messages: list, tool_approvals: dict | None = None) -> dict:
@@ -74,14 +74,14 @@ class TestMergeToolApprovals:
 
 class TestNeedsApproval:
     def test_exact_match(self):
-        m = _make_middleware({"cfgpu__generate_image"})
-        assert m._needs_approval("cfgpu__generate_image")
-        assert not m._needs_approval("cfgpu__generate_video")
+        m = _make_middleware({"cfdream__generate_image"})
+        assert m._needs_approval("cfdream__generate_image")
+        assert not m._needs_approval("cfdream__generate_video")
 
     def test_glob_match(self):
-        m = _make_middleware({"cfgpu__generate_*"})
-        assert m._needs_approval("cfgpu__generate_image")
-        assert m._needs_approval("cfgpu__generate_video")
+        m = _make_middleware({"cfdream__generate_*"})
+        assert m._needs_approval("cfdream__generate_image")
+        assert m._needs_approval("cfdream__generate_video")
         assert not m._needs_approval("search_web")
 
 
@@ -113,7 +113,7 @@ class TestAfterModelNoPending:
 class TestAfterModelFirstCall:
     def test_emits_sse_and_interrupts(self):
         m = _make_middleware()
-        msg = _ai_msg([{"id": "tc1", "name": "cfgpu__generate_image", "args": {"prompt": "cat"}}])
+        msg = _ai_msg([{"id": "tc1", "name": "cfdream__generate_image", "args": {"prompt": "cat"}}])
         state = _make_state([msg])
 
         captured_sse = []
@@ -137,13 +137,13 @@ class TestAfterModelFirstCall:
         assert event["type"] == "tool_approval_required"
         assert len(event["tool_calls"]) == 1
         assert event["tool_calls"][0]["id"] == "tc1"
-        assert event["tool_calls"][0]["name"] == "cfgpu__generate_image"
+        assert event["tool_calls"][0]["name"] == "cfdream__generate_image"
 
     def test_batches_multiple_pending_tools(self):
         m = _make_middleware()
         msg = _ai_msg([
-            {"id": "tc1", "name": "cfgpu__generate_image", "args": {"prompt": "cat"}},
-            {"id": "tc2", "name": "cfgpu__generate_video", "args": {"prompt": "dog"}},
+            {"id": "tc1", "name": "cfdream__generate_image", "args": {"prompt": "cat"}},
+            {"id": "tc2", "name": "cfdream__generate_video", "args": {"prompt": "dog"}},
             {"id": "tc3", "name": "search_web", "args": {"query": "x"}},
         ])
         state = _make_state([msg])
@@ -160,7 +160,7 @@ class TestAfterModelFirstCall:
         assert len(captured_sse) == 1
         # Only the two generate_* tools are in the approval request
         pending_names = {tc["name"] for tc in captured_sse[0]["tool_calls"]}
-        assert pending_names == {"cfgpu__generate_image", "cfgpu__generate_video"}
+        assert pending_names == {"cfdream__generate_image", "cfdream__generate_video"}
         # search_web is not in the approval request
         assert all(tc["name"] != "search_web" for tc in captured_sse[0]["tool_calls"])
 
@@ -174,7 +174,7 @@ class TestAfterModelResumePath:
         m = _make_middleware()
         original_args = {"prompt": "cat", "width": 512}
         new_args = {"prompt": "fluffy cat", "width": 1024}
-        msg = _ai_msg([{"id": "tc1", "name": "cfgpu__generate_image", "args": original_args}])
+        msg = _ai_msg([{"id": "tc1", "name": "cfdream__generate_image", "args": original_args}])
         state = _make_state(
             [msg],
             tool_approvals={"tc1": {"status": "approved", "args": new_args}},
@@ -200,7 +200,7 @@ class TestAfterModelResumePath:
 
     def test_rejected_retains_tool_call_adds_error_message(self):
         m = _make_middleware()
-        msg = _ai_msg([{"id": "tc1", "name": "cfgpu__generate_image", "args": {"prompt": "cat"}}])
+        msg = _ai_msg([{"id": "tc1", "name": "cfdream__generate_image", "args": {"prompt": "cat"}}])
         state = _make_state(
             [msg],
             tool_approvals={"tc1": {"status": "rejected", "reason": "Too expensive"}},
@@ -239,7 +239,7 @@ class TestAfterModelResumePath:
         import json
 
         m = _make_middleware()
-        msg = _ai_msg([{"id": "tc1", "name": "cfgpu__generate_image", "args": {"prompt": "一只可爱的狗狗"}}])
+        msg = _ai_msg([{"id": "tc1", "name": "cfdream__generate_image", "args": {"prompt": "一只可爱的狗狗"}}])
         state = _make_state(
             [msg],
             tool_approvals={"tc1": {"status": "rejected"}},
@@ -256,7 +256,7 @@ class TestAfterModelResumePath:
 
         assert payload["status"] == "rejected"
         assert payload["executed"] is False
-        assert payload["tool"] == "cfgpu__generate_image"
+        assert payload["tool"] == "cfdream__generate_image"
         # The identifying arg (prompt) is echoed back so the model knows WHICH call
         assert payload["rejected_args"]["prompt"] == "一只可爱的狗狗"
         # The tool name anchors the message; args/reason are NOT re-dumped into it
@@ -266,10 +266,10 @@ class TestAfterModelResumePath:
         assert "未执行" in payload["message"]
 
     def test_mixed_batch_approved_and_rejected(self):
-        m = _make_middleware({"cfgpu__generate_*"})
+        m = _make_middleware({"cfdream__generate_*"})
         msg = _ai_msg([
-            {"id": "tc1", "name": "cfgpu__generate_image", "args": {"prompt": "cat"}},
-            {"id": "tc2", "name": "cfgpu__generate_video", "args": {"prompt": "dog"}},
+            {"id": "tc1", "name": "cfdream__generate_image", "args": {"prompt": "cat"}},
+            {"id": "tc2", "name": "cfdream__generate_video", "args": {"prompt": "dog"}},
             {"id": "tc3", "name": "search_web", "args": {"query": "x"}},
         ])
         state = _make_state(
@@ -291,10 +291,10 @@ class TestAfterModelResumePath:
         tool_msgs = [m for m in messages if isinstance(m, ToolMessage)]
 
         # tc1 approved with new args
-        approved = next(tc for tc in ai_msg.tool_calls if tc["name"] == "cfgpu__generate_image")
+        approved = next(tc for tc in ai_msg.tool_calls if tc["name"] == "cfdream__generate_image")
         assert approved["args"]["prompt"] == "fluffy cat"
         # tc2 rejected — RETAINED in tool_calls so its error ToolMessage stays paired
-        assert any(tc["name"] == "cfgpu__generate_video" for tc in ai_msg.tool_calls)
+        assert any(tc["name"] == "cfdream__generate_video" for tc in ai_msg.tool_calls)
         # tc3 (non-approval) passes through
         assert any(tc["name"] == "search_web" for tc in ai_msg.tool_calls)
         # One error ToolMessage for tc2
@@ -303,10 +303,10 @@ class TestAfterModelResumePath:
 
     def test_partial_state_does_not_skip_interrupt(self):
         """If only some decisions are in state (partial), interrupt is still called."""
-        m = _make_middleware({"cfgpu__generate_*"})
+        m = _make_middleware({"cfdream__generate_*"})
         msg = _ai_msg([
-            {"id": "tc1", "name": "cfgpu__generate_image", "args": {}},
-            {"id": "tc2", "name": "cfgpu__generate_video", "args": {}},
+            {"id": "tc1", "name": "cfdream__generate_image", "args": {}},
+            {"id": "tc2", "name": "cfdream__generate_video", "args": {}},
         ])
         # Only tc1 in state, tc2 missing → should still interrupt
         state = _make_state([msg], tool_approvals={"tc1": {"status": "approved", "args": {}}})
@@ -326,10 +326,10 @@ class TestAfterModelResumePath:
         tc1 already decided in state → must NOT reappear in the SSE/interrupt
         payload; only tc2 (undecided) should be re-requested.
         """
-        m = _make_middleware({"cfgpu__generate_*"})
+        m = _make_middleware({"cfdream__generate_*"})
         msg = _ai_msg([
-            {"id": "tc1", "name": "cfgpu__generate_image", "args": {}},
-            {"id": "tc2", "name": "cfgpu__generate_video", "args": {}},
+            {"id": "tc1", "name": "cfdream__generate_image", "args": {}},
+            {"id": "tc2", "name": "cfdream__generate_video", "args": {}},
         ])
         state = _make_state([msg], tool_approvals={"tc1": {"status": "approved", "args": {}}})
 
@@ -365,7 +365,7 @@ class TestAfterModelFallbackResume:
     def test_fallback_approved(self):
         m = _make_middleware()
         new_args = {"prompt": "updated"}
-        msg = _ai_msg([{"id": "tc1", "name": "cfgpu__generate_image", "args": {"prompt": "cat"}}])
+        msg = _ai_msg([{"id": "tc1", "name": "cfdream__generate_image", "args": {"prompt": "cat"}}])
         state = _make_state([msg])  # No tool_approvals in state
 
         resume_value = {"approved": [{"id": "tc1", "args": new_args}], "rejected": []}
@@ -381,7 +381,7 @@ class TestAfterModelFallbackResume:
 
     def test_fallback_rejected(self):
         m = _make_middleware()
-        msg = _ai_msg([{"id": "tc1", "name": "cfgpu__generate_image", "args": {}}])
+        msg = _ai_msg([{"id": "tc1", "name": "cfdream__generate_image", "args": {}}])
         state = _make_state([msg])
 
         resume_value = {"approved": [], "rejected": ["tc1"]}
@@ -419,7 +419,7 @@ class TestToolApprovalsReclaim:
         modified args AND tool_approvals is reclaimed in the same return."""
         m = _make_middleware()
         new_args = {"prompt": "fluffy cat", "width": 1024}
-        msg = _ai_msg([{"id": "tc1", "name": "cfgpu__generate_image", "args": {"prompt": "cat"}}])
+        msg = _ai_msg([{"id": "tc1", "name": "cfdream__generate_image", "args": {"prompt": "cat"}}])
         state = _make_state([msg], tool_approvals={"tc1": {"status": "approved", "args": new_args}})
 
         with (
@@ -438,7 +438,7 @@ class TestToolApprovalsReclaim:
         """All-rejected (routes to END, no next before/after_model) still
         reclaims — this is the residue an every-turn sweep idea would miss."""
         m = _make_middleware()
-        msg = _ai_msg([{"id": "tc1", "name": "cfgpu__generate_image", "args": {"prompt": "cat"}}])
+        msg = _ai_msg([{"id": "tc1", "name": "cfdream__generate_image", "args": {"prompt": "cat"}}])
         state = _make_state([msg], tool_approvals={"tc1": {"status": "rejected", "reason": "no"}})
 
         with (
@@ -452,7 +452,7 @@ class TestToolApprovalsReclaim:
     def test_fallback_resume_reclaimed(self):
         """Command(resume=...) fallback path (interrupt returns a value) also reclaims."""
         m = _make_middleware()
-        msg = _ai_msg([{"id": "tc1", "name": "cfgpu__generate_image", "args": {"prompt": "cat"}}])
+        msg = _ai_msg([{"id": "tc1", "name": "cfdream__generate_image", "args": {"prompt": "cat"}}])
         state = _make_state([msg])  # no state decisions → fallback path
 
         resume_value = {"approved": [{"id": "tc1", "args": {"prompt": "x"}}], "rejected": []}
@@ -467,10 +467,10 @@ class TestToolApprovalsReclaim:
     def test_partial_resume_does_not_reclaim(self):
         """Partial resume re-interrupts (raises) without emitting any clear, so
         already-decided tc1 survives in state across the next interrupt."""
-        m = _make_middleware({"cfgpu__generate_*"})
+        m = _make_middleware({"cfdream__generate_*"})
         msg = _ai_msg([
-            {"id": "tc1", "name": "cfgpu__generate_image", "args": {}},
-            {"id": "tc2", "name": "cfgpu__generate_video", "args": {}},
+            {"id": "tc1", "name": "cfdream__generate_image", "args": {}},
+            {"id": "tc2", "name": "cfdream__generate_video", "args": {}},
         ])
         state = _make_state([msg], tool_approvals={"tc1": {"status": "approved", "args": {}}})
 

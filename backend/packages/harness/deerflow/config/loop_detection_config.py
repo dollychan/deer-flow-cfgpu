@@ -40,14 +40,14 @@ class ToolKeyOverride(BaseModel):
     """Per-tool-pattern override for the loop-detection key derivation strategy.
 
     Keys in ``LoopDetectionConfig.tool_key_overrides`` are fnmatch patterns
-    matched against the tool name, e.g. ``"cfgpu_generate_*"`` or
+    matched against the tool name, e.g. ``"cfdream_generate_*"`` or
     ``"*generate*"``.  The first matching pattern wins.
 
     Examples (config.yaml)::
 
         loop_detection:
           tool_key_overrides:
-            "cfgpu_generate_*":
+            "cfdream_generate_*":
               mode: full          # hash all args; different prompts → different hashes
             "my_custom_draw":
               mode: fields

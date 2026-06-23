@@ -1,7 +1,7 @@
 """Tests for UninterruptibleToolMiddleware + the cancel-signal carrier (BUG-009).
 
 The middleware shields tool calls matching ``non_interruptible_tools`` (e.g.
-``cfgpu_generate_*``) so a hard ``runner_task.cancel()`` landing mid-flight does
+``cfdream_generate_*``) so a hard ``runner_task.cancel()`` landing mid-flight does
 NOT orphan the non-cancellable remote task. Two stop paths after the tool drains:
 
   - cooperative carrier installed (consumer run) → set the Event, uncancel, return
@@ -91,22 +91,22 @@ class TestCancelSignal:
 
 class TestProtectedMatching:
     def test_glob_matches(self):
-        mw = UninterruptibleToolMiddleware(["cfgpu_generate_*"])
-        assert mw._protected(_request("cfgpu_generate_video")) is True
-        assert mw._protected(_request("cfgpu_generate_image")) is True
+        mw = UninterruptibleToolMiddleware(["cfdream_generate_*"])
+        assert mw._protected(_request("cfdream_generate_video")) is True
+        assert mw._protected(_request("cfdream_generate_image")) is True
 
     def test_non_match(self):
-        mw = UninterruptibleToolMiddleware(["cfgpu_generate_*"])
+        mw = UninterruptibleToolMiddleware(["cfdream_generate_*"])
         assert mw._protected(_request("bash")) is False
         assert mw._protected(_request("web_search")) is False
 
     def test_empty_patterns_protect_nothing(self):
         mw = UninterruptibleToolMiddleware([])
-        assert mw._protected(_request("cfgpu_generate_video")) is False
+        assert mw._protected(_request("cfdream_generate_video")) is False
 
     def test_none_patterns_protect_nothing(self):
         mw = UninterruptibleToolMiddleware(None)
-        assert mw._protected(_request("cfgpu_generate_video")) is False
+        assert mw._protected(_request("cfdream_generate_video")) is False
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +117,7 @@ class TestProtectedMatching:
 class TestUnprotectedPassthrough:
     @pytest.mark.asyncio
     async def test_unprotected_returns_result(self):
-        mw = UninterruptibleToolMiddleware(["cfgpu_generate_*"])
+        mw = UninterruptibleToolMiddleware(["cfdream_generate_*"])
 
         async def handler(req):
             return "RESULT"
@@ -127,7 +127,7 @@ class TestUnprotectedPassthrough:
     @pytest.mark.asyncio
     async def test_unprotected_cancel_propagates_immediately(self):
         """bash/LLM keep default hard-cancel behavior: no shielding."""
-        mw = UninterruptibleToolMiddleware(["cfgpu_generate_*"])
+        mw = UninterruptibleToolMiddleware(["cfdream_generate_*"])
         started = asyncio.Event()
 
         async def handler(req):
@@ -150,24 +150,24 @@ class TestUnprotectedPassthrough:
 class TestProtectedNoCancel:
     @pytest.mark.asyncio
     async def test_returns_result_normally(self, installed_event):
-        mw = UninterruptibleToolMiddleware(["cfgpu_generate_*"])
+        mw = UninterruptibleToolMiddleware(["cfdream_generate_*"])
 
         async def handler(req):
             return "URLS"
 
-        result = await mw.awrap_tool_call(_request("cfgpu_generate_video"), handler)
+        result = await mw.awrap_tool_call(_request("cfdream_generate_video"), handler)
         assert result == "URLS"
         assert not installed_event.is_set()  # no cancel → no cooperative signal
 
     @pytest.mark.asyncio
     async def test_tool_exception_propagates(self, installed_event):
-        mw = UninterruptibleToolMiddleware(["cfgpu_generate_*"])
+        mw = UninterruptibleToolMiddleware(["cfdream_generate_*"])
 
         async def handler(req):
             raise ValueError("tool boom")
 
         with pytest.raises(ValueError, match="tool boom"):
-            await mw.awrap_tool_call(_request("cfgpu_generate_video"), handler)
+            await mw.awrap_tool_call(_request("cfdream_generate_video"), handler)
         assert not installed_event.is_set()
 
 
@@ -179,19 +179,19 @@ class TestProtectedNoCancel:
 class TestProtectedCancelMidFlight:
     @pytest.mark.asyncio
     async def test_with_carrier_drains_then_signals(self, installed_event):
-        """Hard cancel mid cfgpu poll → swallowed; tool finishes; event set; result returned."""
-        mw = UninterruptibleToolMiddleware(["cfgpu_generate_*"])
+        """Hard cancel mid cfdream poll → swallowed; tool finishes; event set; result returned."""
+        mw = UninterruptibleToolMiddleware(["cfdream_generate_*"])
         started = asyncio.Event()
         release = asyncio.Event()
         completed = {"v": False}
 
         async def handler(req):
             started.set()
-            await release.wait()  # cfgpu still polling
+            await release.wait()  # cfdream still polling
             completed["v"] = True
             return "URLS"
 
-        task = asyncio.create_task(mw.awrap_tool_call(_request("cfgpu_generate_video"), handler))
+        task = asyncio.create_task(mw.awrap_tool_call(_request("cfdream_generate_video"), handler))
         await started.wait()
 
         task.cancel()  # hard cancel lands mid-flight
@@ -199,7 +199,7 @@ class TestProtectedCancelMidFlight:
         assert not task.done(), "shield must keep the protected tool running"
         assert not completed["v"]
 
-        release.set()  # cfgpu returns
+        release.set()  # cfdream returns
         result = await task  # completes normally, no CancelledError escapes
 
         assert result == "URLS"
@@ -210,7 +210,7 @@ class TestProtectedCancelMidFlight:
     @pytest.mark.asyncio
     async def test_without_carrier_drains_then_reraises(self):
         """No carrier installed: protect the tool to completion, then honor the cancel."""
-        mw = UninterruptibleToolMiddleware(["cfgpu_generate_*"])
+        mw = UninterruptibleToolMiddleware(["cfdream_generate_*"])
         started = asyncio.Event()
         release = asyncio.Event()
         completed = {"v": False}
@@ -222,7 +222,7 @@ class TestProtectedCancelMidFlight:
             return "URLS"
 
         # No install_cancel_event → get_cancel_event() is None.
-        task = asyncio.create_task(mw.awrap_tool_call(_request("cfgpu_generate_video"), handler))
+        task = asyncio.create_task(mw.awrap_tool_call(_request("cfdream_generate_video"), handler))
         await started.wait()
 
         task.cancel()
@@ -238,7 +238,7 @@ class TestProtectedCancelMidFlight:
     @pytest.mark.asyncio
     async def test_sticky_cancel_swallowed_repeatedly(self, installed_event):
         """A second cancel during draining is also swallowed; tool still completes."""
-        mw = UninterruptibleToolMiddleware(["cfgpu_generate_*"])
+        mw = UninterruptibleToolMiddleware(["cfdream_generate_*"])
         started = asyncio.Event()
         release = asyncio.Event()
 
@@ -247,7 +247,7 @@ class TestProtectedCancelMidFlight:
             await release.wait()
             return "URLS"
 
-        task = asyncio.create_task(mw.awrap_tool_call(_request("cfgpu_generate_video"), handler))
+        task = asyncio.create_task(mw.awrap_tool_call(_request("cfdream_generate_video"), handler))
         await started.wait()
 
         task.cancel()
@@ -269,13 +269,13 @@ class TestProtectedCancelMidFlight:
 
 class TestSyncPassthrough:
     def test_sync_passthrough(self):
-        mw = UninterruptibleToolMiddleware(["cfgpu_generate_*"])
+        mw = UninterruptibleToolMiddleware(["cfdream_generate_*"])
 
         def handler(req):
             return "RESULT"
 
-        # cfgpu MCP tools are async; the sync path just passes through.
-        assert mw.wrap_tool_call(_request("cfgpu_generate_video"), handler) == "RESULT"
+        # cfdream MCP tools are async; the sync path just passes through.
+        assert mw.wrap_tool_call(_request("cfdream_generate_video"), handler) == "RESULT"
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +307,7 @@ class TestRealGraphCooperativeDownlink:
 
         @tool
         async def slow_generate(prompt: str) -> str:
-            """Slow non-cancellable tool (stand-in for cfgpu generate)."""
+            """Slow non-cancellable tool (stand-in for cfdream generate)."""
             # The middleware has incremented the in-flight counter by now.
             seen_in_flight.append(get_cancel_state().protected_in_flight)
             await asyncio.sleep(0.5)

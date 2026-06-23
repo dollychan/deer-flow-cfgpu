@@ -328,7 +328,7 @@ def build_middlewares(
         middlewares.append(MlmMiddleware(agent_name=agent_name))
 
     # P8 (materials §4.3): ArtifactUrlGuardMiddleware retired — MaterialsMiddleware._resolve_outgate
-    # (out-gate signing) supersedes it. The model never holds presigned URLs to corrupt: cfgpu tool
+    # (out-gate signing) supersedes it. The model never holds presigned URLs to corrupt: cfdream tool
     # args carry material ids, signed just-in-time at the out-gate; stale/truncated refs are rejected
     # with an error ToolMessage rather than billed. No stale-URL repair is needed.
 
@@ -359,7 +359,7 @@ def build_middlewares(
 
     # Add the vision middleware only if the current model supports vision (deerflow original).
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
-    # Image *analysis* for a text-only lead is delegated to the cfgpu MCP `understand_vision`
+    # Image *analysis* for a text-only lead is delegated to the cfdream MCP `understand_vision`
     # tool (materials §4.7, paradigm C) — no deerflow-side analysis middleware/tool.
     model_config = resolved_app_config.get_model_config(model_name) if model_name else None
     if model_config is not None and model_config.supports_vision:
@@ -398,7 +398,7 @@ def build_middlewares(
 
         middlewares.append(HumanApprovalMiddleware(set(agent_config.approval_required_tools)))
 
-    # UninterruptibleToolMiddleware: shield non-cancellable tool calls (e.g. cfgpu
+    # UninterruptibleToolMiddleware: shield non-cancellable tool calls (e.g. cfdream
     # generate, which has no remote cancel API) so a mid-flight hard cancel drains the
     # tool to completion instead of orphaning the billed remote task (BUG-009). Always
     # on when the agent declares non_interruptible_tools — independent of `ask`.
@@ -412,7 +412,7 @@ def build_middlewares(
         middlewares.append(UninterruptibleToolMiddleware(agent_config.non_interruptible_tools))
 
     # Apply per-run client runtime config: eager-inject config.skills (Model B, before_agent) and
-    # constrain cfgpu generate model selection to config.models (方案 3, after_model). No-op when
+    # constrain cfdream generate model selection to config.models (方案 3, after_model). No-op when
     # neither is set. Registered AFTER HumanApprovalMiddleware on purpose: after_model dispatches in
     # reverse registration order, so this clamps the model BEFORE HAM builds its approval payload —
     # the human approves the already-constrained model and human edits are final (no second clamp).
@@ -438,10 +438,10 @@ def build_middlewares(
     middlewares.append(MessageStreamMiddleware(visibility_patterns=visibility_patterns))
 
     # MaterialsMiddleware: unified materials registry subsystem (cfgpu-docs/materials.md §5).
-    # P2 = out-gate signing (_resolve_outgate): scan cfgpu MCP tool args for material-id /
+    # P2 = out-gate signing (_resolve_outgate): scan cfdream MCP tool args for material-id /
     # our-oss-object refs and resolve/presign them just before the call; reject unresolvable
     # (dangling id / summarization-truncated url) residue with an error ToolMessage instead of
-    # billing cfgpu on a corrupt ref. Appended AFTER MessageStreamMiddleware so it is the INNER
+    # billing cfdream on a corrupt ref. Appended AFTER MessageStreamMiddleware so it is the INNER
     # layer on the wrap_tool_call onion: _resolve_outgate sees the final args and (from P3)
     # _capture stabilizes the ToolMessage before MessageStream emits. (P8: ArtifactUrlGuardMiddleware
     # removed — _resolve_outgate out-gate signing supersedes it; the model never holds presigned URLs.)

@@ -21,7 +21,7 @@ from deerflow.oss.oss_config import OSSConfig
 
 logger = logging.getLogger(__name__)
 
-# Re-host fetch limits: cfgpu temp media is bounded; a stuck CDN must not hang a run.
+# Re-host fetch limits: cfdream temp media is bounded; a stuck CDN must not hang a run.
 _REHOST_TIMEOUT_S = 60.0
 _REHOST_MAX_BYTES = 256 * 1024 * 1024  # 256 MiB ceiling (video safety)
 
@@ -81,7 +81,7 @@ class OSSUploader:
     async def rehost_url(self, url: str, thread_id: str) -> str:
         """Fetch a remote URL and re-host its bytes into our bucket; return the **object_key**.
 
-        Used by ``MaterialsMiddleware`` Capture (§4.2): a freshly generated cfgpu URL is
+        Used by ``MaterialsMiddleware`` Capture (§4.2): a freshly generated cfdream URL is
         short-lived, so its bytes are pulled into our OSS once and thereafter referenced by
         the stable object_key (presigned at the out-gate). The object_key embeds a stable
         hash of the source URL so re-hosting the same URL (e.g. a ``task_wait`` replay) is
