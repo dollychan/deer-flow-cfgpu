@@ -373,7 +373,29 @@ class TestWrapToolCallSync:
         assert evt["name"] == "present_files"
         assert evt["tool_call_id"] == "tc_p"
         assert evt["items"] == items
+        # The tool's textual content rides alongside items (non-JSON prose wrapped).
+        assert evt["content"] == {"message": "Successfully presented URLs"}
         assert evt["status"] == "success"
+
+    def test_artifact_tool_emits_json_content_alongside_items(self):
+        """An artifact tool whose content is a JSON object (cfdream generate_*) carries it at the same level as items."""
+        from langgraph.types import Command
+        mw = _middleware()
+        payload = {"urls": ["https://cdn.cfgpu.com/img-abc.png"], "task_id": "task-1", "cost_tokens": 100, "artifact": True}
+        items = [{"ref": "https://cdn.cfgpu.com/img-abc.png", "kind": "url", "expires_at": None}]
+        tm = _tool_msg(content=json.dumps(payload), name="cfdream_generate_image", tool_call_id="tc_g", artifact={"items": items})
+        cmd = Command(update={"messages": [tm]})
+        req = _tool_request(_tool("cfdream_generate_image", "artifact"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=cmd))
+
+        evt = captured[0]
+        assert evt["type"] == "artifact"
+        assert evt["items"] == items
+        assert evt["content"] == payload
 
     def test_artifact_tool_error_falls_back_to_tool_result(self):
         """An artifact tool that errors (no artifact payload) surfaces as tool_result."""

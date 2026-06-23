@@ -6,7 +6,8 @@ Hooks:
     tool_calls (internal-visibility tool_calls are filtered out).
   - wrap_tool_call / awrap_tool_call: after each tool execution, dispatches by the
     tool's client-facing visibility — ``progress`` → ``tool_result`` event,
-    ``artifact`` → ``artifact`` event (carrying ``ToolMessage.artifact``),
+    ``artifact`` → ``artifact`` event (carrying ``ToolMessage.artifact`` items plus
+    the normalised tool ``content`` at the same level),
     ``internal`` (default) → nothing. Visibility resolves via tool
     metadata["visibility"] → configured fnmatch patterns → default. Tools may
     return a bare ToolMessage or a Command wrapping one; both are handled.
@@ -260,11 +261,17 @@ class MessageStreamMiddleware(AgentMiddleware):
 
     def _emit_artifact(self, tool_msg: ToolMessage, artifact: dict) -> None:
         status = getattr(tool_msg, "status", None) or "success"
+        # The client needs the tool's textual result (e.g. cfdream generate_*'s
+        # urls/task_id/cost_tokens) alongside the artifact items, so carry the
+        # normalised content at the same level as items via the same
+        # _structure_content contract used by tool_result.
+        content = self._structure_content(_extract_text_content(tool_msg.content))
         self._emit({
             "type": "artifact",
             "message_id": tool_msg.id or "",
             "tool_call_id": tool_msg.tool_call_id or "",
             "name": tool_msg.name or "",
+            "content": content,
             "items": artifact.get("items") or [],
             "status": status,
         })
