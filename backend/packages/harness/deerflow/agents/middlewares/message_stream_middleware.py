@@ -11,6 +11,11 @@ Hooks:
     ``internal`` (default) → nothing. Visibility resolves via tool
     metadata["visibility"] → configured fnmatch patterns → default. Tools may
     return a bare ToolMessage or a Command wrapping one; both are handled.
+    For MCP tools, any ``structuredContent`` (carried on
+    ``ToolMessage.artifact["structured_content"]``) is merged into the emitted
+    event ``content`` — a client-only side channel that the model never saw, so the
+    client gets the full result (cfdream usage/payload, understand_vision
+    reasoning_content) without it bloating the model's tool result.
 
 Combined with ``stream_event_types=["custom"]``, the downstream client receives
 only semantically meaningful events and is not exposed to LangGraph's automatic
@@ -144,6 +149,29 @@ class MessageStreamMiddleware(AgentMiddleware):
         return result
 
     @staticmethod
+    def _structured_side_channel(tool_msg: ToolMessage) -> dict | None:
+        """Extract the MCP structuredContent carried on ``ToolMessage.artifact``.
+
+        langchain-mcp-adapters maps an MCP tool's ``structuredContent`` onto
+        ``ToolMessage.artifact == {"structured_content": {...}}`` (its ``MCPToolArtifact``
+        TypedDict). That payload is a *client-only* side channel: it never entered the
+        model context (the LLM only saw the lean ``ToolMessage.content``). We merge it
+        back into the emitted event ``content`` so the client receives the full result
+        — e.g. cfdream ``generate_*`` ``usage``/``payload`` or ``understand_vision``
+        ``reasoning_content``/``usage``/``payload`` — without bloating (and getting
+        truncated out of) the model's tool result. Returns None when absent.
+
+        MaterialsMiddleware's media-capture rewrite (``_rewrite_result``) preserves this
+        key alongside ``items``, so it survives for ``generate_*`` artifact events too.
+        """
+        artifact = getattr(tool_msg, "artifact", None)
+        if isinstance(artifact, dict):
+            sc = artifact.get("structured_content")
+            if isinstance(sc, dict):
+                return sc
+        return None
+
+    @staticmethod
     def _resolve_tool_message(result: Any) -> ToolMessage | None:
         """Extract the ToolMessage from a bare ToolMessage or a Command update."""
         if isinstance(result, ToolMessage):
@@ -242,6 +270,9 @@ class MessageStreamMiddleware(AgentMiddleware):
 
     def _emit_tool_result(self, tool_msg: ToolMessage) -> None:
         content = self._structure_content(_extract_text_content(tool_msg.content))
+        sc = self._structured_side_channel(tool_msg)
+        if sc:
+            content = {**content, **sc}
         status = getattr(tool_msg, "status", None) or "success"
 
         self._emit({
@@ -266,6 +297,9 @@ class MessageStreamMiddleware(AgentMiddleware):
         # normalised content at the same level as items via the same
         # _structure_content contract used by tool_result.
         content = self._structure_content(_extract_text_content(tool_msg.content))
+        sc = self._structured_side_channel(tool_msg)
+        if sc:
+            content = {**content, **sc}
         self._emit({
             "type": "artifact",
             "message_id": tool_msg.id or "",

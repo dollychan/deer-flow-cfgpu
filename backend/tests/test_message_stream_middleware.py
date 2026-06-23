@@ -442,6 +442,68 @@ class TestWrapToolCallSync:
 
         assert captured[0]["content"] == {"items": models}
 
+    def test_structured_content_merged_into_tool_result(self):
+        """MCP structuredContent (on artifact) merges into a progress tool_result content.
+
+        understand_vision: lean content {id, model, message} + structuredContent
+        {reasoning_content, usage, payload} → client gets the full reconstructed result.
+        """
+        mw = _middleware()
+        lean = {"id": "chatcmpl-1", "model": "qwen3-vl", "message": "the answer"}
+        sc = {"reasoning_content": "thinking...", "usage": {"prompt_tokens": 10}, "payload": {"model": "qwen", "messages": []}}
+        tm = _tool_msg(content=json.dumps(lean), name="cfdream_understand_vision", tool_call_id="tc_u", artifact={"structured_content": sc})
+        req = _tool_request(_tool("cfdream_understand_vision", "progress"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=tm))
+
+        evt = captured[0]
+        assert evt["type"] == "tool_result"
+        assert evt["content"] == {**lean, **sc}
+
+    def test_structured_content_merged_into_artifact_event(self):
+        """MCP structuredContent rides alongside items in an artifact event.
+
+        generate_*: MaterialsMiddleware preserves structured_content next to items, so
+        usage/payload reach the client artifact event content.
+        """
+        from langgraph.types import Command
+        mw = _middleware()
+        body = {"task_id": "cgt-1", "model_used": "doubao-seedance", "seed": 42, "materials": ["m1"]}
+        items = [{"id": "m1", "ref": "agent-artifacts/x.png", "kind": "image", "stable": True}]
+        sc = {"usage": {"totalTokens": 100}, "payload": {"model": "doubao", "prompt": "x"}}
+        tm = _tool_msg(content=json.dumps(body), name="cfdream_generate_image", tool_call_id="tc_g", artifact={"items": items, "structured_content": sc})
+        cmd = Command(update={"messages": [tm]})
+        req = _tool_request(_tool("cfdream_generate_image", "artifact"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=cmd))
+
+        evt = captured[0]
+        assert evt["type"] == "artifact"
+        assert evt["items"] == items
+        assert evt["content"] == {**body, **sc}
+
+    def test_artifact_without_structured_content_unchanged(self):
+        """An items-only artifact (no structured_content) emits content from text alone."""
+        from langgraph.types import Command
+        mw = _middleware()
+        items = [{"id": "m1", "ref": "agent-artifacts/x.png", "kind": "image", "stable": True}]
+        tm = _tool_msg(content=json.dumps({"materials": ["m1"]}), name="cfdream_generate_image", tool_call_id="tc_g", artifact={"items": items})
+        cmd = Command(update={"messages": [tm]})
+        req = _tool_request(_tool("cfdream_generate_image", "artifact"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=cmd))
+
+        assert captured[0]["content"] == {"materials": ["m1"]}
+
     def test_oversized_json_degrades_to_message(self):
         """JSON beyond max_content_chars degrades to a truncated message object (MQ size guard)."""
         mw = _middleware(max_content_chars=20)

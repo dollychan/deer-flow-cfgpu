@@ -239,12 +239,19 @@ def _rewrite_result(result: ToolMessage, ordered_urls: list[str], id_for_url: di
         new_content = json.dumps(body, ensure_ascii=False)
     else:
         new_content = json.dumps({"materials": ids}, ensure_ascii=False)
+    # 透传 MCP structuredContent（cfdream split 出的 usage/payload）——它是客户端侧旁路，
+    # 与本次写入的 items 同放 artifact，供 MessageStreamMiddleware 合并进下行 content。
+    # 不透传会在此处把 generate_* 的 usage/payload 丢掉（understand_vision 走非媒体路径不经此改写）。
+    new_artifact: dict[str, Any] = {"items": items}
+    orig_artifact = getattr(result, "artifact", None)
+    if isinstance(orig_artifact, dict) and isinstance(orig_artifact.get("structured_content"), dict):
+        new_artifact["structured_content"] = orig_artifact["structured_content"]
     return ToolMessage(
         content=new_content,
         tool_call_id=result.tool_call_id,
         name=result.name,
         status=getattr(result, "status", None) or "success",
-        artifact={"items": items},
+        artifact=new_artifact,
     )
 
 

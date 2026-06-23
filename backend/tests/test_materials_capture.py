@@ -167,6 +167,22 @@ async def test_rehost_registers_oss_path_and_dual_track():
 
 
 @pytest.mark.asyncio
+async def test_rewrite_preserves_mcp_structured_content():
+    # cfdream split routes usage/payload into MCP structuredContent → arrives as
+    # ToolMessage.artifact["structured_content"]; the media-capture rewrite must carry it
+    # forward next to items (else the client artifact event loses usage/payload).
+    up = _FakeUploader()
+    result = _cfdream_result(["https://cdn.cfgpu.com/img-abc.png"])
+    sc = {"usage": {"totalTokens": 100}, "payload": {"model": "doubao", "prompt": "x"}}
+    result.artifact = {"structured_content": sc}
+    out = await _run(result, fake_uploader=up)
+
+    tm = out.update["messages"][0]
+    assert tm.artifact["items"][0]["ref"] == "agent-artifacts/t1/images/img-abc.png"
+    assert tm.artifact["structured_content"] == sc
+
+
+@pytest.mark.asyncio
 async def test_register_policy_keeps_global_url_no_upload():
     up = _FakeUploader()
     result = _cfdream_result(["https://third.cdn/x.png"], name="image_search")
