@@ -183,6 +183,24 @@ async def test_rewrite_preserves_mcp_structured_content():
 
 
 @pytest.mark.asyncio
+async def test_rewrite_keeps_terminal_status_hint():
+    # cfdream annotate_artifact stamps a terminal status alongside artifact:true; the
+    # content rewrite strips urls but must keep the hint so the LLM stops polling
+    # task_status/task_wait on an already-finished generation.
+    up = _FakeUploader()
+    hint = "Success. URLs already generated; no further task_status/task_wait polling needed."
+    result = _cfdream_result(
+        ["https://cdn.cfgpu.com/img-abc.png"], name="cfdream_task_wait", extra={"status": hint}
+    )
+    out = await _run(result, fake_uploader=up, name="cfdream_task_wait")
+
+    body = json.loads(out.update["messages"][0].content)
+    assert body["status"] == hint
+    assert body["materials"] == ["m1"]
+    assert "urls" not in body and "http" not in out.update["messages"][0].content
+
+
+@pytest.mark.asyncio
 async def test_register_policy_keeps_global_url_no_upload():
     up = _FakeUploader()
     result = _cfdream_result(["https://third.cdn/x.png"], name="image_search")
