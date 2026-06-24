@@ -11,9 +11,10 @@
 
 from __future__ import annotations
 
+import hashlib
 from urllib.parse import unquote, urlsplit
 
-from deerflow.agents.materials.types import Kind, Material, Origin, RefType, new_material_id
+from deerflow.agents.materials.types import Kind, Material, Origin, RefType
 
 # 我方 OSS 对象的 object_key 前缀（oss/uploader.py: ``agent-artifacts/{thread}/...``）。
 # host 无关的可靠"我方对象"信号：presigned url 的 path 去前导斜杠后以此打头。
@@ -42,6 +43,9 @@ def stable_ref(ref_type: RefType, ref: str) -> str:
         return f"oss:{ref}"
     if ref_type == "asset_url":
         return f"asset:{ref}"
+    if ref_type == "local":
+        # local 素材身份 = local_path（D15/§4.8）；调用方把 local_path 当 ref 传入求 id。
+        return f"local:{ref}"
     parts = urlsplit(ref)
     return f"url:{parts.scheme.lower()}://{parts.netloc.lower()}{unquote(parts.path)}"
 
@@ -62,6 +66,29 @@ def classify_ref(raw: str) -> tuple[RefType, str]:
     if path.startswith(_OUR_OSS_PREFIX):
         return "oss_path", path
     return "global_url", raw
+
+
+# material id 派生哈希长度（hex 字符数）。8 hex=32bit，单 thread 数百素材碰撞概率可忽略。
+_ID_HASH_LEN = 8
+
+
+def material_id(ref_type: RefType, ref: str, origin_url: str | None = None) -> str:
+    """素材的**内容派生确定性 id**（cfgpu-docs/materials.md §B / D12）：``m_<sha1(identity)[:8]>``。
+
+    身份 = 素材的**源地址**经 ``stable_ref`` 归一后的串：优先 ``origin_url``（rehost 前的原始外链）
+    ——使 id 在 ``global_url→oss_path`` 升级、task_wait 重放、并行 capture 三种情形下**保持稳定**，
+    无 ``origin_url`` 时退回 ``(ref_type, ref)``。
+
+    为什么不再用顺序 ``mN``：顺序分配是「读 registry → max+1」的 read-modify-write，并行工具调用
+    各读同一快照 → 撞号 → reducer attach 合并致素材丢失/计费错位（§B 决策）。内容派生 id 是**纯函数、
+    零协调**：并行不同源 → 不同 id；并行同源 → 同 id（reducer 幂等合并），从根上消除竞态。
+    """
+    if origin_url:
+        rt, r = classify_ref(origin_url)
+        key = stable_ref(rt, r)
+    else:
+        key = stable_ref(ref_type, ref)
+    return "m_" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:_ID_HASH_LEN]
 
 
 def build_reverse_index(materials: dict[str, Material] | None) -> dict[str, str]:
@@ -92,7 +119,7 @@ def register(
     kind: Kind,
     origin: Origin,
     ref_type: RefType,
-    ref: str,
+    ref: str = "",
     caption: str | None = None,
     turn: int | None = None,
     origin_url: str | None = None,
@@ -101,9 +128,19 @@ def register(
     display: bool | None = None,
     stable: bool | None = None,
 ) -> tuple[str, dict[str, Material]]:
-    """分配新 id 并产出 reducer 形态更新 ``{id: Material}``。不查重（调用方按需先 resolve）。"""
-    mid = new_material_id(materials)
-    mat: Material = {"id": mid, "kind": kind, "origin": origin, "ref_type": ref_type, "ref": ref}
+    """分配内容派生 id 并产出 reducer 形态更新 ``{id: Material}``。不查重（调用方按需先 resolve）。
+
+    ``materials`` 参数保留作 registry 上下文（语义对齐），id 不再依赖它——``material_id`` 是纯函数，
+    并行登记天然不撞号（§B）。
+
+    ``ref_type=local``（D15/§4.8）：无远程 ``ref``，身份 = ``local_path``——id 由 local_path 派生，
+    ``ref`` 字段省略（I13：local_path 是唯一到达点）。
+    """
+    identity_ref = local_path if (ref_type == "local" and local_path) else ref
+    mid = material_id(ref_type, identity_ref or "", origin_url)
+    mat: Material = {"id": mid, "kind": kind, "origin": origin, "ref_type": ref_type}
+    if ref:
+        mat["ref"] = ref  # local 态无远程 ref → 省略（I13）
     for key, value in (
         ("caption", caption),
         ("turn", turn),
@@ -127,7 +164,8 @@ def project_display_refs(materials: dict[str, Material] | None) -> list[str]:
     """
     if not materials:
         return []
-    ordered = sorted(materials.values(), key=lambda m: int(str(m.get("id", "m0"))[1:]) if str(m.get("id", "m0"))[1:].isdigit() else 0)
+    # 内容派生 id 非顺序 → 按 id 串排序求**确定性**（artifacts 顺序仅展示用，稳定即可）。
+    ordered = sorted(materials.values(), key=lambda m: str(m.get("id", "")))
     refs: list[str] = []
     for mat in ordered:
         if not mat.get("display"):
@@ -136,6 +174,33 @@ def project_display_refs(materials: dict[str, Material] | None) -> list[str]:
         if ref and ref not in refs:
             refs.append(ref)
     return refs
+
+
+def project_artifact_items(materials: dict[str, Material] | None, ids: list[str]) -> list[dict]:
+    """Live `artifact` 事件 items 投影（§4.6, D14）：给定一组 id，构造下行交付项。
+
+    与 `project_display_refs`（非流式 final_state 投影，按 `display`）镜像，但供 **emit 端**
+    （MessageStreamMiddleware）在 `visibility==artifact` 时调用——故**按 `stable` 过滤**（交付资格
+    由 visibility 决定、在调用方门控；这里只挡未落盘的 unstable 项，I5）。保留 `ids` 顺序（=工具结果
+    content 里 `materials:[...]` 的顺序＝产出序）。**绝不 presigned**：item.ref 是稳定 ref（oss_path
+    object_key / global_url url），客户端按约定取。
+    """
+    if not materials:
+        return []
+    items: list[dict] = []
+    seen: set[str] = set()
+    for mid in ids:
+        if mid in seen:
+            continue
+        mat = materials.get(mid)
+        if mat is None or not mat.get("stable", True):
+            continue
+        ref = mat.get("ref")
+        if not ref:
+            continue
+        seen.add(mid)
+        items.append({"id": mid, "ref": ref, "kind": mat.get("kind"), "stable": True})
+    return items
 
 
 def resolve_or_register(

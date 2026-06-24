@@ -447,7 +447,19 @@ def build_middlewares(
     # removed — _resolve_outgate out-gate signing supersedes it; the model never holds presigned URLs.)
     from deerflow.agents.materials.middleware import MaterialsMiddleware
 
-    middlewares.append(MaterialsMiddleware())
+    # Capture is config-driven (cfgpu-docs/materials.md D13+/D14, no cfdream_ hardcode):
+    # materials_capture → policy (rehost/register/off), materials_url_path → result-url JSON
+    # field path. MaterialsMiddleware is pure capture (no visibility/display knowledge);
+    # the deliverable decision (display + live artifact items) is owned by
+    # MessageStreamMiddleware via tool_visibility (D14: rehost ⫫ emit-artifact).
+    capture_patterns = list(agent_config.materials_capture.items()) if agent_config and agent_config.materials_capture else None
+    url_path_patterns = list(agent_config.materials_url_path.items()) if agent_config and agent_config.materials_url_path else None
+    middlewares.append(
+        MaterialsMiddleware(
+            capture_patterns=capture_patterns,
+            url_path_patterns=url_path_patterns,
+        )
+    )
 
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider
     # safety-terminated the response. Appended after HumanApprovalMiddleware so

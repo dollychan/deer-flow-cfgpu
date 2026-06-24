@@ -51,11 +51,11 @@ def _patch(up):
 
 
 def test_find_by_address_matches_ref_and_origin_url():
-    _, upd = register({}, kind="image", origin="generate", ref_type="oss_path", ref="agent-artifacts/t1/images/a.png", origin_url="https://cdn.cfgpu.com/x.png")
+    mid, upd = register({}, kind="image", origin="generate", ref_type="oss_path", ref="agent-artifacts/t1/images/a.png", origin_url="https://cdn.cfgpu.com/x.png")
     materials = upd
-    assert find_by_address(materials, "oss_path", "agent-artifacts/t1/images/a.png") == "m1"
+    assert find_by_address(materials, "oss_path", "agent-artifacts/t1/images/a.png") == mid
     # origin_url 也挂索引（rehost 前外链再浮现仍幂等）
-    assert find_by_address(materials, "global_url", "https://cdn.cfgpu.com/x.png") == "m1"
+    assert find_by_address(materials, "global_url", "https://cdn.cfgpu.com/x.png") == mid
     assert find_by_address(materials, "global_url", "https://other.com/z.png") is None
 
 

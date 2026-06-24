@@ -56,18 +56,21 @@ def _attach_material(existing: Material, new: Material) -> Material:
     不整体替换。ref_type/ref 受约束：
 
     - ``asset_url`` immutable —— ref_type/ref 不可变，冲突即 raise（fail-closed）。
-    - 仅放行升级 ``global_url -> oss_path``（rehost 后 ref 改写为 object_key）。
+    - 放行升级 ``global_url -> oss_path``（rehost 后 ref 改写为 object_key）与
+      ``local -> oss_path``（stage 上传后 attach object_key，D15/§4.8）。
     - 其余 ref_type 跨值改写视为非法，raise。
     """
     old_rt = existing.get("ref_type")
     new_rt = new.get("ref_type")
+    # 合法升级（到达点增强、非冲突）：临期/纯本地 → 持久 oss_path。
+    _upgrades = {("global_url", "oss_path"), ("local", "oss_path")}
 
     if old_rt == "asset_url":
         if new_rt is not None and new_rt != "asset_url":
             raise ValueError(f"asset_url material {existing.get('id')!r} ref_type is immutable: {old_rt!r} -> {new_rt!r}")
         if "ref" in new and new["ref"] != existing.get("ref"):
             raise ValueError(f"asset_url material {existing.get('id')!r} ref is immutable")
-    elif new_rt is not None and new_rt != old_rt and not (old_rt == "global_url" and new_rt == "oss_path"):
+    elif new_rt is not None and new_rt != old_rt and (old_rt, new_rt) not in _upgrades:
         raise ValueError(f"illegal ref_type transition for {existing.get('id')!r}: {old_rt!r} -> {new_rt!r}")
 
     merged: dict[str, Any] = dict(existing)

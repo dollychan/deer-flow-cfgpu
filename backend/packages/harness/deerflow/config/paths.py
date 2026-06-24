@@ -88,6 +88,25 @@ def join_host_path(base: str, *parts: str) -> str:
     return _join_host_path(base, *parts)
 
 
+def map_virtual_to_physical(virtual_path: str, outputs_path: str) -> str:
+    """Map a sandbox virtual path ``/mnt/user-data/<rest>`` to its host physical path.
+
+    Derives the user-data root from ``outputs_path`` (``outputs_path.parent`` ==
+    ``.../user-data``) — the thread's outputs dir is the single source of truth for
+    which bucket this thread uses (thread-tenancy decoupling). Not confined to the
+    outputs subtree: workspace/uploads virtual paths map too (materials §4.5/§4.8 —
+    any local product may be registered/localized). Non-virtual paths are returned
+    expanded/resolved as-is.
+    """
+    user_data_dir = Path(outputs_path).resolve().parent
+    virtual_prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
+    stripped = virtual_path.lstrip("/")
+    if stripped == virtual_prefix or stripped.startswith(virtual_prefix + "/"):
+        relative = stripped[len(virtual_prefix):].lstrip("/")
+        return str((user_data_dir / relative).resolve())
+    return str(Path(virtual_path).expanduser().resolve())
+
+
 class Paths:
     """
     Centralized path configuration for DeerFlow application data.

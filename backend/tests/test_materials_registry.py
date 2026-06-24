@@ -7,6 +7,7 @@
 from deerflow.agents.materials.registry import (
     build_reverse_index,
     classify_ref,
+    material_id,
     project_display_refs,
     register,
     resolve_or_register,
@@ -16,6 +17,11 @@ from deerflow.agents.materials.registry import (
 _OUR_PRESIGNED = "https://bkt.oss-cn-x.aliyuncs.com/agent-artifacts/t1/images/hero.png?Expires=999&Signature=abc"
 _OUR_KEY = "agent-artifacts/t1/images/hero.png"
 _THIRD = "https://cdn.example.com/pics/cat.png"
+
+
+def _mid_of(raw: str) -> str:
+    """测试侧复算某源地址的内容派生 id（§B），免硬编码 mN。"""
+    return material_id(*classify_ref(raw))
 
 
 # --- classify_ref -----------------------------------------------------------
@@ -63,16 +69,16 @@ def test_stable_ref_oss_vs_url_no_collision():
 # --- register ---------------------------------------------------------------
 
 
-def test_register_allocates_sequential_id():
+def test_register_allocates_content_derived_id():
     mid, update = register({}, kind="image", origin="uplink", ref_type="global_url", ref=_THIRD)
-    assert mid == "m1"
-    assert update["m1"]["ref"] == _THIRD
-    assert update["m1"]["kind"] == "image"
+    assert mid == _mid_of(_THIRD)  # 内容派生（§B），非顺序 mN
+    assert update[mid]["ref"] == _THIRD
+    assert update[mid]["kind"] == "image"
 
 
 def test_register_optional_fields_only_when_set():
-    _, update = register({}, kind="image", origin="uplink", ref_type="global_url", ref=_THIRD, caption="cat")
-    mat = update["m1"]
+    mid, update = register({}, kind="image", origin="uplink", ref_type="global_url", ref=_THIRD, caption="cat")
+    mat = update[mid]
     assert mat["caption"] == "cat"
     assert "turn" not in mat  # None 不写入
 
@@ -107,9 +113,9 @@ def test_resolve_dedup_presigned_against_existing_oss_path():
 def test_resolve_third_party_registers_global_url_no_network():
     materials: dict = {}
     mid, update = resolve_or_register(materials, _THIRD, kind="image")
-    assert mid == "m1"
-    assert update["m1"]["ref_type"] == "global_url"
-    assert update["m1"]["ref"] == _THIRD  # 原样，不下载不 rehost
+    assert mid == _mid_of(_THIRD)
+    assert update[mid]["ref_type"] == "global_url"
+    assert update[mid]["ref"] == _THIRD  # 原样，不下载不 rehost
 
 
 def test_resolve_miss_then_hit_same_batch():
@@ -117,7 +123,7 @@ def test_resolve_miss_then_hit_same_batch():
     mid1, up1 = resolve_or_register(materials, _THIRD, kind="image")
     materials.update(up1)
     mid2, up2 = resolve_or_register(materials, _THIRD, kind="image")
-    assert mid1 == mid2 == "m1"
+    assert mid1 == mid2 == _mid_of(_THIRD)
     assert up2 == {}  # 第二次去重命中
 
 

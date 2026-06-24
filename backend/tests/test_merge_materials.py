@@ -1,12 +1,13 @@
 """P0 — materials registry 地基（cfgpu-docs/materials.md §2.1, materials-impl-plan.md P0）。
 
 覆盖 merge_materials reducer 的字段级 attach / ref_type 升级 / asset_url immutable /
-None 与空 dict 处理，以及 new_material_id 顺序生成。
+None 与空 dict 处理，以及 material_id 内容派生确定性生成（§B）。
 """
 
 import pytest
 
-from deerflow.agents.materials.types import Material, new_material_id
+from deerflow.agents.materials.registry import material_id
+from deerflow.agents.materials.types import Material
 from deerflow.agents.thread_state import merge_materials
 
 
@@ -116,19 +117,30 @@ def test_asset_url_other_fields_still_attach():
     assert out["m5"]["ref"] == "seedance:abc"
 
 
-# --- new_material_id 顺序生成 ------------------------------------------------
+# --- material_id 内容派生确定性生成（§B：并行不撞号）-------------------------
 
 
-def test_new_id_empty_is_m1():
-    assert new_material_id(None) == "m1"
-    assert new_material_id({}) == "m1"
+def test_material_id_format_and_determinism():
+    mid = material_id("global_url", "https://cdn/x.png")
+    assert mid.startswith("m_") and len(mid) == 10  # m_ + 8 hex
+    assert all(c in "0123456789abcdef" for c in mid[2:])
+    # 纯函数：同源恒同 id（并行/重放天然幂等）
+    assert material_id("global_url", "https://cdn/x.png") == mid
 
 
-def test_new_id_max_plus_one():
-    materials = {"m1": _mat("m1"), "m3": _mat("m3")}
-    assert new_material_id(materials) == "m4"  # 取 max+1（非 count+1），跳号也正确
+def test_material_id_distinct_sources_distinct_ids():
+    assert material_id("global_url", "https://cdn/a.png") != material_id("global_url", "https://cdn/b.png")
 
 
-def test_new_id_ignores_non_mn_keys():
-    materials = {"m2": _mat("m2"), "weird": _mat("weird")}
-    assert new_material_id(materials) == "m3"
+def test_material_id_query_agnostic():
+    """身份去 query（presign 签名不参与）→ 同对象不同签名映射同 id（去重一致）。"""
+    a = material_id("global_url", "https://cdn/x.png?Expires=1&Signature=aa")
+    b = material_id("global_url", "https://cdn/x.png?Expires=2&Signature=bb")
+    assert a == b
+
+
+def test_material_id_prefers_origin_url_for_lifecycle_stability():
+    """rehost 后 ref 变 object_key，但 id 由 origin_url 派生 → 升级前后 id 不变（§4.5 lifecycle）。"""
+    before = material_id("global_url", "https://cdn.cfgpu.com/temp.png")
+    after = material_id("oss_path", "agent-artifacts/t1/images/temp.png", origin_url="https://cdn.cfgpu.com/temp.png")
+    assert before == after

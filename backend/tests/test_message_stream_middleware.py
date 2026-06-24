@@ -504,6 +504,63 @@ class TestWrapToolCallSync:
 
         assert captured[0]["content"] == {"materials": ["m1"]}
 
+    def test_structured_content_stripped_from_tool_message_after_emit(self):
+        """After a progress emit, structured_content is removed from the persisted ToolMessage.
+
+        It rode the downstream event (client side channel) but must not linger on the
+        checkpointed message: the model never saw it and its payload can carry presigned URLs.
+        """
+        mw = _middleware()
+        lean = {"id": "chatcmpl-1", "model": "qwen3-vl", "message": "the answer"}
+        sc = {"usage": {"prompt_tokens": 10}, "payload": {"reference_images": ["https://oss/...sig"]}}
+        tm = _tool_msg(content=json.dumps(lean), name="cfdream_understand_vision", tool_call_id="tc_u", artifact={"structured_content": sc})
+        req = _tool_request(_tool("cfdream_understand_vision", "progress"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            result = mw.wrap_tool_call(req, MagicMock(return_value=tm))
+
+        # The event still carries the full reconstructed content...
+        assert captured[0]["content"] == {**lean, **sc}
+        # ...but the persisted message no longer holds the side channel.
+        assert result is tm
+        assert tm.artifact is None
+
+    def test_structured_content_stripped_but_items_preserved(self):
+        """The artifact path strips structured_content while keeping the deliverable items."""
+        from langgraph.types import Command
+        mw = _middleware()
+        body = {"task_id": "cgt-1", "materials": ["m1"]}
+        items = [{"id": "m1", "ref": "agent-artifacts/x.png", "kind": "image", "stable": True}]
+        sc = {"usage": {"totalTokens": 100}, "payload": {"reference_images": ["https://oss/...sig"]}}
+        tm = _tool_msg(content=json.dumps(body), name="cfdream_generate_image", tool_call_id="tc_g", artifact={"items": items, "structured_content": sc})
+        cmd = Command(update={"messages": [tm]})
+        req = _tool_request(_tool("cfdream_generate_image", "artifact"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=cmd))
+
+        assert captured[0]["content"] == {**body, **sc}
+        assert tm.artifact == {"items": items}
+
+    def test_internal_tool_also_strips_structured_content(self):
+        """Internal-visibility tools emit nothing downstream, yet the transient side channel
+        is still dropped from the persisted message."""
+        mw = _middleware(default_visibility="internal")
+        tm = _tool_msg(content="{}", name="cfdream_secret", tool_call_id="tc_i", artifact={"structured_content": {"payload": {}}})
+        req = _tool_request(_tool("cfdream_secret"))  # no metadata → default internal
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=tm))
+
+        assert captured == []  # internal: nothing emitted
+        assert tm.artifact is None
+
     def test_oversized_json_degrades_to_message(self):
         """JSON beyond max_content_chars degrades to a truncated message object (MQ size guard)."""
         mw = _middleware(max_content_chars=20)
@@ -639,3 +696,82 @@ class TestWrapToolCallAsync:
             await mw.awrap_tool_call(_tool_request(_tool("bash")), AsyncMock(return_value=tm))
 
         assert captured == []
+
+
+# ---------------------------------------------------------------------------
+# Artifact items projected from materials (D14: emit owns display + items)
+# ---------------------------------------------------------------------------
+
+class TestArtifactMaterialsProjection:
+    """visibility==artifact + capture-rewritten content → project items from materials,
+    stamp display=true (D14). Capture (MaterialsMiddleware) no longer builds items/display.
+    """
+
+    @staticmethod
+    def _req(materials: dict, tool_name: str = "cfdream_generate_image", vis: str = "artifact"):
+        return SimpleNamespace(tool=_tool(tool_name, vis), state={"materials": materials})
+
+    @staticmethod
+    def _captured_cmd(ids, *, new_materials=None, name="cfdream_generate_image"):
+        from langgraph.types import Command
+        body = {"task_id": "t-1", "cost_tokens": 100, "materials": ids}
+        tm = _tool_msg(content=json.dumps(body), name=name, tool_call_id="tc_g", artifact=None)
+        update: dict = {"messages": [tm]}
+        if new_materials is not None:
+            update["materials"] = new_materials
+        return Command(update=update)
+
+    def _run(self, mw, req, cmd):
+        captured: list[dict] = []
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=cmd))
+        return captured
+
+    def test_projects_items_and_stamps_display(self):
+        mw = _middleware()
+        mid = "m_abc123"
+        new_mats = {mid: {"id": mid, "kind": "image", "ref_type": "oss_path", "ref": "agent-artifacts/t1/images/a.png", "stable": True}}
+        cmd = self._captured_cmd([mid], new_materials=new_mats)
+        captured = self._run(mw, self._req({}), cmd)
+
+        assert len(captured) == 1 and captured[0]["type"] == "artifact"
+        assert captured[0]["items"] == [{"id": mid, "ref": "agent-artifacts/t1/images/a.png", "kind": "image", "stable": True}]
+        # textual content rides alongside (url-stripped capture body)
+        assert captured[0]["content"]["materials"] == [mid]
+        # display stamped back onto the persisted material (for final_state projection parity)
+        assert cmd.update["materials"][mid]["display"] is True
+
+    def test_unstable_material_yields_no_items_falls_back_to_tool_result(self):
+        mw = _middleware()
+        mid = "m_fail01"
+        new_mats = {mid: {"id": mid, "kind": "image", "ref_type": "global_url", "ref": "https://cdn/expired.png", "stable": False}}
+        cmd = self._captured_cmd([mid], new_materials=new_mats)
+        captured = self._run(mw, self._req({}), cmd)
+
+        assert len(captured) == 1 and captured[0]["type"] == "tool_result"
+        # not stamped a deliverable (I5: unstable never display)
+        assert "display" not in cmd.update["materials"][mid]
+
+    def test_dedup_replay_id_only_in_prior_state(self):
+        mw = _middleware()
+        mid = "m_replay"
+        prior = {mid: {"id": mid, "kind": "video", "ref_type": "oss_path", "ref": "agent-artifacts/t1/v.mp4", "stable": True}}
+        # task_wait replay: dedup → Command carries NO materials, content still references the id
+        cmd = self._captured_cmd([mid], new_materials=None, name="cfdream_task_wait")
+        captured = self._run(mw, self._req(prior, tool_name="cfdream_task_wait"), cmd)
+
+        assert captured[0]["type"] == "artifact"
+        assert captured[0]["items"] == [{"id": mid, "ref": "agent-artifacts/t1/v.mp4", "kind": "video", "stable": True}]
+        # partial display stamp added to update so it persists despite dedup
+        assert cmd.update["materials"][mid] == {"id": mid, "display": True}
+
+    def test_progress_visibility_no_artifact_no_stamp(self):
+        mw = _middleware()
+        mid = "m_search1"
+        new_mats = {mid: {"id": mid, "kind": "image", "ref_type": "global_url", "ref": "https://img/x.png", "stable": True}}
+        cmd = self._captured_cmd([mid], new_materials=new_mats, name="image_search")
+        captured = self._run(mw, self._req({}, tool_name="image_search", vis="progress"), cmd)
+
+        assert captured[0]["type"] == "tool_result"  # progress → not an artifact deliverable
+        assert "display" not in cmd.update["materials"][mid]  # register material stays display-less

@@ -101,6 +101,22 @@ class AgentConfig(BaseModel):
     # metadata={"visibility": ...} take precedence over these patterns.
     # e.g. {"cfdream_generate_*": "progress", "web_search": "progress"}
     tool_visibility: dict[str, str] | None = None
+    # materials_capture: maps tool-name fnmatch patterns to the MaterialsMiddleware
+    # capture policy ("rehost" | "register" | "off"). First matching pattern wins;
+    # unmatched tools default to "off" (no materialization, zero accidental landing).
+    # Built-in tools that declare metadata={"materials_capture": ...} take precedence.
+    # There is NO built-in tool-name default — the legacy cfdream_ prefix hardcode is
+    # retired; cfdream generation must be configured explicitly here.
+    # e.g. {"cfdream_generate_*": "rehost", "cfdream_task_wait": "rehost", "image_search": "register"}
+    materials_capture: dict[str, str] | None = None
+    # materials_url_path: maps tool-name fnmatch patterns to the dotted JSON field
+    # path locating result URLs for capture. Both rehost and register read URLs via
+    # this path. Segment grammar: dotted keys with optional [*] list wildcard, e.g.
+    # "urls" or "results[*].image_url". First matching pattern wins; a tool with a
+    # capture policy but no url path extracts nothing (no-op). Built-in tools may
+    # declare metadata={"materials_url_path": ...} which takes precedence.
+    # e.g. {"cfdream_*": "urls", "image_search": "results[*].image"}
+    materials_url_path: dict[str, str] | None = None
     # model_bindings: maps tool-name fnmatch patterns to the config.models task-type
     # slice ("image" | "video") whose model_names constrain that tool's `model` arg.
     # Consumed by RuntimeConfigMiddleware (after_model). First matching pattern wins.

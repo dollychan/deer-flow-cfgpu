@@ -123,6 +123,41 @@ def test_present_files_is_decoupled_from_user_id_in_context(tmp_path):
     assert result.update["messages"][0].content == "Successfully presented files"
 
 
+def test_present_material_id_stages_and_marks_display(tmp_path, monkeypatch):
+    """present_files 吃 material id（§4.8.3）：local 素材 → stage 上传 oss_path + display=true。"""
+    import deerflow.agents.materials.materialize as mz
+
+    class _Uploader:
+        def __init__(self):
+            self.calls = []
+
+        async def upload_local_file(self, virtual_path, physical_path, thread_id):
+            self.calls.append(virtual_path)
+            return f"agent-artifacts/{thread_id}/files/{virtual_path.rsplit('/', 1)[-1]}"
+
+    up = _Uploader()
+    monkeypatch.setattr(mz, "get_oss_uploader", lambda: up)
+    monkeypatch.setattr(present_file_tool_module, "get_oss_client", lambda: None)  # presign 回裸 key
+
+    outputs_dir = tmp_path / "threads" / "thread-1" / "user-data" / "outputs"
+    outputs_dir.mkdir(parents=True)
+    materials = {"m1": {"id": "m1", "kind": "image", "origin": "local", "ref_type": "local", "local_path": "/mnt/user-data/outputs/a.png"}}
+    runtime = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs_dir)}, "materials": materials},
+        context={"thread_id": "thread-1"},
+        config={},
+    )
+
+    result = _present(runtime=runtime, filepaths=["m1"], tool_call_id="tc-mat")
+
+    assert up.calls == ["/mnt/user-data/outputs/a.png"]  # local → 上传
+    # 升级 oss_path + display=true 进 materials 更新
+    assert result.update["materials"]["m1"]["ref_type"] == "oss_path"
+    assert result.update["materials"]["m1"]["display"] is True
+    # 交付物 ref（presign 回裸 key，OSS off）进 artifacts
+    assert result.update["artifacts"] == ["agent-artifacts/thread-1/files/a.png"]
+
+
 def test_present_files_rejects_paths_outside_outputs(tmp_path):
     outputs_dir = tmp_path / "threads" / "thread-1" / "user-data" / "outputs"
     workspace_dir = tmp_path / "threads" / "thread-1" / "user-data" / "workspace"

@@ -15,9 +15,22 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 import deerflow.agents.materials.materialize as mz
-import deerflow.agents.materials.middleware as mw
-from deerflow.agents.materials.middleware import MaterialsMiddleware, _extract_artifact_urls, _infer_kind
-from deerflow.agents.materials.policy import resolve_capture_policy
+from deerflow.agents.materials.middleware import MaterialsMiddleware, _extract_urls_by_path, _infer_kind
+from deerflow.agents.materials.policy import resolve_capture_policy, resolve_url_path
+from deerflow.agents.materials.registry import classify_ref, material_id
+
+
+def _mid_of(url: str) -> str:
+    """复算某产物源 url 的内容派生 id（§B）——capture rehost/register/D4 三路同口径。"""
+    return material_id(*classify_ref(url))
+
+
+# Capture 配置（D13+/D14，cfdream_ 前缀硬编码已退役）——模拟 director config.yaml 的两组 fnmatch：
+# policy / url 抽取字段路径。测试夹具 `_cfdream_result` 把 url 放顶层 `urls`，故 url 路径统一配
+# "urls"；`results[*].image_url` 这类结构化路径另有专测覆盖。**display 与 artifact items 不在 capture
+# 层**（D14：归 MessageStreamMiddleware），故此处无 visibility 配置。
+_CAPTURE_PATTERNS = [("cfdream_*", "rehost"), ("image_search", "register")]
+_URLPATH_PATTERNS = [("*", "urls")]
 
 # --- 夹具 -------------------------------------------------------------------
 
@@ -83,7 +96,11 @@ async def _run(result, *, fake_uploader, materials=None, metadata=None, name="cf
     async def handler(_req):
         return result
 
-    return await MaterialsMiddleware().awrap_tool_call(request, handler)
+    middleware = MaterialsMiddleware(
+        capture_patterns=_CAPTURE_PATTERNS,
+        url_path_patterns=_URLPATH_PATTERNS,
+    )
+    return await middleware.awrap_tool_call(request, handler)
 
 
 @pytest.fixture(autouse=True)
@@ -92,46 +109,74 @@ def _restore_uploader(monkeypatch):
     yield
 
 
-# --- policy 解析 ------------------------------------------------------------
+# --- policy 解析（配置驱动，cfdream_ 前缀硬编码已退役 D13+）-------------------
 
 
-def test_policy_cfdream_default_rehost():
-    assert resolve_capture_policy("cfdream_generate_image") == "rehost"
-    assert resolve_capture_policy("cfdream_task_wait") == "rehost"
+def test_policy_config_pattern_match():
+    # 无 metadata 时按配置 fnmatch 首匹配；无内置 cfdream_ 默认。
+    assert resolve_capture_policy("cfdream_generate_image", None, _CAPTURE_PATTERNS) == "rehost"
+    assert resolve_capture_policy("cfdream_task_wait", None, _CAPTURE_PATTERNS) == "rehost"
+    assert resolve_capture_policy("image_search", None, _CAPTURE_PATTERNS) == "register"
+
+
+def test_policy_no_config_is_off():
+    # cfdream_ 不再有内置默认：无配置 → off（零意外落盘）。
+    assert resolve_capture_policy("cfdream_generate_image") == "off"
+    assert resolve_capture_policy("cfdream_generate_image", None, None) == "off"
 
 
 def test_policy_metadata_override():
     assert resolve_capture_policy("image_search", {"materials_capture": "register"}) == "register"
-    assert resolve_capture_policy("cfdream_generate_image", {"materials_capture": "off"}) == "off"
+    # metadata 优先于配置：配置说 rehost，metadata 说 off → off。
+    assert resolve_capture_policy("cfdream_generate_image", {"materials_capture": "off"}, _CAPTURE_PATTERNS) == "off"
 
 
 def test_policy_default_off():
-    assert resolve_capture_policy("bash") == "off"
-    assert resolve_capture_policy("web_search") == "off"
+    assert resolve_capture_policy("bash", None, _CAPTURE_PATTERNS) == "off"
+    assert resolve_capture_policy("web_search", None, _CAPTURE_PATTERNS) == "off"
 
 
-# --- 信号探测：只认 artifact:true + urls -----------------------------------
+# --- url 抽取：按 per-tool JSON 字段路径（不再靠 artifact:true 门控）-------------
 
 
-def test_extract_requires_artifact_flag():
-    with_flag = _cfdream_result(["https://cdn.cfgpu.com/a.png"])
-    assert _extract_artifact_urls(with_flag) == ["https://cdn.cfgpu.com/a.png"]
+def test_url_path_resolution():
+    assert resolve_url_path("cfdream_generate_image", None, _URLPATH_PATTERNS) == "urls"
+    assert resolve_url_path("anything", None, None) is None
+    # metadata 优先
+    assert resolve_url_path("x", {"materials_url_path": "data.images"}, _URLPATH_PATTERNS) == "data.images"
 
 
-def test_extract_skips_without_flag():
-    # status-only 信封 / 无 artifact 标志 → 不准入
+def test_extract_top_level_urls_field():
+    res = _cfdream_result(["https://cdn.cfgpu.com/a.png"])
+    assert _extract_urls_by_path(res, "urls") == ["https://cdn.cfgpu.com/a.png"]
+
+
+def test_extract_without_artifact_flag_still_reads_path():
+    # artifact:true 门控已废：只看字段路径，无标志也抽得到。
     no_flag = _cfdream_result(["https://cdn.cfgpu.com/a.png"], artifact=False)
-    assert _extract_artifact_urls(no_flag) == []
+    assert _extract_urls_by_path(no_flag, "urls") == ["https://cdn.cfgpu.com/a.png"]
+
+
+def test_extract_no_path_is_empty():
+    res = _cfdream_result(["https://cdn.cfgpu.com/a.png"])
+    assert _extract_urls_by_path(res, None) == []
+
+
+def test_extract_nested_wildcard_path():
+    # image_search 真实结构：results[*].image_url
+    body = {"results": [{"image_url": "https://img/a.png"}, {"image_url": "https://img/b.png"}, {"image_url": ""}]}
+    res = ToolMessage(content=json.dumps(body), tool_call_id="tc_1", name="image_search")
+    assert _extract_urls_by_path(res, "results[*].image_url") == ["https://img/a.png", "https://img/b.png"]
 
 
 def test_extract_skips_error_dict():
     err = ToolMessage(content=json.dumps({"error": True, "error_type": "content_blocked", "message": "x"}), tool_call_id="tc_1", name="cfdream_generate_image")
-    assert _extract_artifact_urls(err) == []
+    assert _extract_urls_by_path(err, "urls") == []
 
 
 def test_extract_skips_async_stub():
     stub = ToolMessage(content=json.dumps({"task_id": "task-abc", "status": "pending"}), tool_call_id="tc_1", name="cfdream_generate_image")
-    assert _extract_artifact_urls(stub) == []
+    assert _extract_urls_by_path(stub, "urls") == []
 
 
 def test_infer_kind_by_ext():
@@ -150,20 +195,21 @@ async def test_rehost_registers_oss_path_and_dual_track():
     out = await _run(result, fake_uploader=up)
 
     assert isinstance(out, Command)
+    m1 = _mid_of("https://cdn.cfgpu.com/img-abc.png")
     mats = out.update["materials"]
-    assert mats["m1"]["ref_type"] == "oss_path"
-    assert mats["m1"]["ref"] == "agent-artifacts/t1/images/img-abc.png"
-    assert mats["m1"]["origin_url"] == "https://cdn.cfgpu.com/img-abc.png"
-    assert mats["m1"]["stable"] is True
+    assert mats[m1]["ref_type"] == "oss_path"
+    assert mats[m1]["ref"] == "agent-artifacts/t1/images/img-abc.png"
+    assert mats[m1]["origin_url"] == "https://cdn.cfgpu.com/img-abc.png"
+    assert mats[m1]["stable"] is True
+    assert mats[m1].get("display") is None  # capture 不设 display（D14：归 MessageStream）
     assert up.calls == [("https://cdn.cfgpu.com/img-abc.png", "t1")]
 
-    # 双轨：content 去 url 留 id；artifact 带 object_key
+    # content 去 url 留 id；artifact 不再由 capture 建 items（无 structured_content → None）
     tm = out.update["messages"][0]
     body = json.loads(tm.content)
-    assert body["materials"] == ["m1"]
+    assert body["materials"] == [m1]
     assert "urls" not in body and "http" not in tm.content
-    assert tm.artifact["items"][0]["ref"] == "agent-artifacts/t1/images/img-abc.png"
-    assert tm.artifact["items"][0]["kind"] == "image"
+    assert tm.artifact is None
 
 
 @pytest.mark.asyncio
@@ -178,8 +224,8 @@ async def test_rewrite_preserves_mcp_structured_content():
     out = await _run(result, fake_uploader=up)
 
     tm = out.update["messages"][0]
-    assert tm.artifact["items"][0]["ref"] == "agent-artifacts/t1/images/img-abc.png"
-    assert tm.artifact["structured_content"] == sc
+    # capture 只透传 structured_content（无 items）；emit 端再投影 items。
+    assert tm.artifact == {"structured_content": sc}
 
 
 @pytest.mark.asyncio
@@ -196,7 +242,7 @@ async def test_rewrite_keeps_terminal_status_hint():
 
     body = json.loads(out.update["messages"][0].content)
     assert body["status"] == hint
-    assert body["materials"] == ["m1"]
+    assert body["materials"] == [_mid_of("https://cdn.cfgpu.com/img-abc.png")]
     assert "urls" not in body and "http" not in out.update["messages"][0].content
 
 
@@ -206,23 +252,27 @@ async def test_register_policy_keeps_global_url_no_upload():
     result = _cfdream_result(["https://third.cdn/x.png"], name="image_search")
     out = await _run(result, fake_uploader=up, metadata={"materials_capture": "register"}, name="image_search")
 
+    m1 = _mid_of("https://third.cdn/x.png")
     mats = out.update["materials"]
-    assert mats["m1"]["ref_type"] == "global_url"
-    assert mats["m1"]["ref"] == "https://third.cdn/x.png"
+    assert mats[m1]["ref_type"] == "global_url"
+    assert mats[m1]["ref"] == "https://third.cdn/x.png"
+    assert mats[m1].get("display") is None  # capture 不设 display（D14：归 MessageStream）
     assert up.calls == []  # register 不 fetch/不 upload
 
 
 @pytest.mark.asyncio
 async def test_rehost_failure_marks_unstable_not_deliverable():
+    # fail-open（I5）：rehost 落不了盘 → 置 stable=false 登记 global_url 续跑（不阻断 run）；
+    # 临期 url 只进 ref，content 改写后无 http（不进 LLM/checkpoint）。emit 端按 stable 过滤不交付。
     up = _FakeUploader(fail=True)
     result = _cfdream_result(["https://cdn.cfgpu.com/img-abc.png"])
     out = await _run(result, fake_uploader=up)
 
+    m1 = _mid_of("https://cdn.cfgpu.com/img-abc.png")
     mats = out.update["materials"]
-    assert mats["m1"]["stable"] is False
-    assert mats["m1"]["ref_type"] == "global_url"
-    assert mats["m1"].get("display") is None  # 不作交付物（I5）
-    # content 仍被改写为 id 形态（不泄漏临期 url 给后续模型轮）
+    assert mats[m1]["stable"] is False
+    assert mats[m1]["ref_type"] == "global_url"
+    assert mats[m1].get("display") is None
     assert "http" not in out.update["messages"][0].content
 
 
@@ -233,9 +283,10 @@ async def test_our_object_url_shortcuts_no_rehost():
     result = _cfdream_result(["https://oss.cfgpu.com/agent-artifacts/t1/x.png"])
     out = await _run(result, fake_uploader=up)
 
+    m1 = _mid_of("https://oss.cfgpu.com/agent-artifacts/t1/x.png")
     mats = out.update["materials"]
-    assert mats["m1"]["ref_type"] == "oss_path"
-    assert mats["m1"]["ref"] == "agent-artifacts/t1/x.png"
+    assert mats[m1]["ref_type"] == "oss_path"
+    assert mats[m1]["ref"] == "agent-artifacts/t1/x.png"
     assert up.calls == []
 
 
@@ -250,7 +301,7 @@ async def test_task_wait_replay_dedup_no_double_rehost():
 
     assert len(up.calls) == 1  # 只 rehost 一次（不双计费）
     assert "materials" not in second.update  # 无新建
-    assert json.loads(second.update["messages"][0].content)["materials"] == ["m1"]  # 仍指向既有 id
+    assert json.loads(second.update["messages"][0].content)["materials"] == [_mid_of(url)]  # 仍指向既有 id
 
 
 @pytest.mark.asyncio
@@ -263,10 +314,11 @@ async def test_off_policy_passes_result_through():
 
 
 @pytest.mark.asyncio
-async def test_multi_url_sequential_ids():
+async def test_multi_url_distinct_content_derived_ids():
     up = _FakeUploader()
     result = _cfdream_result(["https://cdn.cfgpu.com/a.png", "https://cdn.cfgpu.com/b.png"])
     out = await _run(result, fake_uploader=up)
-    assert set(out.update["materials"]) == {"m1", "m2"}
-    assert json.loads(out.update["messages"][0].content)["materials"] == ["m1", "m2"]
+    a, b = _mid_of("https://cdn.cfgpu.com/a.png"), _mid_of("https://cdn.cfgpu.com/b.png")
+    assert set(out.update["materials"]) == {a, b}
+    assert json.loads(out.update["messages"][0].content)["materials"] == [a, b]
     assert len(up.calls) == 2

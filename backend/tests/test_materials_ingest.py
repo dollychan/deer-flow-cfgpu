@@ -6,6 +6,12 @@
 
 from app.consumer.agent_runner import _normalize_messages, _project_materials_into_artifacts
 from app.consumer.schemas import ContentItem, UserMessage
+from deerflow.agents.materials.registry import classify_ref, material_id
+
+
+def _mid_of(raw: str) -> str:
+    """复算上行源地址的内容派生 id（§B），免硬编码 mN。"""
+    return material_id(*classify_ref(raw))
 
 
 def _content(text: str) -> str:
@@ -25,12 +31,13 @@ def test_image_url_registers_material_not_image_block():
     gi = _normalize_messages([msg])
     # 不再有 image_url 多模态 block；只有 id 形态 text
     blocks = _blocks(gi)
+    m1 = _mid_of("https://cdn/x/hero.png")
     assert all(b["type"] == "text" for b in blocks)
-    assert blocks[0]["text"] == "[image: m1]"
+    assert blocks[0]["text"] == f"[image: {m1}]"
     # material 登记入 graph_input，seed channel
-    assert gi["materials"]["m1"]["kind"] == "image"
-    assert gi["materials"]["m1"]["ref"] == "https://cdn/x/hero.png"
-    assert gi["materials"]["m1"]["caption"] == "hero.png"
+    assert gi["materials"][m1]["kind"] == "image"
+    assert gi["materials"][m1]["ref"] == "https://cdn/x/hero.png"
+    assert gi["materials"][m1]["caption"] == "hero.png"
 
 
 def test_content_has_no_url():
@@ -59,15 +66,17 @@ def test_doc_audio_video_registered_not_degraded_text():
 def test_all_urls_in_list_registered():
     msg = UserMessage(role="user", content=[ContentItem(type="image_url", url=["https://cdn/a.png", "https://cdn/b.png"])])
     gi = _normalize_messages([msg])
-    assert set(gi["materials"]) == {"m1", "m2"}
-    assert _blocks(gi)[0]["text"] == "[image: m1 m2]"
+    a, b = _mid_of("https://cdn/a.png"), _mid_of("https://cdn/b.png")
+    assert set(gi["materials"]) == {a, b}
+    assert _blocks(gi)[0]["text"] == f"[image: {a} {b}]"
 
 
 def test_duplicate_url_deduped_in_batch():
     msg = UserMessage(role="user", content=[ContentItem(type="image_url", url=["https://cdn/a.png", "https://cdn/a.png"])])
     gi = _normalize_messages([msg])
-    assert set(gi["materials"]) == {"m1"}  # 同 url → 一条
-    assert _blocks(gi)[0]["text"] == "[image: m1 m1]"
+    a = _mid_of("https://cdn/a.png")
+    assert set(gi["materials"]) == {a}  # 同 url → 一条
+    assert _blocks(gi)[0]["text"] == f"[image: {a} {a}]"
 
 
 # --- human text url 不扫描（D11）-------------------------------------------
@@ -95,7 +104,8 @@ def test_plain_string_message_no_materials():
 def test_uplink_object_key_is_oss_path():
     msg = UserMessage(role="user", content=[ContentItem(type="image_url", url=["agent-artifacts/t1/images/hero.png"])])
     gi = _normalize_messages([msg])
-    assert gi["materials"]["m1"]["ref_type"] == "oss_path"
+    m1 = _mid_of("agent-artifacts/t1/images/hero.png")
+    assert gi["materials"][m1]["ref_type"] == "oss_path"
 
 
 # --- result 接缝投影（P8/D8 §4.6）---------------------------------------------

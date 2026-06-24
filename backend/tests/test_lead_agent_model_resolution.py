@@ -537,3 +537,48 @@ def test_memory_middleware_uses_explicit_memory_config_without_global_read(monke
     middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=False))
 
     assert middleware.after_agent({"messages": []}, runtime=MagicMock(context={"thread_id": "thread-1"})) is None
+
+
+def test_materials_middleware_is_inner_of_message_stream(monkeypatch):
+    """Load-bearing onion order: MaterialsMiddleware MUST sit inside MessageStreamMiddleware.
+
+    On the wrap_tool_call onion, an earlier-appended middleware is the OUTER layer, so
+    MessageStreamMiddleware (appended first) wraps MaterialsMiddleware (appended after).
+    Three correctness contracts depend on this exact direction — all break silently if a
+    future change reorders them:
+
+      1. capture rewrite — MaterialsMiddleware._capture rehosts + rewrites the ToolMessage
+         (urls→id, content stabilized) on the way out; MessageStream must read the
+         ALREADY-rewritten result, so it has to be outer (post runs after inner's post).
+      2. display stamp — MessageStream stamps display=true onto the SAME Command.update
+         MaterialsMiddleware returned; if it ran inside, the Command wouldn't exist yet.
+      3. structured_content strip — MessageStream._strip_structured_side_channel drops the
+         client-only side channel AFTER emit; it must see the captured artifact (set by the
+         inner capture) and be the last to touch the persisted message (materials I9/I10).
+
+    Pins cfgpu-docs/materials.md §5 onion + D14. See also test_message_stream_middleware.py
+    strip tests for the I9 leak this ordering protects against.
+    """
+    from deerflow.agents.materials.middleware import MaterialsMiddleware
+    from deerflow.agents.middlewares.message_stream_middleware import MessageStreamMiddleware
+
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **kwargs: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
+        model_name="safe-model",
+        app_config=app_config,
+    )
+
+    ms_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, MessageStreamMiddleware)), -1)
+    mat_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, MaterialsMiddleware)), -1)
+    assert ms_idx >= 0, "MessageStreamMiddleware must always be present"
+    assert mat_idx >= 0, "MaterialsMiddleware must always be present"
+    # MessageStream appended first (lower index) = OUTER; Materials appended after = INNER.
+    assert ms_idx < mat_idx, (
+        f"MaterialsMiddleware (idx {mat_idx}) must be appended AFTER MessageStreamMiddleware "
+        f"(idx {ms_idx}) so it is the inner wrap_tool_call layer — capture/stamp/strip break otherwise"
+    )

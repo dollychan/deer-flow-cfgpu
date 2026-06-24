@@ -15,7 +15,13 @@ Hooks:
     ``ToolMessage.artifact["structured_content"]``) is merged into the emitted
     event ``content`` — a client-only side channel that the model never saw, so the
     client gets the full result (cfdream usage/payload, understand_vision
-    reasoning_content) without it bloating the model's tool result.
+    reasoning_content) without it bloating the model's tool result. **Once emitted,
+    the side channel is stripped from the returned ToolMessage** so it does not
+    persist in the checkpoint: it was never model context, the checkpoint has no
+    reader for it, and its payload can carry presigned URLs (cfdream
+    ``reference_images``) we keep out of persisted state (materials I9/I10). This is
+    the clean content/structuredContent split — ``content`` → ToolMessage → LLM
+    context; ``structuredContent`` → downstream event → client only.
 
 Combined with ``stream_event_types=["custom"]``, the downstream client receives
 only semantically meaningful events and is not exposed to LangGraph's automatic
@@ -47,6 +53,8 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
+
+from deerflow.agents.materials.registry import project_artifact_items
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +180,25 @@ class MessageStreamMiddleware(AgentMiddleware):
         return None
 
     @staticmethod
+    def _strip_structured_side_channel(tool_msg: ToolMessage) -> None:
+        """Drop the MCP ``structured_content`` from the persisted ToolMessage.
+
+        Called after emit has merged the side channel into the downstream event: it
+        has now served its only purpose (client display). It never entered the model
+        context (the LLM saw only ``content``), the checkpoint has no reader for it,
+        and its ``payload`` can carry presigned URLs (cfdream ``reference_images``)
+        that must not persist in state (materials I9/I10). Mutating in place keeps the
+        ToolMessage's identity, so the same object the wrap hook returns — bare or
+        wrapped in a ``Command.update["messages"]`` — is the one that gets
+        checkpointed. Any sibling keys (e.g. ``items``) are preserved; an artifact
+        left empty collapses to ``None``.
+        """
+        artifact = getattr(tool_msg, "artifact", None)
+        if isinstance(artifact, dict) and "structured_content" in artifact:
+            remaining = {k: v for k, v in artifact.items() if k != "structured_content"}
+            tool_msg.artifact = remaining or None
+
+    @staticmethod
     def _resolve_tool_message(result: Any) -> ToolMessage | None:
         """Extract the ToolMessage from a bare ToolMessage or a Command update."""
         if isinstance(result, ToolMessage):
@@ -290,10 +317,10 @@ class MessageStreamMiddleware(AgentMiddleware):
             status,
         )
 
-    def _emit_artifact(self, tool_msg: ToolMessage, artifact: dict) -> None:
+    def _emit_artifact(self, tool_msg: ToolMessage, items: list[dict]) -> None:
         status = getattr(tool_msg, "status", None) or "success"
         # The client needs the tool's textual result (e.g. cfdream generate_*'s
-        # urls/task_id/cost_tokens) alongside the artifact items, so carry the
+        # task_id/cost_tokens) alongside the artifact items, so carry the
         # normalised content at the same level as items via the same
         # _structure_content contract used by tool_result.
         content = self._structure_content(_extract_text_content(tool_msg.content))
@@ -306,29 +333,109 @@ class MessageStreamMiddleware(AgentMiddleware):
             "tool_call_id": tool_msg.tool_call_id or "",
             "name": tool_msg.name or "",
             "content": content,
-            "items": artifact.get("items") or [],
+            "items": items,
             "status": status,
         })
         logger.debug(
             "MessageStreamMiddleware: emitted artifact tool_call_id=%s name=%s items=%d",
             tool_msg.tool_call_id,
             tool_msg.name,
-            len(artifact.get("items") or []),
+            len(items),
         )
 
-    def _emit_for_tool_message(self, request: Any, tool_msg: ToolMessage) -> None:
-        """Dispatch a resolved ToolMessage to the right event by tool visibility."""
-        visibility = self._resolve_visibility(getattr(request, "tool", None), tool_msg.name or "")
-        if visibility == VISIBILITY_INTERNAL:
+    @staticmethod
+    def _material_ids_from_content(tool_msg: ToolMessage) -> list[str]:
+        """Read the ``materials:[id...]`` list the MaterialsCapture rewrite stamped into content."""
+        text = _extract_text_content(tool_msg.content)
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text.strip())
+        except (ValueError, TypeError):
+            return []
+        if isinstance(parsed, dict):
+            ids = parsed.get("materials")
+            if isinstance(ids, list):
+                return [i for i in ids if isinstance(i, str)]
+        return []
+
+    @staticmethod
+    def _materials_view(request: Any, result: Any) -> dict:
+        """Materials visible at emit time = prior ``state.materials`` ∪ this call's ``Command.update``.
+
+        The just-captured materials live on the returned Command (not yet merged into graph
+        state inside the wrap onion), so both sources must be unioned to resolve fresh ids.
+        """
+        state = getattr(request, "state", None)
+        base = state.get("materials") if isinstance(state, dict) else None
+        merged = dict(base or {})
+        if isinstance(result, Command) and isinstance(result.update, dict):
+            upd = result.update.get("materials")
+            if isinstance(upd, dict):
+                merged.update(upd)
+        return merged
+
+    @staticmethod
+    def _stamp_display(result: Any, ids: list[str]) -> None:
+        """Persist ``display=true`` onto the emitted materials (D14: emit owns the deliverable flag).
+
+        Writes into the returned ``Command.update["materials"]`` so the non-streaming final_state
+        projection (consumer ``project_display_refs``) sees the same deliverable set the live
+        artifact event carried. Partial ``{id, display}`` stamps field-attach via ``merge_materials``.
+        """
+        if not isinstance(result, Command) or not isinstance(result.update, dict):
             return
+        mats = result.update.get("materials")
+        if not isinstance(mats, dict):
+            mats = {}
+            result.update["materials"] = mats
+        for mid in ids:
+            existing = mats.get(mid)
+            if isinstance(existing, dict):
+                existing["display"] = True
+            else:
+                mats[mid] = {"id": mid, "display": True}
+
+    def _artifact_items(self, request: Any, result: Any, tool_msg: ToolMessage) -> list[dict]:
+        """Resolve the artifact items for an artifact-visibility tool result.
+
+        Two sources: (1) a tool that self-builds its deliverable on ``ToolMessage.artifact``
+        (e.g. present_files) → use those items directly; (2) MaterialsCapture path → project
+        from the materials the rewritten content references, filtered by ``stable``, and stamp
+        ``display=true`` so the persisted registry agrees with the live event (D14).
+        """
         artifact = getattr(tool_msg, "artifact", None)
-        # artifact-visibility tools carry their deliverable in ToolMessage.artifact;
-        # on the error path (no artifact payload) fall back to a tool_result so the
-        # failure still surfaces.
-        if visibility == VISIBILITY_ARTIFACT and isinstance(artifact, dict) and artifact.get("items") is not None:
-            self._emit_artifact(tool_msg, artifact)
-        else:
-            self._emit_tool_result(tool_msg)
+        if isinstance(artifact, dict) and artifact.get("items"):
+            return artifact["items"]
+        ids = self._material_ids_from_content(tool_msg)
+        if not ids:
+            return []
+        items = project_artifact_items(self._materials_view(request, result), ids)
+        if items:
+            self._stamp_display(result, [it["id"] for it in items])
+        return items
+
+    def _emit_for_tool_message(self, request: Any, tool_msg: ToolMessage, result: Any) -> None:
+        """Dispatch a resolved ToolMessage to the right event by tool visibility, then
+        strip the client-only ``structured_content`` so it never reaches the checkpoint.
+        """
+        visibility = self._resolve_visibility(getattr(request, "tool", None), tool_msg.name or "")
+        if visibility != VISIBILITY_INTERNAL:
+            # artifact-visibility deliverables: project items (self-built or from materials).
+            # No items (error / failed rehost / nothing captured) → fall back to tool_result so
+            # the result still surfaces and no empty/unstable artifact is emitted (I5).
+            if visibility == VISIBILITY_ARTIFACT:
+                items = self._artifact_items(request, result, tool_msg)
+                if items:
+                    self._emit_artifact(tool_msg, items)
+                else:
+                    self._emit_tool_result(tool_msg)
+            else:
+                self._emit_tool_result(tool_msg)
+        # The side channel has now been delivered downstream (or, for internal tools,
+        # there is no downstream event by design); in every case it is transient client
+        # data that must not linger on the persisted ToolMessage.
+        self._strip_structured_side_channel(tool_msg)
 
     # ── Model wrapping ─────────────────────────────────────────────────────────
 
@@ -367,7 +474,7 @@ class MessageStreamMiddleware(AgentMiddleware):
         result = handler(request)
         tool_msg = self._resolve_tool_message(result)
         if tool_msg is not None:
-            self._emit_for_tool_message(request, tool_msg)
+            self._emit_for_tool_message(request, tool_msg, result)
         return result
 
     @override
@@ -379,5 +486,5 @@ class MessageStreamMiddleware(AgentMiddleware):
         result = await handler(request)
         tool_msg = self._resolve_tool_message(result)
         if tool_msg is not None:
-            self._emit_for_tool_message(request, tool_msg)
+            self._emit_for_tool_message(request, tool_msg, result)
         return result
