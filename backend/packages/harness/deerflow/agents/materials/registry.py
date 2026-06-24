@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import hashlib
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 from deerflow.agents.materials.types import Kind, Material, Origin, RefType
 
@@ -32,11 +32,42 @@ def is_our_object_key(key: str) -> bool:
     return key.lstrip("/").startswith(_OUR_OSS_PREFIX)
 
 
+# 临期签名 / 凭证 query 参数（小写匹配）：这些**不参与素材身份**，归一时剥除，使同一对象
+# 被重新签发（task_wait 重放 / 重新 presign）后仍得同一 stable_ref（幂等，不双计费）。
+# 反过来，**非签名 query（如搜索引擎 CDN 的 ``?id=...`` 缩略图标识）必须保留**——否则像 bing/
+# duckduckgo 图搜结果那样 path 恒为 ``/th``、身份全在 query 的 url 会被错误折叠成同一 id（衝突 +
+# 漏注册）。故只剥已知签名前缀/名，其余原样留作身份。
+_SIGNING_QUERY_PREFIXES = ("x-amz-", "x-oss-", "x-tos-", "x-obs-", "x-cos-", "x-goog-", "q-")
+_SIGNING_QUERY_NAMES = frozenset(
+    {
+        "expires", "signature", "policy", "credential",
+        "ossaccesskeyid", "awsaccesskeyid", "key-pair-id", "keyid",
+        "security-token", "securitytoken",
+    }
+)
+
+
+def _is_signing_param(name: str) -> bool:
+    low = name.lower()
+    return low in _SIGNING_QUERY_NAMES or low.startswith(_SIGNING_QUERY_PREFIXES)
+
+
+def _identity_query(query: str) -> str:
+    """剥去临期签名参数后，返回**确定性归一**的身份 query（按 key,value 排序）。无身份参数 → ""。"""
+    kept = [(k, v) for k, v in parse_qsl(query, keep_blank_values=True) if not _is_signing_param(k)]
+    if not kept:
+        return ""
+    kept.sort()
+    return urlencode(kept)
+
+
 def stable_ref(ref_type: RefType, ref: str) -> str:
     """归一键（§8 R4 反查索引主键）。带类型前缀避免 object_key 与 url path 撞键。
 
     - ``oss_path``：ref 即 object_key，原样。
-    - ``global_url``：剥 query（presign 签名 / 临期参数不参与身份），取 scheme+host+path。
+    - ``global_url``：取 scheme+host+path + **身份 query**（剥临期签名参数后仍保留的 query，
+      见 ``_identity_query``）——presign 签名不参与身份（幂等），但搜索引擎 CDN 的 ``?id=...``
+      之类身份 query 必须保留，否则 path 相同的不同素材会撞键折叠。
     - ``asset_url``：asset ref 原样。
     """
     if ref_type == "oss_path":
@@ -47,7 +78,9 @@ def stable_ref(ref_type: RefType, ref: str) -> str:
         # local 素材身份 = local_path（D15/§4.8）；调用方把 local_path 当 ref 传入求 id。
         return f"local:{ref}"
     parts = urlsplit(ref)
-    return f"url:{parts.scheme.lower()}://{parts.netloc.lower()}{unquote(parts.path)}"
+    base = f"url:{parts.scheme.lower()}://{parts.netloc.lower()}{unquote(parts.path)}"
+    identity_query = _identity_query(parts.query)
+    return f"{base}?{identity_query}" if identity_query else base
 
 
 def classify_ref(raw: str) -> tuple[RefType, str]:

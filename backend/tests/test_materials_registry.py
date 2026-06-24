@@ -51,10 +51,36 @@ def test_stable_ref_oss_path_prefixed():
     assert stable_ref("oss_path", _OUR_KEY) == f"oss:{_OUR_KEY}"
 
 
-def test_stable_ref_global_url_strips_query():
-    a = stable_ref("global_url", _THIRD + "?v=1")
-    b = stable_ref("global_url", _THIRD + "?v=2")
-    assert a == b  # query 不参与身份
+def test_stable_ref_global_url_strips_signing_params():
+    """临期签名参数（presign 签名/有效期）不参与身份 → 同对象重新签发得同一 stable_ref（幂等）。"""
+    a = stable_ref("global_url", _THIRD + "?X-Amz-Signature=AAA&X-Amz-Date=1&X-Amz-Expires=900")
+    b = stable_ref("global_url", _THIRD + "?X-Amz-Signature=BBB&X-Amz-Date=2&X-Amz-Expires=900")
+    assert a == b == stable_ref("global_url", _THIRD)
+
+
+def test_stable_ref_global_url_keeps_identity_query():
+    """非签名 query 是身份的一部分（搜索引擎 CDN path 恒定、身份全在 query）→ 必须保留，不得折叠。
+
+    回归：bing/duckduckgo 图搜结果 path 恒为 ``/th``，仅 ``?id=OIP.xxx`` 区分。query 全剥会让同
+    host 的不同图片撞成同一 material id（id 重合 + find_by_address 去重致漏注册）。
+    """
+    base = "https://ts2.mm.bing.net/th"
+    a = stable_ref("global_url", base + "?id=OIP.AAAA&pid=15.1")
+    b = stable_ref("global_url", base + "?id=OIP.BBBB&pid=15.1")
+    assert a != b
+
+
+def test_material_id_no_collision_for_bing_image_search_results():
+    """端到端回归：5 条 bing 图搜结果（含同 host 3 条）→ 5 个互异 material id，无重合。"""
+    urls = [
+        "https://ts2.mm.bing.net/th?id=OIP.GDf9FpmvcKy-oAYBz-Uk_QHaEc&pid=15.1",
+        "https://ts3.explicit.bing.net/th?id=OIP.XZ4NievYBloryLO1Q_cjCwAAAA&pid=15.1",
+        "https://ts1.mm.bing.net/th?id=OIP.bLh7ftQm_o_ESPkNO8TxwwHaEK&pid=15.1",
+        "https://ts2.mm.bing.net/th?id=OIP.xbEX5KoLpgEdV6Mk-90jVAHaED&pid=15.1",
+        "https://ts2.mm.bing.net/th?id=OIP._1sJgJktX6GlcNVed09YDgHaEe&pid=15.1",
+    ]
+    ids = [_mid_of(u) for u in urls]
+    assert len(set(ids)) == len(ids)
 
 
 def test_stable_ref_cross_path_consistency():
