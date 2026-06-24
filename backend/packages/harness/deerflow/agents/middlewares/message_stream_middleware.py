@@ -59,8 +59,15 @@ from deerflow.agents.materials.registry import project_artifact_items
 logger = logging.getLogger(__name__)
 
 _MAX_CONTENT_CHARS = 4096
+# Hard cap on a *structured* (JSON) tool result before it degrades to a truncated
+# {"message": ...}. Decoupled from _MAX_CONTENT_CHARS so a legitimately large JSON
+# result (web_search's pretty-printed array, list_models) still reaches the client
+# structured, while a pathological blob (e.g. base64 image embedded in JSON, BUG-002
+# family) is still kept off the MQ message-size budget. 64 KiB is generous for any
+# real result yet two orders below RocketMQ's ~1 MB broker ceiling.
+_MAX_STRUCTURED_BYTES = 65536
 
-# Tool client-facing visibility levels (see docs/message_stream_middleware.md §2.5):
+# Tool client-facing visibility levels (see cfgpu-docs/message_stream_middleware.md §2.5):
 #   internal — fully suppressed: no tool_result, and the tool_call is filtered out
 #              of the emitted ai_message (plumbing the end user need not see).
 #   progress — emit a tool_result event (intermediate result worth showing).
@@ -102,19 +109,25 @@ class MessageStreamMiddleware(AgentMiddleware):
     to receive a clean, noise-free event stream from the MQ consumer.
 
     Args:
-        max_content_chars: Tool result content is truncated to this many characters
-            before emission to avoid hitting MQ message size limits. Default: 4096.
+        max_content_chars: Non-JSON tool result text is truncated to this many
+            characters before emission. Default: 4096.
+        max_structured_bytes: Hard cap on a JSON tool result before it degrades to a
+            truncated ``{"message": ...}``. Decoupled from ``max_content_chars`` so a
+            large-but-legitimate JSON result still reaches the client structured.
+            Default: 65536.
     """
 
     def __init__(
         self,
         *,
         max_content_chars: int = _MAX_CONTENT_CHARS,
+        max_structured_bytes: int = _MAX_STRUCTURED_BYTES,
         visibility_patterns: Sequence[tuple[str, str]] | None = None,
         default_visibility: str = VISIBILITY_INTERNAL,
     ) -> None:
         super().__init__()
         self._max_content_chars = max_content_chars
+        self._max_structured_bytes = max_structured_bytes
         # Ordered (fnmatch-pattern, visibility) pairs; first match wins. Used as a
         # fallback for tools (e.g. MCP tools) that do not declare their own
         # metadata["visibility"]. Built-in tool metadata always takes precedence.
@@ -272,19 +285,23 @@ class MessageStreamMiddleware(AgentMiddleware):
         The on-wire ``content`` is *always* an object so the client never has to guess
         whether to parse it:
           - JSON object  → used as-is (e.g. cfdream generate_*/task_* flat result, error dict).
-          - JSON array   → wrapped as ``{"items": [...]}`` (e.g. list_models).
+          - JSON array   → wrapped as ``{"items": [...]}`` (e.g. list_models, web_search).
           - anything else (prose, markdown, non-JSON) → ``{"message": <text>}``.
 
-        ``max_content_chars`` stays the size gate: structured parsing only applies when the
-        raw JSON text fits the limit, otherwise the result degrades to a truncated
-        ``{"message": ...}``. This keeps the MQ message-size guard intact while still
-        delivering structure for the common (small) case — cfdream media results are tiny.
+        The parse gate (``max_structured_bytes``) is decoupled from the text-truncation
+        length (``max_content_chars``): structured parsing applies whenever the JSON fits the
+        (generous) structured cap, so a large-but-legitimate JSON result — web_search's
+        pretty-printed array, list_models — reaches the client structured rather than
+        degrading to a truncated string. Only a pathological JSON beyond the hard cap (e.g.
+        a base64 image embedded in the result, BUG-002 family) degrades to a truncated
+        ``{"message": ...}``, keeping the MQ message-size guard intact. Non-JSON prose is
+        always truncated at ``max_content_chars``.
 
         A tool that needs to report token cost adds a ``usage`` key inside its own result
         payload (it lands in the JSON object here); the middleware does not synthesise one.
         """
         stripped = text.strip()
-        if stripped[:1] in ("{", "[") and len(stripped) <= self._max_content_chars:
+        if stripped[:1] in ("{", "[") and len(stripped) <= self._max_structured_bytes:
             try:
                 parsed = json.loads(stripped)
             except (ValueError, TypeError):

@@ -43,9 +43,10 @@ def _tool_request(tool: SimpleNamespace | None = None) -> SimpleNamespace:
     return SimpleNamespace(tool=tool)
 
 
-def _middleware(max_content_chars: int = 4096, visibility_patterns=None, default_visibility: str = "internal") -> MessageStreamMiddleware:
+def _middleware(max_content_chars: int = 4096, max_structured_bytes: int = 65536, visibility_patterns=None, default_visibility: str = "internal") -> MessageStreamMiddleware:
     return MessageStreamMiddleware(
         max_content_chars=max_content_chars,
+        max_structured_bytes=max_structured_bytes,
         visibility_patterns=visibility_patterns,
         default_visibility=default_visibility,
     )
@@ -562,8 +563,8 @@ class TestWrapToolCallSync:
         assert tm.artifact is None
 
     def test_oversized_json_degrades_to_message(self):
-        """JSON beyond max_content_chars degrades to a truncated message object (MQ size guard)."""
-        mw = _middleware(max_content_chars=20)
+        """JSON beyond max_structured_bytes (hard cap) degrades to a truncated message object (MQ size guard)."""
+        mw = _middleware(max_content_chars=20, max_structured_bytes=20)
         tm = _tool_msg(content=json.dumps({"k": "v" * 100}), name="cfdream_generate_image", tool_call_id="tc_b")
         req = _tool_request(_tool("cfdream_generate_image", "progress"))
         captured: list[dict] = []
@@ -575,6 +576,27 @@ class TestWrapToolCallSync:
         content = captured[0]["content"]
         assert set(content.keys()) == {"message"}
         assert "truncated" in content["message"]
+
+    def test_large_json_beyond_content_chars_still_parses_to_items(self):
+        """A JSON array larger than max_content_chars but within the structured cap reaches the client as {"items": [...]}.
+
+        Regression: web_search returns a pretty-printed JSON array that easily exceeds
+        max_content_chars (4096); the decoupled parse gate must still structure it rather
+        than degrading to a truncated {"message": ...}.
+        """
+        mw = _middleware(max_content_chars=4096)
+        results = [{"title": f"r{i}", "url": f"https://e.com/{i}", "snippet": "x" * 1000} for i in range(5)]
+        text = json.dumps(results, indent=2, ensure_ascii=False)
+        assert len(text) > 4096  # the very condition that used to force degradation
+        tm = _tool_msg(content=text, name="web_search", tool_call_id="tc_ws")
+        req = _tool_request(_tool("web_search", "progress"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=tm))
+
+        assert captured[0]["content"] == {"items": results}
 
     def test_emits_tool_result_error_status(self):
         mw = _middleware()
