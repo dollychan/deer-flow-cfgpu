@@ -248,7 +248,10 @@ def _resolve_snapshot_sandbox(runtime: Runtime):
         from deerflow.sandbox.tools import sandbox_from_runtime
 
         return sandbox_from_runtime(runtime)
-    except Exception:
+    except Exception as exc:
+        # Non-fatal, but log it: a silently-missing sandbox is the most common
+        # reason a poster comes back null, and is otherwise invisible.
+        logger.warning("present_files: no sandbox for snapshot (%s) — poster will be omitted", exc)
         return None
 
 
@@ -292,6 +295,12 @@ async def _build_rich_item(
         if png:
             png_key = _inline_key(thread_id, "images", png, f"{Path(filename).stem}.png")
             poster_ref = await uploader.upload_inline_bytes(png_key, png, "image/png")
+        else:
+            # snapshot_html already logged the underlying cause (fail-open);
+            # surface that this file ends up posterless so it is greppable.
+            logger.warning("present_files: snapshot returned no PNG for %s — delivering without poster", filename)
+    else:
+        logger.info("present_files: no snapshot sandbox for %s — delivering without poster", filename)
 
     item = {
         **_artifact_item(html_ref),
