@@ -59,6 +59,9 @@ def test_snapshot_html_renders_and_downloads_png(sandbox):
     cmds = _commands(sandbox.execute_command)
     render = next(c for c in cmds if "chromium-browser" in c)
     assert "--headless=new --no-sandbox" in render
+    # JS-built pages need virtual time advanced before capture, else the shot fires
+    # before script-rendered DOM exists.
+    assert f"--virtual-time-budget={sandbox._SNAPSHOT_VIRTUAL_TIME_BUDGET_MS}" in render
     assert "--screenshot=" in render and "file://" in render
     # PNG fetched via download_file (NOT base64-over-shell), from the rendered path.
     (dl_args, _) = sandbox.download_file.calls[0]

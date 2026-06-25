@@ -342,6 +342,13 @@ class AioSandbox(Sandbox):
     _SNAPSHOT_WIDTH = 1280
     _SNAPSHOT_HEIGHT_FULL = 2400
     _SNAPSHOT_HEIGHT_FOLD = 900
+    # Advance headless virtual time before capturing so JS-built pages (DOM created
+    # by scripts, web fonts, layout-on-load) have finished rendering. chromium runs
+    # timers/microtasks up to this budget of *virtual* ms (or until the page goes
+    # idle) then screenshots — without it the shot fires right after `load`, before
+    # script-rendered content exists (observed: tile-match game board blank, only
+    # background + buttons captured, 2026-06-25).
+    _SNAPSHOT_VIRTUAL_TIME_BUDGET_MS = 4000
 
     def snapshot_html(self, html: str, *, full_page: bool = True) -> bytes | None:
         """Render an HTML document to a PNG using the sandbox's built-in chromium.
@@ -386,6 +393,7 @@ class AioSandbox(Sandbox):
             render_cmd = (
                 f"chromium-browser --headless=new --no-sandbox --disable-gpu "
                 f"--hide-scrollbars --force-device-scale-factor=1 "
+                f"--virtual-time-budget={self._SNAPSHOT_VIRTUAL_TIME_BUDGET_MS} "
                 f"--window-size={self._SNAPSHOT_WIDTH},{height} "
                 f"--screenshot={shlex.quote(png_path)} "
                 f"{shlex.quote('file://' + html_path)} >/dev/null 2>&1"
