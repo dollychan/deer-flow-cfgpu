@@ -51,19 +51,18 @@ def test_snapshot_html_renders_and_downloads_png(sandbox):
     out = sandbox.snapshot_html("<h1>hi</h1>", full_page=True)
 
     assert out == png_raw
-    # HTML written under the virtual prefix (a hidden snapshots dir) so download_file
-    # — which is path-restricted to that prefix — can fetch the result.
+    # HTML written as a hidden dotfile directly under outputs/ — the one location
+    # writable by the file API AND fetchable by download_file's path guard.
     (write_args, _) = sandbox.write_file.calls[0]
-    assert "/.deerflow-snapshots/" in write_args[0] and write_args[0].endswith(".html")
+    assert write_args[0].endswith(".html") and "/outputs/.deerflow-snap-" in write_args[0]
     assert write_args[1] == "<h1>hi</h1>"
     cmds = _commands(sandbox.execute_command)
-    assert any(c.startswith("mkdir -p ") for c in cmds)
     render = next(c for c in cmds if "chromium-browser" in c)
     assert "--headless=new --no-sandbox" in render
     assert "--screenshot=" in render and "file://" in render
     # PNG fetched via download_file (NOT base64-over-shell), from the rendered path.
     (dl_args, _) = sandbox.download_file.calls[0]
-    assert dl_args[0].endswith(".png") and "/.deerflow-snapshots/" in dl_args[0]
+    assert dl_args[0].endswith(".png") and "/outputs/.deerflow-snap-" in dl_args[0]
     # Temp files cleaned up in finally.
     assert any(c.startswith("rm -f ") for c in cmds)
 

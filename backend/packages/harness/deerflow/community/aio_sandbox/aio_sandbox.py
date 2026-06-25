@@ -368,17 +368,17 @@ class AioSandbox(Sandbox):
             return None
 
         token = uuid.uuid4().hex
-        # Under the virtual prefix (a hidden sibling of outputs/) so download_file
-        # can fetch the result; cleaned up in finally so it never lingers/presents.
-        snap_dir = f"{VIRTUAL_PATH_PREFIX.rstrip('/')}/.deerflow-snapshots"
-        html_path = f"{snap_dir}/{token}.html"
-        png_path = f"{snap_dir}/{token}.png"
+        # Write under outputs/, the one location proven writable by BOTH the file API
+        # (the agent writes here) and download_file's path guard. Only the three
+        # bind-mounted subdirs (workspace/uploads/outputs) are writable; /mnt/user-data
+        # itself is a read-only container-image dir (mkdir there → Errno 13, observed
+        # 2026-06-25). Hidden dotfile names + finally cleanup keep them from ever being
+        # listed/presented during their ~1-2s lifetime.
+        outputs_dir = f"{VIRTUAL_PATH_PREFIX.rstrip('/')}/outputs"
+        html_path = f"{outputs_dir}/.deerflow-snap-{token}.html"
+        png_path = f"{outputs_dir}/.deerflow-snap-{token}.png"
         height = self._SNAPSHOT_HEIGHT_FULL if full_page else self._SNAPSHOT_HEIGHT_FOLD
         try:
-            # mkdir runs as root (shell), but write_file goes through the file API as
-            # a *different* (non-root) sandbox user; chmod 777 lets that user write into
-            # the dir. Safe: the dir is inside the isolated, ephemeral container.
-            self.execute_command(f"mkdir -p {shlex.quote(snap_dir)} && chmod 777 {shlex.quote(snap_dir)}")
             self.write_file(html_path, html)
             # chromium stderr (DBus noise + "N bytes written") is dropped. ``--no-sandbox``
             # is required running as root inside the container (the container itself is
