@@ -336,47 +336,63 @@ class AioSandbox(Sandbox):
                 logger.error(f"Failed to update file in sandbox: {e}")
                 raise
 
+    # Snapshot rendering window. Chromium's CLI ``--screenshot`` captures the
+    # window viewport (not the full scrollable page), so a tall window yields a
+    # bounded poster thumbnail; the doc-card HTML template caps its own height.
+    _SNAPSHOT_WIDTH = 1280
+    _SNAPSHOT_HEIGHT_FULL = 2400
+    _SNAPSHOT_HEIGHT_FOLD = 900
+
     def snapshot_html(self, html: str, *, full_page: bool = True) -> bytes | None:
         """Render an HTML document to a PNG using the sandbox's built-in chromium.
 
-        The ``all-in-one-sandbox`` image ships chromium + a server-side Playwright
-        exposed over HTTP by ``agent_sandbox``. We feed the HTML in via a ``data:``
-        URL (no disk round-trip), render it in an **isolated tab**, and stream the
-        PNG bytes back to the host — there is no on-disk artifact or path involved
-        (cfgpu-docs/present-files-tool.md §3.2, D7).
+        The ``sandbox-director`` image already ships ``chromium-browser``; rather
+        than depend on a browser HTTP API (which the gem runtime does not expose),
+        we drive chromium's headless ``--screenshot`` CLI over the *same* shell/file
+        API the agent uses: write the HTML into the sandbox, render, then stream the
+        PNG back out as base64 (``download_file`` restricts paths to the virtual
+        prefix, and ``/tmp`` is outside it). See cfgpu-docs/present-files-tool.md §3.
 
         Notes:
-            - Browser calls go over the browser-service HTTP port and must NOT take
-              ``self._lock`` (that lock only serializes the single shell session;
-              I3). Reusing it here would needlessly contend with agent bash.
-            - The new tab is created/activated/closed serially (I4) so a snapshot
-              never clobbers the agent's active page.
+            - Goes through ``write_file`` / ``execute_command`` — which DO take
+              ``self._lock`` — so a snapshot serializes with agent bash on the
+              single shell session (I3, revised: shell-driven, not a separate port).
+            - Renders inside the sandbox isolation boundary (untrusted agent HTML
+              never touches the consumer host browser/filesystem).
             - Fail-open: any failure returns ``None`` (caller drops the poster).
         """
-        client = self._client
-        if client is None:
+        if self._client is None:
             return None
 
-        data_url = "data:text/html;base64," + base64.b64encode(html.encode("utf-8")).decode("ascii")
-        tab_index: int | None = None
+        token = uuid.uuid4().hex
+        html_path = f"/tmp/snap-{token}.html"
+        png_path = f"/tmp/snap-{token}.png"
+        height = self._SNAPSHOT_HEIGHT_FULL if full_page else self._SNAPSHOT_HEIGHT_FOLD
         try:
-            # A freshly created tab is appended at the end, so its 0-based index
-            # is the count of tabs that existed before creation. Deriving it from
-            # list() (rather than the opaque create() payload) keeps us decoupled
-            # from the Fern-generated `data: Any` response shape.
-            before = client.browser_tabs.list()
-            tab_index = len(before.data) if before is not None and before.data else 0
-            client.browser_tabs.create()
-            client.browser_tabs.activate(tab_index)
-            client.browser_page.navigate(url=data_url, wait_until="load")
-            png = b"".join(client.browser_page.screenshot(full_page=full_page, format="png"))
+            self.write_file(html_path, html)
+            # chromium stderr (DBus noise + "N bytes written") is dropped; only the
+            # base64 PNG reaches stdout. ``--no-sandbox`` is required running as root
+            # inside the container (the container itself is the isolation boundary).
+            render_cmd = (
+                f"chromium-browser --headless=new --no-sandbox --disable-gpu "
+                f"--hide-scrollbars --force-device-scale-factor=1 "
+                f"--window-size={self._SNAPSHOT_WIDTH},{height} "
+                f"--screenshot={shlex.quote(png_path)} "
+                f"{shlex.quote('file://' + html_path)} >/dev/null 2>&1; "
+                f"base64 -w0 {shlex.quote(png_path)} 2>/dev/null"
+            )
+            out = self.execute_command(render_cmd)
+            b64 = (out or "").strip()
+            if not b64 or b64.startswith("Error:") or b64 == "(no output)":
+                logger.warning("AioSandbox snapshot_html: chromium produced no PNG (out=%r)", b64[:200])
+                return None
+            png = base64.b64decode(b64)
             return png or None
         except Exception:
             logger.warning("AioSandbox snapshot_html failed", exc_info=True)
             return None
         finally:
-            if tab_index is not None:
-                try:
-                    client.browser_tabs.close(tab_index)
-                except Exception:
-                    logger.debug("snapshot_html: failed to close snapshot tab", exc_info=True)
+            try:
+                self.execute_command(f"rm -f {shlex.quote(html_path)} {shlex.quote(png_path)}")
+            except Exception:
+                logger.debug("snapshot_html: temp cleanup failed", exc_info=True)

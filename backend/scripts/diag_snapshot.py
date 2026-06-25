@@ -1,14 +1,15 @@
-"""沙箱快照链路诊断脚本。
+"""沙箱快照链路诊断脚本（shell 驱动 chromium 版）。
 
 用法（在 consumer 宿主机，backend/ 目录下，带项目 venv）::
 
     .venv/bin/python scripts/diag_snapshot.py http://<沙箱 base_url>
 
 base_url 从 consumer 日志里找：搜索 "AioSandbox" / "sandbox_url"，或 `docker ps`
-看 all-in-one-sandbox 容器映射到 host 的端口（容器内是 8080）。
+看 sandbox-director 容器映射到 host 的端口（容器内是 8080，常映射到 127.0.0.1:8080）。
 
-脚本走的就是 present_files 用的 `AioSandbox.snapshot_html` 同一条路径，会把
-fail-open 吞掉的真实异常**打印出来**，并在成功时把 PNG 落到 /tmp/diag_snap.png。
+脚本构造一个真实 AioSandbox，调用与 present_files 完全相同的 `snapshot_html`
+（写 HTML 进沙箱 /tmp → 驱动内置 chromium --headless --screenshot → base64 读回）。
+失败时 fail-open 的真实异常会以 WARNING 打印；成功则把 PNG 落到 /tmp/diag_snap.png。
 """
 
 import logging
@@ -22,34 +23,22 @@ if len(sys.argv) < 2:
 
 base_url = sys.argv[1].rstrip("/")
 
-from agent_sandbox import Sandbox as Client
+from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox  # noqa: E402  (after argv guard)
 
-client = Client(base_url=base_url, timeout=120)
+sb = AioSandbox(id="diag", base_url=base_url)
 
-# 1) 浏览器服务是否在线？
-print("\n[1] browser_tabs.list() ...")
-tabs = client.browser_tabs.list()
-print("    ->", tabs)
+print("\n[1] chromium 版本探测 ...")
+print("   ", sb.execute_command("chromium-browser --version 2>&1 | head -1"))
 
-# 2) 完整快照序列（与 AioSandbox.snapshot_html 一致）
-import base64
+print("\n[2] snapshot_html(...) — 与 present_files 同一路径 ...")
+html = "<h1>诊断快照 OK</h1><p>snapshot diagnostic 测试</p>"
+png = sb.snapshot_html(html)
 
-html = "<h1>诊断快照 OK</h1><p>snapshot diagnostic</p>"
-data_url = "data:text/html;base64," + base64.b64encode(html.encode()).decode()
-
-before = client.browser_tabs.list()
-idx = len(before.data) if before and before.data else 0
-print(f"\n[2] create tab (new index = {idx}) ...")
-print("    ->", client.browser_tabs.create())
-print("[3] activate ...", client.browser_tabs.activate(idx))
-print("[4] navigate(data:url, wait_until=load) ...")
-print("    ->", client.browser_page.navigate(url=data_url, wait_until="load"))
-print("[5] screenshot(full_page=True, format=png) ...")
-png = b"".join(client.browser_page.screenshot(full_page=True, format="png"))
-print(f"    -> {len(png)} bytes, header={png[:8]!r}")
-client.browser_tabs.close(idx)
+if not png:
+    print("\n失败 ❌ —— snapshot_html 返回 None（上方 WARNING 有真实原因）")
+    sys.exit(1)
 
 out = "/tmp/diag_snap.png"
 with open(out, "wb") as f:
     f.write(png)
-print(f"\nOK ✅ 快照可用，已写出 {out}（{len(png)} bytes）")
+print(f"\nOK ✅ 快照可用，已写出 {out}（{len(png)} bytes，header={png[:8]!r}）")
