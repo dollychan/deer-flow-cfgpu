@@ -11,6 +11,17 @@ Hooks:
     ``internal`` (default) → nothing. Visibility resolves via tool
     metadata["visibility"] → configured fnmatch patterns → default. Tools may
     return a bare ToolMessage or a Command wrapping one; both are handled.
+    Two emit-only suppressions (ToolMessage.content is never modified — the LLM
+    always sees the full result; only the downstream event is gated):
+      * Empty search: a ``progress`` web_search/image_search whose structured content
+        carries an ``error`` key (its "No results found" / "No images found" sentinel,
+        value-agnostic) emits no tool_result — the client gets no empty-result card while
+        the LLM still sees the error and stops retrying.
+      * Artifact tool with no items: an ``artifact`` tool emits an ``artifact`` event only
+        when it carries stable items. With no items it either suppresses (in-flight
+        intermediate, e.g. generate_*/task_* polling a not-yet-ready URL — status="success")
+        or falls back to a ``tool_result`` (terminal failure — status="error") so the client
+        still learns the generation failed.
     For MCP tools, any ``structuredContent`` (carried on
     ``ToolMessage.artifact["structured_content"]``) is merged into the emitted
     event ``content`` — a client-only side channel that the model never saw, so the
@@ -76,6 +87,18 @@ VISIBILITY_INTERNAL = "internal"
 VISIBILITY_PROGRESS = "progress"
 VISIBILITY_ARTIFACT = "artifact"
 _VALID_VISIBILITIES = frozenset({VISIBILITY_INTERNAL, VISIBILITY_PROGRESS, VISIBILITY_ARTIFACT})
+
+# Search tools whose "no results" sentinel must not produce a downstream tool_result.
+# Both tools return a result object carrying an ``error`` key when empty (web_search:
+# ``{"error": "No results found", ...}``; image_search: ``{"error": "No images found",
+# ...}``) — including on ddgs ImportError / search exception, which collapse to the same
+# empty branch. We gate on the *presence* of an ``error`` key (not its value): a
+# successful search returns ``{"query", "total_results", "results"}`` with no ``error``
+# key, so the key cleanly distinguishes the two states. The LLM still sees the error in
+# ToolMessage.content (so it stops retrying — paired with config
+# ``loop_detection.tool_freq_overrides.{web_search,image_search}``); the client just
+# does not get an empty-result card.
+_EMPTY_SEARCH_TOOLS = frozenset({"web_search", "image_search"})
 
 
 def _extract_text_content(content: Any) -> str:
@@ -314,6 +337,16 @@ class MessageStreamMiddleware(AgentMiddleware):
 
     def _emit_tool_result(self, tool_msg: ToolMessage) -> None:
         content = self._structure_content(_extract_text_content(tool_msg.content))
+        # Empty search result (content carries an ``error`` key, value-agnostic) → suppress
+        # the downstream tool_result. content/ToolMessage is unchanged, so the LLM still sees
+        # the error and stops retrying; the client just gets no empty-result card.
+        if (tool_msg.name or "") in _EMPTY_SEARCH_TOOLS and "error" in content:
+            logger.debug(
+                "MessageStreamMiddleware: suppressed empty-search tool_result name=%s tool_call_id=%s",
+                tool_msg.name,
+                tool_msg.tool_call_id,
+            )
+            return
         sc = self._structured_side_channel(tool_msg)
         if sc:
             content = {**content, **sc}
@@ -437,18 +470,22 @@ class MessageStreamMiddleware(AgentMiddleware):
         strip the client-only ``structured_content`` so it never reaches the checkpoint.
         """
         visibility = self._resolve_visibility(getattr(request, "tool", None), tool_msg.name or "")
-        if visibility != VISIBILITY_INTERNAL:
-            # artifact-visibility deliverables: project items (self-built or from materials).
-            # No items (error / failed rehost / nothing captured) → fall back to tool_result so
-            # the result still surfaces and no empty/unstable artifact is emitted (I5).
-            if visibility == VISIBILITY_ARTIFACT:
-                items = self._artifact_items(request, result, tool_msg)
-                if items:
-                    self._emit_artifact(tool_msg, items)
-                else:
-                    self._emit_tool_result(tool_msg)
-            else:
+        if visibility == VISIBILITY_ARTIFACT:
+            # artifact-visibility tools only put an ``artifact`` event on the wire when they
+            # carry stable items (self-built or projected from captured materials). With no
+            # items the result is either an in-flight intermediate (generate_*/task_* polling
+            # a not-yet-ready URL — status="success") or a terminal failure (status="error").
+            # We suppress the intermediate (the client should only see the deliverable, not the
+            # waiting chatter) but still surface a terminal failure as a tool_result so the
+            # client learns the generation failed. ToolMessage.content is never modified — the
+            # LLM sees every intermediate/terminal result regardless of what we emit (I5).
+            items = self._artifact_items(request, result, tool_msg)
+            if items:
+                self._emit_artifact(tool_msg, items)
+            elif (getattr(tool_msg, "status", None) or "success") == "error":
                 self._emit_tool_result(tool_msg)
+        elif visibility == VISIBILITY_PROGRESS:
+            self._emit_tool_result(tool_msg)
         # The side channel has now been delivered downstream (or, for internal tools,
         # there is no downstream event by design); in every case it is transient client
         # data that must not linger on the persisted ToolMessage.

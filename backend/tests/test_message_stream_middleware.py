@@ -398,13 +398,14 @@ class TestWrapToolCallSync:
         assert evt["items"] == items
         assert evt["content"] == payload
 
-    def test_artifact_tool_error_falls_back_to_tool_result(self):
-        """An artifact tool that errors (no artifact payload) surfaces as tool_result."""
+    def test_artifact_tool_terminal_error_falls_back_to_tool_result(self):
+        """An artifact tool whose terminal result is a failure (status='error', no items)
+        still surfaces as a tool_result so the client learns the generation failed."""
         from langgraph.types import Command
         mw = _middleware()
-        tm = _tool_msg(content="Error: urls and expires_at_list must have the same length", name="present_files", status="success")
+        tm = _tool_msg(content="Error: generation failed", name="cfdream_generate_image", status="error")
         cmd = Command(update={"messages": [tm]})
-        req = _tool_request(_tool("present_files", "artifact"))
+        req = _tool_request(_tool("cfdream_generate_image", "artifact"))
         captured: list[dict] = []
 
         with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
@@ -414,6 +415,83 @@ class TestWrapToolCallSync:
         assert len(captured) == 1
         assert captured[0]["type"] == "tool_result"
         assert "Error" in captured[0]["content"]["message"]
+
+    def test_artifact_tool_intermediate_success_no_items_suppressed(self):
+        """An artifact tool's in-flight intermediate (status='success', no items — e.g.
+        generate_*/task_* polling a not-yet-ready URL) emits nothing downstream. The LLM
+        still sees the content; the client only gets the final artifact."""
+        from langgraph.types import Command
+        mw = _middleware()
+        payload = {"task_id": "task-1", "status": "processing"}  # no top-level artifact/urls
+        tm = _tool_msg(content=json.dumps(payload), name="cfdream_task_status", status="success")
+        cmd = Command(update={"messages": [tm]})
+        req = _tool_request(_tool("cfdream_task_status", "artifact"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            result = mw.wrap_tool_call(req, MagicMock(return_value=cmd))
+
+        assert result is cmd  # content/ToolMessage unchanged
+        assert captured == []  # nothing emitted
+
+    def test_empty_web_search_result_suppressed(self):
+        """web_search 'No results found' (content carries an error key) emits no tool_result."""
+        mw = _middleware()
+        tm = _tool_msg(content=json.dumps({"error": "No results found", "query": "xyzzy"}), name="web_search", status="success")
+        req = _tool_request(_tool("web_search", "progress"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            result = mw.wrap_tool_call(req, MagicMock(return_value=tm))
+
+        assert result is tm  # content unchanged so the LLM still sees the error
+        assert captured == []
+
+    def test_empty_image_search_result_suppressed(self):
+        """image_search 'No images found' is suppressed the same way (error-key presence)."""
+        mw = _middleware()
+        tm = _tool_msg(content=json.dumps({"error": "No images found", "query": "xyzzy"}), name="image_search", status="success")
+        req = _tool_request(_tool("image_search", "progress"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=tm))
+
+        assert captured == []
+
+    def test_non_empty_web_search_still_emits(self):
+        """A web_search with real results (no error key) still emits a tool_result."""
+        mw = _middleware()
+        payload = {"query": "deerflow", "total_results": 1, "results": [{"title": "t", "url": "u", "content": "c"}]}
+        tm = _tool_msg(content=json.dumps(payload), name="web_search", status="success")
+        req = _tool_request(_tool("web_search", "progress"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=tm))
+
+        assert len(captured) == 1
+        assert captured[0]["type"] == "tool_result"
+        assert captured[0]["content"] == payload
+
+    def test_empty_error_key_only_gates_search_tools(self):
+        """A non-search progress tool whose content has an error key is NOT suppressed —
+        the empty-search gate is scoped to web_search/image_search by name."""
+        mw = _middleware()
+        tm = _tool_msg(content=json.dumps({"error": "boom"}), name="some_other_tool", status="success")
+        req = _tool_request(_tool("some_other_tool", "progress"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=tm))
+
+        assert len(captured) == 1
+        assert captured[0]["type"] == "tool_result"
 
     def test_json_object_content_passes_through(self):
         """A tool whose content is a JSON object (e.g. cfdream generate_image) is emitted as-is."""
@@ -764,14 +842,18 @@ class TestArtifactMaterialsProjection:
         # display stamped back onto the persisted material (for final_state projection parity)
         assert cmd.update["materials"][mid]["display"] is True
 
-    def test_unstable_material_yields_no_items_falls_back_to_tool_result(self):
+    def test_unstable_material_yields_no_items_suppressed(self):
+        """Failed rehost (fail-open, stable=False) → no items, but status='success' (the
+        generate call itself succeeded, only rehost degraded). Under the artifact-tool rule
+        this is a non-terminal degraded success → suppressed (no artifact, no tool_result).
+        The unstable material is still never delivered (I5)."""
         mw = _middleware()
         mid = "m_fail01"
         new_mats = {mid: {"id": mid, "kind": "image", "ref_type": "global_url", "ref": "https://cdn/expired.png", "stable": False}}
         cmd = self._captured_cmd([mid], new_materials=new_mats)
         captured = self._run(mw, self._req({}), cmd)
 
-        assert len(captured) == 1 and captured[0]["type"] == "tool_result"
+        assert captured == []
         # not stamped a deliverable (I5: unstable never display)
         assert "display" not in cmd.update["materials"][mid]
 
