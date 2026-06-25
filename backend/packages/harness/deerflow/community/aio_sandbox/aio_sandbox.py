@@ -349,14 +349,17 @@ class AioSandbox(Sandbox):
         The ``sandbox-director`` image already ships ``chromium-browser``; rather
         than depend on a browser HTTP API (which the gem runtime does not expose),
         we drive chromium's headless ``--screenshot`` CLI over the *same* shell/file
-        API the agent uses: write the HTML into the sandbox, render, then stream the
-        PNG back out as base64 (``download_file`` restricts paths to the virtual
-        prefix, and ``/tmp`` is outside it). See cfgpu-docs/present-files-tool.md §3.
+        API the agent uses, then fetch the PNG with ``download_file`` (binary-safe,
+        chunked). The render target lives under ``VIRTUAL_PATH_PREFIX`` because
+        ``download_file`` rejects paths outside it. See cfgpu-docs/present-files-tool.md §3.
 
         Notes:
-            - Goes through ``write_file`` / ``execute_command`` — which DO take
-              ``self._lock`` — so a snapshot serializes with agent bash on the
-              single shell session (I3, revised: shell-driven, not a separate port).
+            - PNG is fetched via ``download_file``, NOT base64-over-shell: the AIO
+              ``shell.exec`` output is unreliable for tens of KB of base64 (padding
+              corruption / size caps — observed 2026-06-25).
+            - Goes through ``write_file`` / ``execute_command`` / ``download_file`` —
+              which DO take ``self._lock`` — so a snapshot serializes with agent bash
+              on the single shell session (I3, revised: shell-driven, not a separate port).
             - Renders inside the sandbox isolation boundary (untrusted agent HTML
               never touches the consumer host browser/filesystem).
             - Fail-open: any failure returns ``None`` (caller drops the poster).
@@ -365,28 +368,27 @@ class AioSandbox(Sandbox):
             return None
 
         token = uuid.uuid4().hex
-        html_path = f"/tmp/snap-{token}.html"
-        png_path = f"/tmp/snap-{token}.png"
+        # Under the virtual prefix (a hidden sibling of outputs/) so download_file
+        # can fetch the result; cleaned up in finally so it never lingers/presents.
+        snap_dir = f"{VIRTUAL_PATH_PREFIX.rstrip('/')}/.deerflow-snapshots"
+        html_path = f"{snap_dir}/{token}.html"
+        png_path = f"{snap_dir}/{token}.png"
         height = self._SNAPSHOT_HEIGHT_FULL if full_page else self._SNAPSHOT_HEIGHT_FOLD
         try:
+            self.execute_command(f"mkdir -p {shlex.quote(snap_dir)}")
             self.write_file(html_path, html)
-            # chromium stderr (DBus noise + "N bytes written") is dropped; only the
-            # base64 PNG reaches stdout. ``--no-sandbox`` is required running as root
-            # inside the container (the container itself is the isolation boundary).
+            # chromium stderr (DBus noise + "N bytes written") is dropped. ``--no-sandbox``
+            # is required running as root inside the container (the container itself is
+            # the isolation boundary). The screenshot captures the --window-size viewport.
             render_cmd = (
                 f"chromium-browser --headless=new --no-sandbox --disable-gpu "
                 f"--hide-scrollbars --force-device-scale-factor=1 "
                 f"--window-size={self._SNAPSHOT_WIDTH},{height} "
                 f"--screenshot={shlex.quote(png_path)} "
-                f"{shlex.quote('file://' + html_path)} >/dev/null 2>&1; "
-                f"base64 -w0 {shlex.quote(png_path)} 2>/dev/null"
+                f"{shlex.quote('file://' + html_path)} >/dev/null 2>&1"
             )
-            out = self.execute_command(render_cmd)
-            b64 = (out or "").strip()
-            if not b64 or b64.startswith("Error:") or b64 == "(no output)":
-                logger.warning("AioSandbox snapshot_html: chromium produced no PNG (out=%r)", b64[:200])
-                return None
-            png = base64.b64decode(b64)
+            self.execute_command(render_cmd)
+            png = self.download_file(png_path)  # raises OSError if render produced no file
             return png or None
         except Exception:
             logger.warning("AioSandbox snapshot_html failed", exc_info=True)
