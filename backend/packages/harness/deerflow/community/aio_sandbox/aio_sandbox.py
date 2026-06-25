@@ -375,7 +375,10 @@ class AioSandbox(Sandbox):
         png_path = f"{snap_dir}/{token}.png"
         height = self._SNAPSHOT_HEIGHT_FULL if full_page else self._SNAPSHOT_HEIGHT_FOLD
         try:
-            self.execute_command(f"mkdir -p {shlex.quote(snap_dir)}")
+            # mkdir runs as root (shell), but write_file goes through the file API as
+            # a *different* (non-root) sandbox user; chmod 777 lets that user write into
+            # the dir. Safe: the dir is inside the isolated, ephemeral container.
+            self.execute_command(f"mkdir -p {shlex.quote(snap_dir)} && chmod 777 {shlex.quote(snap_dir)}")
             self.write_file(html_path, html)
             # chromium stderr (DBus noise + "N bytes written") is dropped. ``--no-sandbox``
             # is required running as root inside the container (the container itself is
