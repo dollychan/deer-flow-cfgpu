@@ -78,6 +78,36 @@ class OSSUploader:
         logger.info("OSSUploader: uploaded %s → %s", virtual_path, object_key)
         return ref
 
+    async def upload_inline_bytes(
+        self,
+        object_key: str,
+        data: bytes,
+        content_type: str | None = None,
+    ) -> str:
+        """Upload an in-memory byte payload and return a client-facing reference.
+
+        Used by ``present_files`` for synthesized artifacts (the wrapped-document
+        HTML and its PNG snapshot, cfgpu-docs/present-files-tool.md §6.1). The
+        blocking ``put_object`` is offloaded to a thread so the event loop is
+        never blocked.
+
+        Mirrors :meth:`upload_local_file`'s return contract: a presigned GET URL
+        when ``presigned_url`` is enabled (``kind="url"`` on the client), else the
+        bare object key (``kind="path"``). ``presign`` is a local HMAC with no
+        network IO, so it is safe to call inline.
+
+        Args:
+            object_key: The full object key (callers derive a content-hash key for
+                idempotency — re-presenting the same file does not duplicate).
+            data: The raw bytes to upload.
+            content_type: MIME type; inferred from ``object_key`` when omitted.
+        """
+        loop = asyncio.get_event_loop()
+        key = await loop.run_in_executor(
+            None, self._client.upload_bytes, object_key, data, content_type
+        )
+        return self._client.presign(key) if self._config.presigned_url else key
+
     async def rehost_url(self, url: str, thread_id: str) -> str:
         """Fetch a remote URL and re-host its bytes into our bucket; return the **object_key**.
 

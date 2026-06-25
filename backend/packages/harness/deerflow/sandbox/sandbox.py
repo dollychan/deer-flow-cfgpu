@@ -110,3 +110,21 @@ class Sandbox(ABC):
             content: The binary content to write to the file.
         """
         pass
+
+    def snapshot_html(self, html: str, *, full_page: bool = True) -> bytes | None:
+        """Render an HTML document to a PNG snapshot using the sandbox browser.
+
+        This is an optional capability: sandboxes without a built-in browser
+        (e.g. ``LocalSandbox``) inherit this default and return ``None``, so
+        callers must treat ``None`` as "no snapshot available" and degrade
+        gracefully (see cfgpu-docs/present-files-tool.md §3, I2).
+
+        Args:
+            html: A self-contained HTML document string to render.
+            full_page: Whether to capture the full scrollable page.
+
+        Returns:
+            PNG bytes on success, or ``None`` when no browser is available or
+            rendering fails (fail-open — never raises for snapshot purposes).
+        """
+        return None

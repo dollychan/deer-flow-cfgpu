@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import html as html_lib
+import json
 import logging
 from pathlib import Path
 from typing import Annotated
@@ -116,6 +120,188 @@ def _artifact_item(ref: str) -> dict:
     return {"ref": ref, "kind": kind, "expires_at": None}
 
 
+# Non-media text files larger than this are not wrapped (treated as opaque
+# downloads) so we never pull a huge file into memory just to render it.
+_WRAPPABLE_MAX_BYTES = 2 * 1024 * 1024  # 2 MiB
+
+# Lightweight language hint for the wrapped source view, by file suffix.
+_LANG_BY_SUFFIX: dict[str, str] = {
+    ".py": "python",
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".json": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".toml": "toml",
+    ".txt": "text",
+    ".log": "text",
+    ".csv": "text",
+    ".js": "javascript",
+    ".mjs": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".css": "css",
+    ".sh": "bash",
+    ".sql": "sql",
+    ".xml": "xml",
+}
+
+
+def _lang_for(filename: str) -> str:
+    return _LANG_BY_SUFFIX.get(Path(filename).suffix.lower(), "text")
+
+
+def _is_html(filename: str) -> bool:
+    return Path(filename).suffix.lower() in (".html", ".htm")
+
+
+def _inline_key(thread_id: str, category: str, data: bytes, name: str) -> str:
+    """Content-hash-derived object key, so re-presenting the same file is idempotent.
+
+    Mirrors ``_filename_from_url`` in oss/uploader.py: ``<sha1(data)[:8]>-<name>``
+    keeps distinct payloads apart while making a repeat present deterministic.
+    """
+    digest = hashlib.sha1(data).hexdigest()[:8]
+    return f"agent-artifacts/{thread_id}/{category}/{digest}-{name}"
+
+
+_DOC_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  * {{ box-sizing: border-box; }}
+  body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f7; }}
+  .doc-card {{ max-width: 920px; margin: 24px auto; border-radius: 12px; overflow: hidden;
+              box-shadow: 0 1px 4px rgba(0,0,0,.12); background: #1e1e2e; }}
+  .doc-bar {{ display: flex; align-items: center; justify-content: space-between;
+             padding: 10px 16px; background: #2a2a3c; color: #e6e6e6; font-size: 13px; }}
+  .doc-name {{ font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .doc-copy {{ border: 1px solid #4a4a60; background: #34344a; color: #e6e6e6; cursor: pointer;
+              border-radius: 6px; padding: 4px 12px; font-size: 12px; flex: none; }}
+  .doc-copy:hover {{ background: #41415a; }}
+  .doc-copy.copied {{ background: #2e7d4f; border-color: #2e7d4f; }}
+  pre {{ margin: 0; padding: 16px; max-height: 640px; overflow: auto; color: #d4d4d4;
+        font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.55;
+        white-space: pre; tab-size: 4; }}
+</style>
+</head>
+<body>
+  <div class="doc-card">
+    <div class="doc-bar">
+      <span class="doc-name">{name}</span>
+      <button class="doc-copy" id="copyBtn">复制{lang_label}</button>
+    </div>
+    <pre id="src">{escaped}</pre>
+  </div>
+  <script>
+    const SOURCE = {source_json};
+    const btn = document.getElementById('copyBtn');
+    btn.addEventListener('click', async () => {{
+      try {{
+        await navigator.clipboard.writeText(SOURCE);
+        btn.textContent = '已复制';
+        btn.classList.add('copied');
+        setTimeout(() => {{ btn.textContent = '复制{lang_label}'; btn.classList.remove('copied'); }}, 1500);
+      }} catch (e) {{ btn.textContent = '复制失败'; }}
+    }});
+  </script>
+</body>
+</html>"""
+
+
+def build_doc_html(text: str, filename: str, lang: str) -> str:
+    """Wrap raw source text in a self-contained source-viewer HTML.
+
+    Fully inline (no external assets) so it renders identically offline, in the
+    snapshot browser, and in the client's sandboxed iframe. The original text is
+    injected as a JS string constant for the copy button (``navigator.clipboard``)
+    so it is byte-exact, not reconstructed from the escaped DOM.
+    """
+    label_by_lang = {"markdown": " Markdown", "python": " 代码", "json": " JSON"}
+    lang_label = label_by_lang.get(lang, "")
+    return _DOC_HTML_TEMPLATE.format(
+        title=html_lib.escape(filename),
+        name=html_lib.escape(filename),
+        lang_label=lang_label,
+        escaped=html_lib.escape(text),
+        source_json=json.dumps(text),
+    )
+
+
+def _read_bytes(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def _resolve_snapshot_sandbox(runtime: Runtime):
+    """Best-effort resolve the thread's Sandbox for snapshot rendering.
+
+    present_files runs in the consumer/gateway host process but holds the
+    runtime, so it can reach the per-thread Sandbox object. Resolution failures
+    (no sandbox state, provider miss) are non-fatal: snapshots are optional, so
+    we return ``None`` and the caller simply omits the poster (I1/I2).
+    """
+    try:
+        from deerflow.sandbox.tools import sandbox_from_runtime
+
+        return sandbox_from_runtime(runtime)
+    except Exception:
+        return None
+
+
+async def _build_rich_item(
+    uploader,
+    sandbox,
+    thread_id: str,
+    filename: str,
+    raw: bytes,
+) -> tuple[str, dict] | None:
+    """Wrap a non-media text file as an HTML doc + PNG snapshot → a rich artifact item.
+
+    Returns ``(ref, item)`` on success, or ``None`` when the file is not wrappable
+    (binary / too large) so the caller falls back to a bare download link. The
+    snapshot is best-effort: if the sandbox has no browser (LocalSandbox → ``None``)
+    or rendering fails, ``poster`` is ``None`` and the HTML is still delivered (I1).
+    """
+    if len(raw) > _WRAPPABLE_MAX_BYTES:
+        return None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None  # binary (pdf/zip/...) → caller retains the bare-link path
+
+    if _is_html(filename):
+        # Already HTML: deliver it as-is (user wants the rendered page, not a
+        # source view), and snapshot the page itself (D6).
+        html_doc = text
+        html_name = filename
+    else:
+        html_doc = build_doc_html(text, filename, _lang_for(filename))
+        html_name = f"{filename}.html"
+
+    html_bytes = html_doc.encode("utf-8")
+    html_key = _inline_key(thread_id, "documents", html_bytes, html_name)
+    html_ref = await uploader.upload_inline_bytes(html_key, html_bytes, "text/html")
+
+    poster_ref = None
+    if sandbox is not None:
+        png = await asyncio.to_thread(sandbox.snapshot_html, html_doc)
+        if png:
+            png_key = _inline_key(thread_id, "images", png, f"{Path(filename).stem}.png")
+            poster_ref = await uploader.upload_inline_bytes(png_key, png, "image/png")
+
+    item = {
+        **_artifact_item(html_ref),
+        "mime": "text/html",
+        "poster": poster_ref,
+        "source_name": filename,
+    }
+    return html_ref, item
+
+
 async def _present_materials(
     runtime: Runtime,
     ids: list[str],
@@ -201,7 +387,7 @@ async def present_file_tool(
         except ValueError as exc:
             return Command(update={"messages": [ToolMessage(f"Error: {exc}", tool_call_id=tool_call_id)]})
 
-        from deerflow.oss.uploader import get_oss_uploader
+        from deerflow.oss.uploader import _infer_category, get_oss_uploader
 
         uploader = get_oss_uploader()
         if uploader is None:
@@ -212,9 +398,28 @@ async def present_file_tool(
             thread_id = _get_thread_id(runtime) or "unknown"
             thread_data = state.get("thread_data") or {}
             outputs_path = thread_data.get("outputs_path", "")
+            # Resolve the sandbox once for snapshot rendering; tolerate its
+            # absence (e.g. LocalSandbox / not initialized) → no poster (I1/I2).
+            sandbox = _resolve_snapshot_sandbox(runtime)
             for vpath in normalized_paths:
                 try:
                     physical = _virtual_to_physical(vpath, outputs_path)
+                    category = _infer_category(Path(physical).name)
+                    if category in ("images", "videos", "audios"):
+                        # Media: existing behaviour — single URL artifact item.
+                        url = await uploader.upload_local_file(vpath, physical, thread_id)
+                        artifacts.append(url)
+                        items.append(_artifact_item(url))
+                        continue
+                    # Non-media: try wrapping as HTML doc + snapshot poster.
+                    raw = await asyncio.to_thread(_read_bytes, physical)
+                    rich = await _build_rich_item(uploader, sandbox, thread_id, Path(physical).name, raw)
+                    if rich is not None:
+                        ref, item = rich
+                        artifacts.append(ref)
+                        items.append(item)
+                        continue
+                    # Not wrappable (binary / too large): bare download link.
                     url = await uploader.upload_local_file(vpath, physical, thread_id)
                     artifacts.append(url)
                     items.append(_artifact_item(url))

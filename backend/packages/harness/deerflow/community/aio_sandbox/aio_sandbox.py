@@ -335,3 +335,48 @@ class AioSandbox(Sandbox):
             except Exception as e:
                 logger.error(f"Failed to update file in sandbox: {e}")
                 raise
+
+    def snapshot_html(self, html: str, *, full_page: bool = True) -> bytes | None:
+        """Render an HTML document to a PNG using the sandbox's built-in chromium.
+
+        The ``all-in-one-sandbox`` image ships chromium + a server-side Playwright
+        exposed over HTTP by ``agent_sandbox``. We feed the HTML in via a ``data:``
+        URL (no disk round-trip), render it in an **isolated tab**, and stream the
+        PNG bytes back to the host — there is no on-disk artifact or path involved
+        (cfgpu-docs/present-files-tool.md §3.2, D7).
+
+        Notes:
+            - Browser calls go over the browser-service HTTP port and must NOT take
+              ``self._lock`` (that lock only serializes the single shell session;
+              I3). Reusing it here would needlessly contend with agent bash.
+            - The new tab is created/activated/closed serially (I4) so a snapshot
+              never clobbers the agent's active page.
+            - Fail-open: any failure returns ``None`` (caller drops the poster).
+        """
+        client = self._client
+        if client is None:
+            return None
+
+        data_url = "data:text/html;base64," + base64.b64encode(html.encode("utf-8")).decode("ascii")
+        tab_index: int | None = None
+        try:
+            # A freshly created tab is appended at the end, so its 0-based index
+            # is the count of tabs that existed before creation. Deriving it from
+            # list() (rather than the opaque create() payload) keeps us decoupled
+            # from the Fern-generated `data: Any` response shape.
+            before = client.browser_tabs.list()
+            tab_index = len(before.data) if before is not None and before.data else 0
+            client.browser_tabs.create()
+            client.browser_tabs.activate(tab_index)
+            client.browser_page.navigate(url=data_url, wait_until="load")
+            png = b"".join(client.browser_page.screenshot(full_page=full_page, format="png"))
+            return png or None
+        except Exception:
+            logger.warning("AioSandbox snapshot_html failed", exc_info=True)
+            return None
+        finally:
+            if tab_index is not None:
+                try:
+                    client.browser_tabs.close(tab_index)
+                except Exception:
+                    logger.debug("snapshot_html: failed to close snapshot tab", exc_info=True)
