@@ -103,9 +103,11 @@ def test_text_file_produces_rich_item_with_poster(wired):
     item = _items(result)[0]
     assert item["mime"] == "text/html"
     assert item["source_name"] == "report.md"
-    assert item["poster"] is not None and item["poster"].endswith(".png")
-    assert item["ref"].endswith(".html") or "documents" in item["ref"]
+    # ref is the snapshot PNG; html carries the source-viewer HTML path.
+    assert item["ref"].endswith(".png") and "images" in item["ref"]
+    assert item["html"].endswith(".html") or "documents" in item["html"]
     assert item["kind"] == "url"
+    assert "poster" not in item
     # HTML + PNG both uploaded inline.
     assert len(wired.uploader.inline_calls) == 2
     assert wired.sandbox.calls, "snapshot_html should have been invoked"
@@ -133,7 +135,9 @@ def test_no_poster_when_sandbox_absent(wired, monkeypatch):
     result = _present(runtime=_make_runtime(str(wired.outputs_dir)), filepaths=[str(f)], tool_call_id="tc")
 
     item = _items(result)[0]
-    assert item["poster"] is None
+    # No snapshot → ref is None, html still carries the HTML file (I1/I2).
+    assert item["ref"] is None
+    assert item["html"].endswith(".html") or "documents" in item["html"]
     assert item["mime"] == "text/html"  # HTML still delivered (I1/I2)
     assert len(wired.uploader.inline_calls) == 1  # only the HTML, no PNG
 

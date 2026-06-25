@@ -267,7 +267,8 @@ async def _build_rich_item(
     Returns ``(ref, item)`` on success, or ``None`` when the file is not wrappable
     (binary / too large) so the caller falls back to a bare download link. The
     snapshot is best-effort: if the sandbox has no browser (LocalSandbox → ``None``)
-    or rendering fails, ``poster`` is ``None`` and the HTML is still delivered (I1).
+    or rendering fails, ``ref`` is ``None`` while ``html`` still points at the HTML,
+    so the file is still delivered without a poster (I1).
     """
     if len(raw) > _WRAPPABLE_MAX_BYTES:
         return None
@@ -289,23 +290,30 @@ async def _build_rich_item(
     html_key = _inline_key(thread_id, "documents", html_bytes, html_name)
     html_ref = await uploader.upload_inline_bytes(html_key, html_bytes, "text/html")
 
-    poster_ref = None
+    snapshot_ref = None
     if sandbox is not None:
         png = await asyncio.to_thread(sandbox.snapshot_html, html_doc)
         if png:
             png_key = _inline_key(thread_id, "images", png, f"{Path(filename).stem}.png")
-            poster_ref = await uploader.upload_inline_bytes(png_key, png, "image/png")
+            snapshot_ref = await uploader.upload_inline_bytes(png_key, png, "image/png")
         else:
             # snapshot_html already logged the underlying cause (fail-open);
-            # surface that this file ends up posterless so it is greppable.
-            logger.warning("present_files: snapshot returned no PNG for %s — delivering without poster", filename)
+            # surface that this file ends up snapshotless so it is greppable.
+            logger.warning("present_files: snapshot returned no PNG for %s — delivering without snapshot", filename)
     else:
-        logger.info("present_files: no snapshot sandbox for %s — delivering without poster", filename)
+        logger.info("present_files: no snapshot sandbox for %s — delivering without snapshot", filename)
 
+    # ``ref`` is the snapshot PNG (what the client renders); ``html`` always carries
+    # the source-viewer HTML's OSS path. When the snapshot is unavailable (no sandbox
+    # / render failure) ``ref`` is ``None`` while ``html`` still points at the HTML, so
+    # the file is delivered without a poster (I1). ``kind``/``expires_at`` classify off
+    # ``html_ref`` (png and html share the same OSS scheme) so they hold even when the
+    # snapshot is absent.
     item = {
         **_artifact_item(html_ref),
+        "ref": snapshot_ref,
         "mime": "text/html",
-        "poster": poster_ref,
+        "html": html_ref,
         "source_name": filename,
     }
     return html_ref, item
