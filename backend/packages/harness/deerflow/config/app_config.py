@@ -121,7 +121,7 @@ class AppConfig(BaseModel):
     shared_agents: list[str] = Field(
         default_factory=list,
         description=(
-            "Names of agent-level shared agents (e.g. the director) served to all users from a single "
+            "Names of agent-level shared agents (e.g. the cf-dream agent) served to all users from a single"
             "definition at {base_dir}/agents/{name}/. These bypass the per-user agent layout entirely: "
             "resolve_agent_dir returns the shared directory regardless of user, so no per-user copy can "
             "shadow them. Leave empty for the default per-user custom-agent behavior."

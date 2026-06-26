@@ -29,11 +29,11 @@ def filter_by_scope(rows: list, active_dims: set[str]) -> list:
     """Return rows whose scope_key requirements are all satisfied by *active_dims*.
 
     ``scope_key`` is a ``"+"``-separated list of required dimension tags, e.g.
-    ``"agent:director+user:alice"``.  An empty scope_key (``""``) matches all.
+    ``"agent:cf-dream+user:alice"``.  An empty scope_key (``""``) matches all.
 
     Args:
         rows: ORM rows with a ``scope_key`` attribute.
-        active_dims: Currently active dimension tags, e.g. ``{"agent:director"}``.
+        active_dims: Currently active dimension tags, e.g. ``{"agent:cf-dream"}``.
 
     Returns:
         Subset of *rows* whose required tags are all present in *active_dims*.

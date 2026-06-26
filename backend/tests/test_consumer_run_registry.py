@@ -309,7 +309,7 @@ class TestClaimWatermark:
             "thread_id": "t1",
             "thread_msg_seq": 8,
             "type": "task",
-            "agent_name": "director",
+            "agent_name": "cf-dream",
             "user_id": "34",
             "project_id": "proj-1",
             "bizType": "agent_task",
@@ -327,7 +327,7 @@ class TestClaimWatermark:
         assert echo["thread_id"] == "t1"
         assert echo["thread_msg_seq"] == 8  # not 0
         assert echo["bizType"] == "agent_task"
-        assert echo["agent_name"] == "director"
+        assert echo["agent_name"] == "cf-dream"
         assert echo["user_id"] == "34"
         assert echo["project_id"] == "proj-1"
 

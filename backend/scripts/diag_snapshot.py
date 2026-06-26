@@ -9,7 +9,7 @@
     .venv/bin/python scripts/diag_snapshot.py http://<沙箱 base_url> ./game.html
 
 base_url 从 consumer 日志里找：搜索 "AioSandbox" / "sandbox_url"，或 `docker ps`
-看 sandbox-director 容器映射到 host 的端口（容器内是 8080，常映射到 127.0.0.1:8080）。
+看 sandbox-cfdream 容器映射到 host 的端口（容器内是 8080，常映射到 127.0.0.1:8080）。
 
 脚本构造一个真实 AioSandbox，调用与 present_files 完全相同的 `snapshot_html`
 （写 HTML 进沙箱 outputs/ → 驱动内置 chromium --headless --virtual-time-budget

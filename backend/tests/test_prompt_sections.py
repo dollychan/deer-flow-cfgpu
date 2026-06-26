@@ -65,7 +65,7 @@ def test_agent_config_prompt_sections_defaults_to_none() -> None:
 
 
 def test_agent_config_prompt_sections_parses_exclude_list() -> None:
-    cfg = AgentConfig(name="director", prompt_sections={"exclude": ["citations", "clarification"]})
+    cfg = AgentConfig(name="cf-dream", prompt_sections={"exclude": ["citations", "clarification"]})
     assert isinstance(cfg.prompt_sections, PromptSectionsConfig)
     assert cfg.prompt_sections.exclude == ["citations", "clarification"]
 

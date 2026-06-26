@@ -85,11 +85,11 @@ class TestParseResponse:
     def test_multiple_scope_groups(self):
         data = [
             {"scope_key": "", "facts": [{"content": "A"}], "summary": "general"},
-            {"scope_key": "agent:director", "facts": [{"content": "B"}], "summary": "agent"},
+            {"scope_key": "agent:cf-dream", "facts": [{"content": "B"}], "summary": "agent"},
         ]
         result = _parse_response(json.dumps(data))
         assert len(result) == 2
-        assert {r.scope_key for r in result} == {"", "agent:director"}
+        assert {r.scope_key for r in result} == {"", "agent:cf-dream"}
 
     def test_summary_none_when_falsy(self):
         raw = json.dumps([{"scope_key": "", "facts": [], "summary": ""}])
@@ -205,13 +205,13 @@ class TestExtractAgentKnowledge:
         _patch_resolver_missing(monkeypatch)
         from deerflow.agents.memory.extractor import extract_agent_knowledge
 
-        result = await extract_agent_knowledge([_human("x"), _ai("y")], "director", [])
+        result = await extract_agent_knowledge([_human("x"), _ai("y")], "cf-dream", [])
         assert result == ExtractionResult(scope_key="")
 
     @pytest.mark.anyio
     async def test_returns_first_result_group(self, tmp_path, monkeypatch):
         _patch_resolver(
-            tmp_path, monkeypatch, "agent", "director",
+            tmp_path, monkeypatch, "agent", "cf-dream",
             "{conversation}{existing_facts_json}{agent_name}"
         )
         llm_response = json.dumps([{"scope_key": "", "facts": [{"content": "agent fact"}], "summary": "s"}])
@@ -219,15 +219,15 @@ class TestExtractAgentKnowledge:
 
         from deerflow.agents.memory.extractor import extract_agent_knowledge
 
-        result = await extract_agent_knowledge([_human("x"), _ai("y")], "director", [])
+        result = await extract_agent_knowledge([_human("x"), _ai("y")], "cf-dream", [])
         assert result.facts == [{"content": "agent fact"}]
 
     @pytest.mark.anyio
     async def test_returns_empty_on_empty_conversation(self, tmp_path, monkeypatch):
-        _patch_resolver(tmp_path, monkeypatch, "agent", "director", "{conversation}{existing_facts_json}{agent_name}")
+        _patch_resolver(tmp_path, monkeypatch, "agent", "cf-dream", "{conversation}{existing_facts_json}{agent_name}")
         from deerflow.agents.memory.extractor import extract_agent_knowledge
 
-        result = await extract_agent_knowledge([], "director", [])
+        result = await extract_agent_knowledge([], "cf-dream", [])
         assert result == ExtractionResult(scope_key="")
 
 

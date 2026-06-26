@@ -1,6 +1,6 @@
 """P2 — per-thread mount isolation guard (D3, the isolation linchpin).
 
-The AIO sandbox is the director's blast radius: whatever the container can read is
+The AIO sandbox is the cf-dream consumer's blast radius: whatever the container can read is
 whatever we bind-mount into it. The provider is *already* correct — ``_get_thread_mounts``
 mounts only the current thread's ``workspace/uploads/outputs`` (RW) + ``acp-workspace``
 (RO), never ``/root/fs`` wholesale — so P2 adds **no provider code**. It adds guards that
@@ -134,7 +134,7 @@ def test_acp_workspace_is_read_only(tmp_path, monkeypatch):
 def _wide_host_mounts(cfg: SandboxConfig) -> list[str]:
     """Return any configured host mount that exposes a shared root.
 
-    A hygienic director config bind-mounts nothing globally — per-thread data is mounted
+    A hygienic cf-dream config bind-mounts nothing globally — per-thread data is mounted
     by the provider at acquire time. A static mount of ``/root/fs`` (or any filesystem
     root) would defeat per-thread isolation for every container.
     """

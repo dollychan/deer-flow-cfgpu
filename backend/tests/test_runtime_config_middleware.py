@@ -501,11 +501,11 @@ def test_runtime_config_registered_after_human_approval():
     from deerflow.config import get_app_config
     from deerflow.config.agents_config import AgentConfig
 
-    agent_cfg = AgentConfig(name="director", approval_required_tools=["*generate_*"])
+    agent_cfg = AgentConfig(name="cf-dream", approval_required_tools=["*generate_*"])
     mws = build_middlewares(
         {"configurable": {"ask": True}},
         model_name=None,
-        agent_name="director",
+        agent_name="cf-dream",
         app_config=get_app_config(),
         agent_config=agent_cfg,
     )

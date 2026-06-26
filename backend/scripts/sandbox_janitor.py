@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Per-host AIO-sandbox orphan janitor (P4 / D13 / BUG-012).
 
-Once a director consumer process has *zero* autonomous destroy power (it only ``docker
+Once a cf-dream consumer process has *zero* autonomous destroy power (it only ``docker
 kill``s the one container a cancel targets, P4a/I16), nothing inside the process reclaims
 the containers it leaves parked or orphans on crash. This janitor does, **out-of-band** and
 **independent of any consumer being alive** — run it from a systemd oneshot timer (at boot

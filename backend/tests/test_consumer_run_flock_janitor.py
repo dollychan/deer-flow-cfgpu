@@ -1,6 +1,6 @@
 """P4d — run-flock lifecycle + per-host orphan janitor (D13 / BUG-012).
 
-Once a director process has *zero* autonomous destroy power (P4a/I16), something else must
+Once a cf-dream consumer process has *zero* autonomous destroy power (P4a/I16), something else must
 reclaim the containers it leaves behind. That job is a per-host janitor that cannot rely on
 the consumer being alive. The handshake is a local-disk flock per sandbox:
 
@@ -49,11 +49,11 @@ def test_run_flock_path_under_runs_subdir(monkeypatch, tmp_path):
     assert p.parent.exists()
 
 
-def test_director_creation_lock_path_uses_shared_convention(monkeypatch, tmp_path):
-    """R3 director seam and the janitor must agree on the creation-lock path."""
+def test_cf_dream_creation_lock_path_uses_shared_convention(monkeypatch, tmp_path):
+    """R3 cf-dream provider seam and the janitor must agree on the creation-lock path."""
     monkeypatch.setenv("DEER_FLOW_SANDBOX_LOCK_DIR", str(tmp_path))
-    director = importlib.import_module("app.consumer.director_sandbox").DirectorAioProvider
-    provider = director.__new__(director)
+    provider_cls = importlib.import_module("app.consumer.cf_dream_sandbox").CfDreamAioProvider
+    provider = provider_cls.__new__(provider_cls)
     seam_path = provider._creation_lock_path("t-1", "abcd1234", user_id="alice")
     assert seam_path == sandbox_locks.creation_lock_path("abcd1234")
 
@@ -105,8 +105,8 @@ def _bare_runner() -> AgentRunner:
 
 
 def _provider(prefix: str = "deer-flow-sandbox"):
-    director = importlib.import_module("app.consumer.director_sandbox").DirectorAioProvider
-    provider = director.__new__(director)
+    provider_cls = importlib.import_module("app.consumer.cf_dream_sandbox").CfDreamAioProvider
+    provider = provider_cls.__new__(provider_cls)
     provider._config = {"container_prefix": prefix}
     provider._backend = MagicMock()
     return provider

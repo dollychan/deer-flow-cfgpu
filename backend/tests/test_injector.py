@@ -26,27 +26,27 @@ class TestFilterByScope:
         assert filter_by_scope(rows, {"agent:x"}) == rows
 
     def test_single_dim_matches_when_active(self):
-        rows = [self._row("agent:director")]
-        assert filter_by_scope(rows, {"agent:director"}) == rows
+        rows = [self._row("agent:cf-dream")]
+        assert filter_by_scope(rows, {"agent:cf-dream"}) == rows
 
     def test_single_dim_excluded_when_not_active(self):
-        rows = [self._row("agent:director")]
+        rows = [self._row("agent:cf-dream")]
         assert filter_by_scope(rows, {"agent:coder"}) == []
 
     def test_multi_dim_requires_all(self):
-        rows = [self._row("agent:director+user:alice")]
-        assert filter_by_scope(rows, {"agent:director", "user:alice"}) == rows
-        assert filter_by_scope(rows, {"agent:director"}) == []
+        rows = [self._row("agent:cf-dream+user:alice")]
+        assert filter_by_scope(rows, {"agent:cf-dream", "user:alice"}) == rows
+        assert filter_by_scope(rows, {"agent:cf-dream"}) == []
 
     def test_empty_rows_returns_empty(self):
         assert filter_by_scope([], {"agent:x"}) == []
 
     def test_mixed_rows_filtered_correctly(self):
         general = self._row("")
-        agent_only = self._row("agent:director")
+        agent_only = self._row("agent:cf-dream")
         user_only = self._row("user:alice")
         rows = [general, agent_only, user_only]
-        result = filter_by_scope(rows, {"agent:director"})
+        result = filter_by_scope(rows, {"agent:cf-dream"})
         assert general in result
         assert agent_only in result
         assert user_only not in result
@@ -124,13 +124,13 @@ class TestBuildInjection:
         import deerflow.agents.memory.injector as inj
 
         monkeypatch.setattr(inj, "get_memory_repository", lambda: None)
-        result = await build_injection("u1", "director", "proj-1")
+        result = await build_injection("u1", "cf-dream", "proj-1")
         assert result == ""
 
     @pytest.mark.anyio
     async def test_returns_empty_when_no_memory(self, repo, monkeypatch):
         _patch_repo(monkeypatch, repo)
-        result = await build_injection("u1", "director", "proj-1")
+        result = await build_injection("u1", "cf-dream", "proj-1")
         assert result == ""
 
     @pytest.mark.anyio
@@ -146,9 +146,9 @@ class TestBuildInjection:
     @pytest.mark.anyio
     async def test_injects_agent_knowledge(self, repo, monkeypatch):
         _patch_repo(monkeypatch, repo)
-        await repo.upsert_agent("director", [{"content": "use model X for portraits"}], "Director agent notes")
+        await repo.upsert_agent("cf-dream", [{"content": "use model X for portraits"}], "CF-Dream agent notes")
 
-        result = await build_injection(None, "director", None)
+        result = await build_injection(None, "cf-dream", None)
         assert "Agent Knowledge" in result
         assert "use model X for portraits" in result
 
@@ -169,7 +169,7 @@ class TestBuildInjection:
         # Agent-specific row for a different agent → should NOT appear
         await repo.upsert_user_scope("u1", "agent:coder", [{"content": "coder fact"}], None)
 
-        result = await build_injection("u1", "director", None)
+        result = await build_injection("u1", "cf-dream", None)
         assert "general fact" in result
         assert "coder fact" not in result
 
@@ -177,20 +177,20 @@ class TestBuildInjection:
     async def test_agent_scope_included_when_active(self, repo, monkeypatch):
         _patch_repo(monkeypatch, repo)
         await repo.upsert_user_scope("u1", "", [{"content": "general"}], None)
-        await repo.upsert_user_scope("u1", "agent:director", [{"content": "director pref"}], None)
+        await repo.upsert_user_scope("u1", "agent:cf-dream", [{"content": "cf-dream pref"}], None)
 
-        result = await build_injection("u1", "director", None)
+        result = await build_injection("u1", "cf-dream", None)
         assert "general" in result
-        assert "director pref" in result
+        assert "cf-dream pref" in result
 
     @pytest.mark.anyio
     async def test_all_three_sections_combined(self, repo, monkeypatch):
         _patch_repo(monkeypatch, repo)
         await repo.upsert_user_scope("u1", "", [{"content": "user fact"}], "user summary")
-        await repo.upsert_agent("director", [{"content": "agent fact"}], "agent summary")
+        await repo.upsert_agent("cf-dream", [{"content": "agent fact"}], "agent summary")
         await repo.upsert_project_scope("proj-1", "", [{"content": "proj fact"}], "proj summary")
 
-        result = await build_injection("u1", "director", "proj-1")
+        result = await build_injection("u1", "cf-dream", "proj-1")
         assert "User Knowledge" in result
         assert "Agent Knowledge" in result
         assert "Project Knowledge" in result

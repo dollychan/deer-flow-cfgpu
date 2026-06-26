@@ -32,10 +32,10 @@ def _skill(name: str, category: SkillCategory, rel: str) -> Skill:
     )
 
 
-# Pool: A/E custom, B/D public; A&B share the director/public subtree across categories.
+# Pool: A/E custom, B/D public; A&B share the cf-dream/public subtree across categories.
 _POOL = [
-    _skill("A", SkillCategory.CUSTOM, "director/public/seedance"),
-    _skill("B", SkillCategory.PUBLIC, "director/public/poster"),
+    _skill("A", SkillCategory.CUSTOM, "cf-dream/public/seedance"),
+    _skill("B", SkillCategory.PUBLIC, "cf-dream/public/poster"),
     _skill("C", SkillCategory.CUSTOM, "video/clipx"),
     _skill("D", SkillCategory.PUBLIC, "image/posterx"),
     _skill("E", SkillCategory.CUSTOM, "solo"),
@@ -54,15 +54,15 @@ def _patch_pool(monkeypatch):
 
 
 def test_category_prefix_pins_to_one_category(_patch_pool):
-    assert _expand_skill_dirs(["custom/director/public"], app_config=None) == {"A"}
+    assert _expand_skill_dirs(["custom/cf-dream/public"], app_config=None) == {"A"}
 
 
 def test_bare_prefix_matches_across_categories(_patch_pool):
-    assert _expand_skill_dirs(["director/public"], app_config=None) == {"A", "B"}
+    assert _expand_skill_dirs(["cf-dream/public"], app_config=None) == {"A", "B"}
 
 
 def test_subtree_prefix_collects_nested(_patch_pool):
-    assert _expand_skill_dirs(["director"], app_config=None) == {"A", "B"}
+    assert _expand_skill_dirs(["cf-dream"], app_config=None) == {"A", "B"}
 
 
 def test_single_segment_prefix(_patch_pool):
@@ -117,7 +117,7 @@ def test_union_of_skills_and_skill_dirs(_patch_pool):
 
 
 def test_skill_dirs_only(_patch_pool):
-    result = _available_skill_names(_cfg(skill_dirs=["custom/director/public"]), is_bootstrap=False, app_config=None)
+    result = _available_skill_names(_cfg(skill_dirs=["custom/cf-dream/public"]), is_bootstrap=False, app_config=None)
     assert result == {"A"}
 
 

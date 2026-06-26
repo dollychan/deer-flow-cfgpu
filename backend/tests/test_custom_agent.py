@@ -743,29 +743,29 @@ def _patch_resolution(tmp_path: Path, shared_agents: list[str]):
 class TestSharedAgentResolution:
     def test_shared_agent_resolves_global_even_with_per_user_shadow(self, tmp_path):
         # Global (shared) definition + a per-user copy that would normally shadow it.
-        _write_agent(tmp_path, "director", {"description": "shared director"})
-        _write_user_agent(tmp_path, "u1", "director", {"description": "per-user shadow"})
+        _write_agent(tmp_path, "cf-dream", {"description": "shared cf-dream"})
+        _write_user_agent(tmp_path, "u1", "cf-dream", {"description": "per-user shadow"})
 
-        get_paths_patch, get_app_config_patch = _patch_resolution(tmp_path, ["director"])
+        get_paths_patch, get_app_config_patch = _patch_resolution(tmp_path, ["cf-dream"])
         with get_paths_patch, get_app_config_patch:
             from deerflow.config.agents_config import load_agent_config, resolve_agent_dir
 
-            resolved = resolve_agent_dir("director", user_id="u1")
-            cfg = load_agent_config("director", user_id="u1")
+            resolved = resolve_agent_dir("cf-dream", user_id="u1")
+            cfg = load_agent_config("cf-dream", user_id="u1")
 
-        assert resolved == tmp_path / "agents" / "director"
-        assert cfg.description == "shared director"
+        assert resolved == tmp_path / "agents" / "cf-dream"
+        assert cfg.description == "shared cf-dream"
 
     def test_shared_match_is_case_insensitive(self, tmp_path):
-        _write_agent(tmp_path, "director", {"description": "shared director"})
+        _write_agent(tmp_path, "cf-dream", {"description": "shared cf-dream"})
 
-        get_paths_patch, get_app_config_patch = _patch_resolution(tmp_path, ["Director"])
+        get_paths_patch, get_app_config_patch = _patch_resolution(tmp_path, ["CF-Dream"])
         with get_paths_patch, get_app_config_patch:
             from deerflow.config.agents_config import resolve_agent_dir
 
-            resolved = resolve_agent_dir("director", user_id="u1")
+            resolved = resolve_agent_dir("cf-dream", user_id="u1")
 
-        assert resolved == tmp_path / "agents" / "director"
+        assert resolved == tmp_path / "agents" / "cf-dream"
 
     def test_non_shared_agent_prefers_per_user_copy(self, tmp_path):
         _write_agent(tmp_path, "code-reviewer", {"description": "global"})
@@ -788,8 +788,8 @@ class TestSharedAgentUpdateGuard:
 
         from deerflow.tools.builtins.update_agent_tool import update_agent
 
-        runtime = SimpleNamespace(tool_call_id="call_1", context={"agent_name": "director", "user_id": "u1"})
-        with patch("deerflow.config.app_config.get_app_config", return_value=SimpleNamespace(shared_agents=["director"])):
+        runtime = SimpleNamespace(tool_call_id="call_1", context={"agent_name": "cf-dream", "user_id": "u1"})
+        with patch("deerflow.config.app_config.get_app_config", return_value=SimpleNamespace(shared_agents=["cf-dream"])):
             result = update_agent.func(runtime=runtime, soul="new soul")
 
         content = result.update["messages"][0].content.lower()

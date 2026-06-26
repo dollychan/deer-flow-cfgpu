@@ -232,12 +232,12 @@ class TestUpsertUserScope:
     @pytest.mark.anyio
     async def test_different_scope_keys_stored_separately(self, repo):
         await repo.upsert_user_scope("u1", "", [{"content": "general"}], None)
-        await repo.upsert_user_scope("u1", "agent:director", [{"content": "director pref"}], None)
+        await repo.upsert_user_scope("u1", "agent:cf-dream", [{"content": "cf-dream pref"}], None)
 
         rows = await repo.load_user_scopes("u1")
         assert len(rows) == 2
         scope_keys = {r.scope_key for r in rows}
-        assert scope_keys == {"", "agent:director"}
+        assert scope_keys == {"", "agent:cf-dream"}
 
     @pytest.mark.anyio
     async def test_different_users_isolated(self, repo):
@@ -289,7 +289,7 @@ class TestUpsertProjectScope:
     @pytest.mark.anyio
     async def test_different_scope_keys(self, repo):
         await repo.upsert_project_scope("proj-1", "", [{"content": "general"}], None)
-        await repo.upsert_project_scope("proj-1", "agent:director", [{"content": "director knowledge"}], None)
+        await repo.upsert_project_scope("proj-1", "agent:cf-dream", [{"content": "cf-dream knowledge"}], None)
         await repo.upsert_project_scope("proj-1", "user:alice", [{"content": "alice role"}], None)
 
         rows = await repo.load_project_scopes("proj-1")
@@ -313,57 +313,57 @@ class TestUpsertAgent:
     @pytest.mark.anyio
     async def test_insert_creates_row(self, repo):
         facts = [{"content": "use model X for portraits"}]
-        ok = await repo.upsert_agent("director", facts, "agent summary")
+        ok = await repo.upsert_agent("cf-dream", facts, "agent summary")
         assert ok is True
 
-        row = await repo.load_agent("director")
+        row = await repo.load_agent("cf-dream")
         assert row is not None
-        assert row.agent_name == "director"
+        assert row.agent_name == "cf-dream"
         assert json.loads(row.facts) == facts
         assert row.summary == "agent summary"
         assert row.version == 0
 
     @pytest.mark.anyio
     async def test_merge_on_update(self, repo):
-        await repo.upsert_agent("director", [{"content": "A"}], None)
-        await repo.upsert_agent("director", [{"content": "B"}], None)
+        await repo.upsert_agent("cf-dream", [{"content": "A"}], None)
+        await repo.upsert_agent("cf-dream", [{"content": "B"}], None)
 
-        row = await repo.load_agent("director")
+        row = await repo.load_agent("cf-dream")
         contents = {f["content"] for f in json.loads(row.facts)}
         assert contents == {"A", "B"}
 
     @pytest.mark.anyio
     async def test_version_increments(self, repo):
-        await repo.upsert_agent("director", [{"content": "A"}], None)
-        await repo.upsert_agent("director", [{"content": "B"}], None)
+        await repo.upsert_agent("cf-dream", [{"content": "A"}], None)
+        await repo.upsert_agent("cf-dream", [{"content": "B"}], None)
 
-        row = await repo.load_agent("director")
+        row = await repo.load_agent("cf-dream")
         assert row.version == 1
 
     @pytest.mark.anyio
     async def test_summary_replaced_when_provided(self, repo):
-        await repo.upsert_agent("director", [], "old")
-        await repo.upsert_agent("director", [], "new")
+        await repo.upsert_agent("cf-dream", [], "old")
+        await repo.upsert_agent("cf-dream", [], "new")
 
-        row = await repo.load_agent("director")
+        row = await repo.load_agent("cf-dream")
         assert row.summary == "new"
 
     @pytest.mark.anyio
     async def test_summary_kept_when_none(self, repo):
-        await repo.upsert_agent("director", [], "keep me")
-        await repo.upsert_agent("director", [], None)
+        await repo.upsert_agent("cf-dream", [], "keep me")
+        await repo.upsert_agent("cf-dream", [], None)
 
-        row = await repo.load_agent("director")
+        row = await repo.load_agent("cf-dream")
         assert row.summary == "keep me"
 
     @pytest.mark.anyio
     async def test_different_agents_isolated(self, repo):
-        await repo.upsert_agent("director", [{"content": "director fact"}], None)
+        await repo.upsert_agent("cf-dream", [{"content": "cf-dream fact"}], None)
         await repo.upsert_agent("coder", [{"content": "coder fact"}], None)
 
-        director = await repo.load_agent("director")
+        cf_dream = await repo.load_agent("cf-dream")
         coder = await repo.load_agent("coder")
-        assert json.loads(director.facts)[0]["content"] == "director fact"
+        assert json.loads(cf_dream.facts)[0]["content"] == "cf-dream fact"
         assert json.loads(coder.facts)[0]["content"] == "coder fact"
 
 
@@ -425,15 +425,15 @@ class TestUpsertAgentOptimisticLock:
         retry budget, so the merge invariant holds deterministically — unlike a
         large fan-out where a writer could lose every race and exhaust retries.
         """
-        await repo.upsert_agent("director", [{"content": "base"}], None)
+        await repo.upsert_agent("cf-dream", [{"content": "base"}], None)
 
         results = await asyncio.gather(
-            repo.upsert_agent("director", [{"content": "w0"}], None),
-            repo.upsert_agent("director", [{"content": "w1"}], None),
+            repo.upsert_agent("cf-dream", [{"content": "w0"}], None),
+            repo.upsert_agent("cf-dream", [{"content": "w1"}], None),
         )
         assert all(results)  # neither exhausted its retry budget
 
-        row = await repo.load_agent("director")
+        row = await repo.load_agent("cf-dream")
         contents = {f["content"] for f in json.loads(row.facts)}
         assert {"base", "w0", "w1"} <= contents
 
@@ -444,7 +444,7 @@ class TestUpsertAgentOptimisticLock:
         sf = _FakeSessionFactory([_FakeSession(row, rowcount=0), _FakeSession(row, rowcount=1)])
         repo = MemoryRepository(sf)
 
-        ok = await repo.upsert_agent("director", [{"content": "x"}], None)
+        ok = await repo.upsert_agent("cf-dream", [{"content": "x"}], None)
         assert ok is True
         assert sf.calls == 2  # one retry
 
@@ -455,7 +455,7 @@ class TestUpsertAgentOptimisticLock:
         sf = _FakeSessionFactory([_FakeSession(row, rowcount=0) for _ in range(_MAX_RETRIES)])
         repo = MemoryRepository(sf)
 
-        ok = await repo.upsert_agent("director", [{"content": "x"}], None)
+        ok = await repo.upsert_agent("cf-dream", [{"content": "x"}], None)
         assert ok is False
         assert sf.calls == _MAX_RETRIES
 
@@ -488,13 +488,13 @@ class TestUpsertFactLimits:
             "deerflow.persistence.memory.repository.get_mlm_config",
             lambda: MlmConfig(fact_confidence_threshold=0.0, max_facts_per_scope=2),
         )
-        await repo.upsert_agent("director", [{"content": "a", "confidence": 0.2}], None)
+        await repo.upsert_agent("cf-dream", [{"content": "a", "confidence": 0.2}], None)
         await repo.upsert_agent(
-            "director",
+            "cf-dream",
             [{"content": "b", "confidence": 0.9}, {"content": "c", "confidence": 0.5}],
             None,
         )
-        row = await repo.load_agent("director")
+        row = await repo.load_agent("cf-dream")
         contents = {f["content"] for f in json.loads(row.facts)}
         assert len(contents) == 2
         assert contents == {"b", "c"}  # lowest-confidence "a" evicted

@@ -8,7 +8,7 @@ Two independent client-controlled parameters from the MQ task message are surfac
    authoritative instruction, so the chosen skill's full ``SKILL.md`` is eager-injected into
    the conversation as a ``<system-reminder>`` HumanMessage in ``(a)before_agent`` (before the
    first LLM call), instead of relying on deerflow's progressive ``<available_skills>`` listing
-   (suppressed for the director agent via its ``config.yaml: skills: []``).
+   (suppressed for the cf-dream agent via its ``config.yaml: skills: []``).
 
 2. ``config.models`` → ``runtime.context["models"]`` — **方案 3 (router-whitelist), human-final**.
    The client UI restricts the *selection range* of cfdream generate models per task type. In

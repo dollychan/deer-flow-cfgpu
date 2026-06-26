@@ -3,7 +3,7 @@
 Single source of truth for *where* per-host sandbox locks live and *how* a run marks
 itself active, used by three parties that must agree byte-for-byte:
 
-  - ``DirectorAioProvider._creation_lock_path`` — the cross-process creation flock (R3/I17);
+  - ``CfDreamAioProvider._creation_lock_path`` — the cross-process creation flock (R3/I17);
   - ``AgentRunner`` run-flock — the "a run is executing on this sandbox" marker;
   - the per-host janitor (``scripts/sandbox_janitor``) — reclaims orphaned containers.
 

@@ -76,7 +76,7 @@ class AgentConfig(BaseModel):
     # optional leading ``public/`` or ``custom/`` segment pins the match to that category;
     # without it the entry matches across both categories.
     # - None (or omitted): contributes nothing (whitelist comes from ``skills`` alone).
-    # - ["custom/director/public", "video"]: include skills under those subtrees.
+    # - ["custom/cf-dream/public", "video"]: include skills under those subtrees.
     # When BOTH ``skills`` and ``skill_dirs`` are None, the agent sees all enabled skills.
     skill_dirs: list[str] | None = None
     # approval_required_tools: tool name patterns (fnmatch) that require human

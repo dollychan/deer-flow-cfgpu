@@ -1,4 +1,4 @@
-"""Director-specific AIO sandbox provider.
+"""CF-Dream consumer AIO sandbox provider.
 
 This subclass exists only to strip the deerflow base provider's autonomous container
 destroy power (P4 / I16) and to relocate the cross-process creation flock onto per-host
@@ -12,8 +12,14 @@ serves the one shared disk (D4, intended), not a foreign one (the old "leak"). T
 ``_identity_key`` already keys by ``thread_id``, so removing the override is sufficient;
 the serial claim lock is itself thread_id-single-key, keeping same-thread runs serial.
 
-Wired via ``config.yaml`` ``sandbox.use: app.consumer.director_sandbox:DirectorAioProvider``.
+Wired via ``config.yaml`` ``sandbox.use: app.consumer.cf_dream_sandbox:CfDreamAioProvider``.
 See ``cfgpu-docs/aio-localbackend-sandbox.md`` (D11 retired) and ``thread-tenancy.md``.
+
+The provider class was renamed ``DirectorAioProvider`` → ``CfDreamAioProvider`` to align
+with the agent name (``cf-dream``). The Docker image tag ``sandbox-cfdream`` /
+``all-in-one-sandbox-cfdream`` is intentionally left unchanged — it is deployment-stable
+and renaming it would require rebuilding/pushing images; only the Python class/module
+identifier moved.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
 logger = logging.getLogger(__name__)
 
 
-class DirectorAioProvider(AioSandboxProvider):
+class CfDreamAioProvider(AioSandboxProvider):
     """AIO provider that yields its autonomous destroy power to the per-host janitor.
 
     Identity is inherited from the base (``thread_id``-keyed); see module docstring and
@@ -38,7 +44,7 @@ class DirectorAioProvider(AioSandboxProvider):
     # ── P4: strip autonomous destroy power (I16) ────────────────────────────────
 
     def _destroy_on_shutdown(self, sandbox_ids: list[str], warm_items: list[tuple[str, tuple[SandboxInfo, float]]]) -> None:
-        """No-op: a director process never blind-destroys containers on shutdown.
+        """No-op: a cf-dream consumer process never blind-destroys containers on shutdown.
 
         ``_reconcile_orphans`` adopts *every* running container on this VM — including
         ones other instances are serving — into the warm pool, so destroying them here
@@ -46,7 +52,7 @@ class DirectorAioProvider(AioSandboxProvider):
         D7 cancel path's targeted ``docker kill`` as its destroy power; orphaned/parked
         containers are reclaimed out-of-band by the per-host run-flock janitor (D13).
         """
-        logger.info("DirectorAioProvider.shutdown: leaving %d active + %d warm container(s) for the janitor (I16)", len(sandbox_ids), len(warm_items))
+        logger.info("CfDreamAioProvider.shutdown: leaving %d active + %d warm container(s) for the janitor (I16)", len(sandbox_ids), len(warm_items))
 
     def _cleanup_idle_sandboxes(self, idle_timeout: float) -> None:
         """No-op: idle-based teardown is the janitor's job, never the process's (I16).
@@ -85,7 +91,7 @@ class DirectorAioProvider(AioSandboxProvider):
         container is gone — there is nothing to destroy anyway; any genuinely orphaned
         container is reclaimed out-of-band by the per-host run-flock janitor (D13).
         """
-        logger.info("DirectorAioProvider: left container teardown to the janitor for sandbox %s (I16)", sandbox_id)
+        logger.info("CfDreamAioProvider: left container teardown to the janitor for sandbox %s (I16)", sandbox_id)
 
     # ── P4 / R3: move the creation flock off virtiofs onto local disk (I17) ──────
 

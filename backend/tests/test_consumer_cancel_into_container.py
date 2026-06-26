@@ -30,7 +30,7 @@ import pytest
 
 from app.consumer import agent_runner as ar_mod
 from app.consumer.agent_runner import AgentRunner
-from app.consumer.director_sandbox import DirectorAioProvider
+from app.consumer.cf_dream_sandbox import CfDreamAioProvider
 from deerflow.runtime.cancel_signal import CancelState
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -41,9 +41,9 @@ def _bare_runner() -> AgentRunner:
     return AgentRunner(MagicMock(), MagicMock(), None)
 
 
-def _director_provider(prefix: str = PREFIX) -> DirectorAioProvider:
-    """A DirectorAioProvider with only the bits the kill path touches (real identity algos)."""
-    provider = DirectorAioProvider.__new__(DirectorAioProvider)
+def _cf_dream_provider(prefix: str = PREFIX) -> CfDreamAioProvider:
+    """A CfDreamAioProvider with only the bits the kill path touches (real identity algos)."""
+    provider = CfDreamAioProvider.__new__(CfDreamAioProvider)
     provider._config = {"container_prefix": prefix}
     return provider
 
@@ -70,7 +70,7 @@ async def test_c_noop_when_not_aio_local_provider():
 async def test_a_kills_container_with_thread_only_name():
     """(a) The hard-cancel path docker-kills the right container name (prefix + thread-only sid)."""
     runner = _bare_runner()
-    provider = _director_provider()
+    provider = _cf_dream_provider()
     provider.destroy = MagicMock()
     kill = MagicMock()
 
@@ -84,7 +84,7 @@ async def test_a_kills_container_with_thread_only_name():
 async def test_b_kill_precedes_destroy():
     """(b) kill MUST run before destroy (else destroy wedges on AioSandbox._lock)."""
     runner = _bare_runner()
-    provider = _director_provider()
+    provider = _cf_dream_provider()
     order: list[str] = []
     provider.destroy = MagicMock(side_effect=lambda sid: order.append("destroy"))
     kill = MagicMock(side_effect=lambda name: order.append("kill"))
@@ -99,7 +99,7 @@ async def test_b_kill_precedes_destroy():
 async def test_destroy_receives_the_hashed_sandbox_id():
     """destroy() takes the 8-char sandbox_id (not the identity key string)."""
     runner = _bare_runner()
-    provider = _director_provider()
+    provider = _cf_dream_provider()
     provider.destroy = MagicMock()
 
     with patch.object(ar_mod, "_maybe_aio_local_provider", lambda: provider), patch.object(ar_mod, "_docker_kill", MagicMock()):
@@ -113,7 +113,7 @@ async def test_destroy_receives_the_hashed_sandbox_id():
 async def test_e_two_users_same_thread_kill_the_one_shared_container():
     """(e) D11 retired: users colliding on a thread_id share the *one* container (thread-only key)."""
     runner = _bare_runner()
-    provider = _director_provider()
+    provider = _cf_dream_provider()
     provider.destroy = MagicMock()
     names: list[str] = []
     kill = MagicMock(side_effect=names.append)
@@ -142,7 +142,7 @@ async def test_kill_is_independent_of_user_contextvar():
     lands on the single thread-keyed container.
     """
     runner = _bare_runner()
-    provider = _director_provider()
+    provider = _cf_dream_provider()
     provider.destroy = MagicMock()
     names: list[str] = []
     kill = MagicMock(side_effect=names.append)

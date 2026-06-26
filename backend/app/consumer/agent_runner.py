@@ -811,7 +811,7 @@ class AgentRunner:
 def _maybe_aio_local_provider() -> AioSandboxProvider | None:
     """Return the active sandbox provider iff ``docker kill`` applies to it.
 
-    That is: an AIO provider (base or director subclass) running on a *local* docker
+    That is: an AIO provider (base or cf-dream subclass) running on a *local* docker
     backend — the only configuration where the consumer owns the container and can kill it
     by name (D7). For the local-host LocalSandboxProvider or a remote/provisioner backend,
     there is no local container to kill, so this returns None and the cancel path stays a

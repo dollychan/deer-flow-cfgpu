@@ -337,7 +337,7 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
 
     assert any(isinstance(m, lead_agent_module.ViewImageMiddleware) for m in middlewares)
     # verify the custom middleware is injected before ClarificationMiddleware.
-    # The director-agent chain inserts HumanApproval / UninterruptibleTool /
+    # The cf-dream agent chain inserts HumanApproval / UninterruptibleTool /
     # RuntimeConfig / MessageStream (and Safety) after the custom middleware, so it
     # no longer sits at a fixed negative index — assert presence + position instead.
     custom_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, MagicMock)), -1)

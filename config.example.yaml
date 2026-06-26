@@ -1117,7 +1117,7 @@ memory:
 # ============================================================================
 # DB-backed user / agent / project memory with scope_key (see
 # cfgpu-docs/multi-level-memory设计.md). Independent of the `memory` block above:
-# an agent runs one or the other. For agents that use MLM (e.g. the director),
+# an agent runs one or the other. For agents that use MLM (e.g. the cf-dream agent),
 # prefer: memory.enabled=false + mlm.enabled=true so only MlmMiddleware is loaded.
 # Requires database.backend = sqlite|postgres (memory backend = no persistence).
 mlm:
@@ -1143,7 +1143,7 @@ agents_api:
 # {base_dir}/agents/{name}/ (config.yaml + SOUL.md). These bypass the per-user
 # agent layout: resolve_agent_dir always returns the shared directory, so no
 # per-user copy can shadow them. Leave empty for default per-user custom agents.
-# Example: shared_agents: [director]
+# Example: shared_agents: [cf-dream]
 shared_agents: []
 
 # ============================================================================

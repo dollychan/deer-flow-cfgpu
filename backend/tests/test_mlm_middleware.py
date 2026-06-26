@@ -72,7 +72,7 @@ class TestAlreadyInjected:
 
 class TestBeforeAgentSync:
     def test_always_returns_none(self):
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         result = mw.before_agent(_state(_human("hi")), _runtime())
         assert result is None
 
@@ -85,14 +85,14 @@ class TestBeforeAgentSync:
 class TestAbforeAgent:
     @pytest.mark.anyio
     async def test_returns_none_when_memory_disabled(self):
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         with patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _disabled_config):
             result = await mw.abefore_agent(_state(_human("hi")), _runtime())
         assert result is None
 
     @pytest.mark.anyio
     async def test_returns_none_when_already_injected(self):
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         messages = [_human("existing reminder", injected=True), _human("user msg")]
         with patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config):
             result = await mw.abefore_agent(_state(*messages), _runtime())
@@ -100,7 +100,7 @@ class TestAbforeAgent:
 
     @pytest.mark.anyio
     async def test_returns_none_when_no_human_messages(self):
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         with (
             patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
             patch("deerflow.agents.middlewares.mlm_middleware.build_injection", new=AsyncMock(return_value="some content")),
@@ -110,7 +110,7 @@ class TestAbforeAgent:
 
     @pytest.mark.anyio
     async def test_returns_none_when_injection_is_empty(self):
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         with (
             patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
             patch("deerflow.agents.middlewares.mlm_middleware.build_injection", new=AsyncMock(return_value="")),
@@ -120,7 +120,7 @@ class TestAbforeAgent:
 
     @pytest.mark.anyio
     async def test_injects_reminder_before_first_human_message(self):
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         user_msg = _human("hello")
         with (
             patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
@@ -142,7 +142,7 @@ class TestAbforeAgent:
 
     @pytest.mark.anyio
     async def test_reminder_takes_original_message_id(self):
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         user_msg = HumanMessage(content="hi", id="msg-abc-123")
         with (
             patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
@@ -157,7 +157,7 @@ class TestAbforeAgent:
 
     @pytest.mark.anyio
     async def test_build_injection_called_with_correct_args(self):
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         mock_build = AsyncMock(return_value="content")
         runtime = _runtime(user_id="alice", project_id="proj-1")
         with (
@@ -167,12 +167,12 @@ class TestAbforeAgent:
         ):
             await mw.abefore_agent(_state(_human("hi")), runtime)
 
-        mock_build.assert_called_once_with(user_id="alice", agent_name="director", project_id="proj-1")
+        mock_build.assert_called_once_with(user_id="alice", agent_name="cf-dream", project_id="proj-1")
 
     @pytest.mark.anyio
     async def test_skips_injected_messages_when_finding_first_human(self):
         """MLM-injected messages must not be treated as the injection target."""
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         # The first message is already an injected reminder (from DynamicContextMiddleware),
         # so MlmMiddleware should target the second real user message.
         first_human = _human("real message")
@@ -196,14 +196,14 @@ class TestAbforeAgent:
 class TestAafterAgent:
     @pytest.mark.anyio
     async def test_returns_none_when_memory_disabled(self):
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         with patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _disabled_config):
             result = await mw.aafter_agent(_state(_human("hi"), _ai("ok")), _runtime())
         assert result is None
 
     @pytest.mark.anyio
     async def test_returns_none_when_no_thread_id(self):
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         runtime = MagicMock()
         runtime.context = {}  # no thread_id
         with (
@@ -216,7 +216,7 @@ class TestAafterAgent:
     @pytest.mark.anyio
     async def test_no_op_when_no_repository(self):
         """backend=memory → get_memory_repository() is None → enqueue skipped."""
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         with (
             patch("deerflow.agents.middlewares.mlm_middleware.get_mlm_config", _enabled_config),
             patch("deerflow.agents.middlewares.mlm_middleware.get_memory_repository", return_value=None),
@@ -226,7 +226,7 @@ class TestAafterAgent:
 
     @pytest.mark.anyio
     async def test_enqueues_when_valid_conversation(self):
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         mock_repo = MagicMock()
         mock_repo.enqueue_extraction = AsyncMock()
         with (
@@ -240,7 +240,7 @@ class TestAafterAgent:
         mock_repo.enqueue_extraction.assert_awaited_once()
         call = mock_repo.enqueue_extraction.await_args
         assert call.args[0] == "t1"  # thread_id positional
-        assert call.kwargs["agent_name"] == "director"
+        assert call.kwargs["agent_name"] == "cf-dream"
         assert call.kwargs["user_id"] == "u1"
         assert call.kwargs["project_id"] == "p1"
         assert call.kwargs["debounce_seconds"] == 30
@@ -249,7 +249,7 @@ class TestAafterAgent:
 
     @pytest.mark.anyio
     async def test_skips_when_no_user_or_ai_messages_after_filtering(self):
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         mock_repo = MagicMock()
         mock_repo.enqueue_extraction = AsyncMock()
         with (
@@ -265,7 +265,7 @@ class TestAafterAgent:
     @pytest.mark.anyio
     async def test_user_id_none_passed_as_none(self):
         """Empty resolved user_id collapses to None (not '')."""
-        mw = MlmMiddleware(agent_name="director")
+        mw = MlmMiddleware(agent_name="cf-dream")
         mock_repo = MagicMock()
         mock_repo.enqueue_extraction = AsyncMock()
         with (

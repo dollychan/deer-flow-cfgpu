@@ -25,7 +25,7 @@ def _mid_of(url: str) -> str:
     return material_id(*classify_ref(url))
 
 
-# Capture 配置（D13+/D14，cfdream_ 前缀硬编码已退役）——模拟 director config.yaml 的两组 fnmatch：
+# Capture 配置（D13+/D14，cfdream_ 前缀硬编码已退役）——模拟 cf-dream agent config.yaml 的两组 fnmatch：
 # policy / url 抽取字段路径。测试夹具 `_cfdream_result` 把 url 放顶层 `urls`，故 url 路径统一配
 # "urls"；`results[*].image_url` 这类结构化路径另有专测覆盖。**display 与 artifact items 不在 capture
 # 层**（D14：归 MessageStreamMiddleware），故此处无 visibility 配置。

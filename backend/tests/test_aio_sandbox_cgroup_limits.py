@@ -3,7 +3,7 @@
 The AIO LocalContainerBackend gains optional ``container_cpus`` / ``container_memory``
 knobs that map to ``docker run --cpus / --memory``. They are config-gated: when unset
 (the default) the produced ``docker run`` command is byte-for-byte identical to the
-original — so this is an upstreamable additive seam, not a behavior change. The director
+original — so this is an upstreamable additive seam, not a behavior change. The cf-dream
 deployment sets them (2-core small disk) so one runaway ffmpeg transcode can't starve the
 consumer's poll_loop (D9 quality isolation, NOT count-based throttling).
 """

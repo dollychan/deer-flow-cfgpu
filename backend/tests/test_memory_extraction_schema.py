@@ -65,7 +65,7 @@ class TestRowRoundTrip:
                 MemoryExtractionRow(
                     thread_id="t-1",
                     user_id="alice",
-                    agent_name="director",
+                    agent_name="cf-dream",
                     project_id="proj-1",
                     not_before=now,
                     updated_at=now,
@@ -78,7 +78,7 @@ class TestRowRoundTrip:
         assert row is not None
         assert row.thread_id == "t-1"
         assert row.user_id == "alice"
-        assert row.agent_name == "director"
+        assert row.agent_name == "cf-dream"
         assert row.project_id == "proj-1"
         # unclaimed defaults
         assert row.claimed_by is None

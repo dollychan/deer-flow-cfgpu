@@ -8,7 +8,7 @@ disk to a single shared ``threads/{tid}/`` bucket, so a sandbox reused across us
 serves the one shared disk — by design (D4), not the old "cross-user reuse leak".
 
 Consequently the sandbox identity is keyed by ``thread_id`` alone for BOTH the deerflow base
-and the app ``DirectorAioProvider`` (the per-user ``_identity_key`` override, D11/P2.5, was
+and the app ``CfDreamAioProvider`` (the per-user ``_identity_key`` override, D11/P2.5, was
 deleted). All three reuse paths — in-process cache, warm-pool reclaim, thread lock — share
 across users on the same thread_id. Concurrency stays safe because the serial claim lock is
 itself thread_id-single-key (``thread_run_state`` PK = thread_id), so two users on one
@@ -45,8 +45,8 @@ def _base_cls():
     return importlib.import_module(AIO_MOD).AioSandboxProvider
 
 
-def _director_cls():
-    return importlib.import_module("app.consumer.director_sandbox").DirectorAioProvider
+def _cf_dream_cls():
+    return importlib.import_module("app.consumer.cf_dream_sandbox").CfDreamAioProvider
 
 
 def _sandbox_id_under_user(provider, user_id: str, thread_id: str) -> str:
@@ -78,21 +78,21 @@ def test_base_sandbox_id_unchanged_byte_for_byte():
     assert got == base._deterministic_sandbox_id("t-1")
 
 
-# ── director subclass: thread-only identity, shared across users (D3/D4) ────────
+# ── cf-dream provider subclass: thread-only identity, shared across users (D3/D4) ──
 
 
-def test_director_does_not_override_identity_key():
-    """The D11 per-user override is retired: director inherits the base thread-only key."""
-    director = _director_cls()
+def test_cf_dream_does_not_override_identity_key():
+    """The D11 per-user override is retired: cf-dream provider inherits the base thread-only key."""
+    provider = _cf_dream_cls()
     base = _base_cls()
     # The subclass must not redefine _identity_key — it uses the base method object.
-    assert "_identity_key" not in director.__dict__
-    assert director._identity_key is base._identity_key
+    assert "_identity_key" not in provider.__dict__
+    assert provider._identity_key is base._identity_key
 
 
-def test_director_identity_key_is_thread_only_ignores_user():
+def test_cf_dream_identity_key_is_thread_only_ignores_user():
     """The identity key is thread_id alone, regardless of the effective user."""
-    provider = _bare_provider(_director_cls())
+    provider = _bare_provider(_cf_dream_cls())
     token = set_current_user(SimpleNamespace(id="userA"))
     try:
         key = provider._identity_key("t-1")
@@ -103,16 +103,16 @@ def test_director_identity_key_is_thread_only_ignores_user():
 
 def test_same_thread_two_users_get_same_sandbox_id():
     """Two users colliding on a thread_id derive the SAME sandbox_id/name (shared, D4)."""
-    provider = _bare_provider(_director_cls())
+    provider = _bare_provider(_cf_dream_cls())
     a = _sandbox_id_under_user(provider, "userA", "shared-tid")
     b = _sandbox_id_under_user(provider, "userB", "shared-tid")
     assert a == b
-    assert a == _director_cls()._deterministic_sandbox_id("shared-tid")
+    assert a == _cf_dream_cls()._deterministic_sandbox_id("shared-tid")
 
 
 def test_in_process_cache_is_shared_across_users():
     """userB reuses userA's active in-process sandbox under the same thread_id (shared disk)."""
-    provider = _bare_provider(_director_cls())
+    provider = _bare_provider(_cf_dream_cls())
 
     token_a = set_current_user(SimpleNamespace(id="userA"))
     try:
@@ -135,7 +135,7 @@ def test_in_process_cache_is_shared_across_users():
 
 def test_warm_pool_reclaim_is_shared_across_users():
     """warm-pool reclaim promotes the same sandbox for any user on the thread_id (D4)."""
-    provider = _bare_provider(_director_cls())
+    provider = _bare_provider(_cf_dream_cls())
 
     sid_a = _sandbox_id_under_user(provider, "userA", "shared-tid")
     provider._warm_pool[sid_a] = (SimpleNamespace(sandbox_url="http://a", sandbox_id=sid_a), 0.0)
@@ -147,7 +147,7 @@ def test_warm_pool_reclaim_is_shared_across_users():
 
 def test_thread_locks_are_shared_across_users():
     """Two users on the same thread_id share one in-process lock (serial, one shared disk)."""
-    provider = _bare_provider(_director_cls())
+    provider = _bare_provider(_cf_dream_cls())
 
     token_a = set_current_user(SimpleNamespace(id="userA"))
     try:
@@ -166,7 +166,7 @@ def test_thread_locks_are_shared_across_users():
 
 def test_same_thread_is_stable():
     """Determinism: the same thread_id always derives the same sandbox_id."""
-    provider = _bare_provider(_director_cls())
+    provider = _bare_provider(_cf_dream_cls())
     first = _sandbox_id_under_user(provider, "userA", "t-1")
     second = _sandbox_id_under_user(provider, "userB", "t-1")
     assert first == second

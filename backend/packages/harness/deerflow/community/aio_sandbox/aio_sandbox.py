@@ -353,7 +353,7 @@ class AioSandbox(Sandbox):
     def snapshot_html(self, html: str, *, full_page: bool = True) -> bytes | None:
         """Render an HTML document to a PNG using the sandbox's built-in chromium.
 
-        The ``sandbox-director`` image already ships ``chromium-browser``; rather
+        The ``sandbox-cfdream`` image already ships ``chromium-browser``; rather
         than depend on a browser HTTP API (which the gem runtime does not expose),
         we drive chromium's headless ``--screenshot`` CLI over the *same* shell/file
         API the agent uses, then fetch the PNG with ``download_file`` (binary-safe,

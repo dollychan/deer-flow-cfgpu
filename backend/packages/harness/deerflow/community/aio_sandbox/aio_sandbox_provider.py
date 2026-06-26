@@ -506,7 +506,7 @@ class AioSandboxProvider(SandboxProvider):
                 return None
 
         # Health-gate the cached reference OUTSIDE the global lock: the docker probe
-        # must never stall every other provider operation. The director subclass routes
+        # must never stall every other provider operation. The cf-dream subclass routes
         # the drop through an I16-safe override that only forgets the in-process
         # reference (it never autonomously ``docker rm``s a container another same-host
         # instance may be serving).
@@ -545,7 +545,7 @@ class AioSandboxProvider(SandboxProvider):
         # Health-gate promotion OUTSIDE the global lock: the docker probe must never
         # stall every other provider operation. The per-thread acquire lock already
         # serializes same-identity reclaim, so the peeked entry cannot be re-raced
-        # while we check it. The director subclass routes the drop through an I16-safe
+        # while we check it. The cf-dream subclass routes the drop through an I16-safe
         # override that only discards the dead warm reference (it never autonomously
         # ``docker rm``s a parked container another same-host instance may reclaim).
         alive = self._check_tracked_sandbox_alive(sandbox_id, info)
