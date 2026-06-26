@@ -9,6 +9,7 @@ cancel_watcher, and input reconstruction — not LangGraph internals.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -426,6 +427,8 @@ class TestCancelWatcher:
         with pytest.raises(asyncio.CancelledError):
             await target
         watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher  # release the watcher's DB session before sf disposes the engine
 
     @pytest.mark.anyio
     async def test_no_cancel_when_seq_above_watermark(self, reg, sf):
@@ -440,6 +443,8 @@ class TestCancelWatcher:
         watcher = asyncio.create_task(runner._cancel_watcher("t1", current_task_seq=5, runner_task=target, poll_interval=0))
         await target  # completes normally — not cancelled (seq 5 > watermark 2)
         watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher  # release the watcher's DB session before sf disposes the engine
 
     @pytest.mark.anyio
     async def test_sets_cancel_event_then_hard_cancel_when_unprotected(self, reg, sf):
@@ -464,6 +469,8 @@ class TestCancelWatcher:
             await target
         assert cancel_state.event.is_set()  # cooperative flag raised alongside the hard cancel
         watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher  # release the watcher's DB session before sf disposes the engine
 
     @pytest.mark.anyio
     async def test_defers_hard_cancel_while_protected_in_flight(self, reg, sf):
@@ -498,6 +505,8 @@ class TestCancelWatcher:
         with pytest.raises(asyncio.CancelledError):
             await target
         watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watcher  # release the watcher's DB session before sf disposes the engine
 
 
 # ── cooperative cancel at super-step boundary (BUG-009 / cancel.md §4.3) ──────

@@ -788,7 +788,10 @@ class TestChannelManager:
 
         _run(go())
 
-    def test_ingest_inbound_files_uses_explicit_owner_bucket(self, tmp_path, monkeypatch):
+    def test_ingest_inbound_files_uses_thread_bucket(self, tmp_path, monkeypatch):
+        # Thread-only tenancy (cfgpu-docs/thread-tenancy.md): inbound files land in the
+        # thread bucket keyed by thread_id alone. The owner ``user_id`` is still threaded
+        # through for identity/signature compatibility but never enters the disk layout.
         from app.channels.manager import INBOUND_FILE_READERS, _ingest_inbound_files
         from deerflow.config.paths import Paths
 
@@ -825,8 +828,8 @@ class TestChannelManager:
                     "is_image": False,
                 }
             ]
-            assert (paths.sandbox_uploads_dir("thread-owner", user_id="owner-1") / "report.txt").read_bytes() == b"owner data"
-            assert not paths.sandbox_uploads_dir("thread-owner").exists()
+            assert (paths.sandbox_uploads_dir("thread-owner") / "report.txt").read_bytes() == b"owner data"
+            assert not paths.sandbox_uploads_dir("thread-owner", user_id="owner-1").exists()
 
         _run(go())
 
@@ -3572,13 +3575,15 @@ class TestFormatArtifactText:
 
 
 class TestHandleChatWithArtifacts:
-    def test_bound_owner_artifacts_resolve_from_owner_outputs_bucket(self, tmp_path, monkeypatch):
+    def test_bound_owner_artifacts_resolve_from_thread_outputs_bucket(self, tmp_path, monkeypatch):
+        # Thread-only tenancy (cfgpu-docs/thread-tenancy.md): output artifacts resolve from
+        # the thread bucket keyed by thread_id alone, regardless of the bound owner.
         from app.channels.manager import ChannelManager
         from deerflow.config.paths import Paths
 
         paths = Paths(tmp_path)
         monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
-        outputs_dir = paths.sandbox_outputs_dir("test-thread-123", user_id="owner-1")
+        outputs_dir = paths.sandbox_outputs_dir("test-thread-123")
         outputs_dir.mkdir(parents=True)
         (outputs_dir / "report.md").write_text("owner report", encoding="utf-8")
 

@@ -155,7 +155,7 @@ def test_feishu_receive_file_replaces_placeholders_in_order():
     _run(go())
 
 
-def test_feishu_receive_file_syncs_sandbox_with_explicit_user_id(tmp_path, monkeypatch):
+def test_feishu_receive_file_syncs_sandbox_into_thread_bucket(tmp_path, monkeypatch):
     async def go():
         from deerflow.config.paths import Paths
 
@@ -183,13 +183,14 @@ def test_feishu_receive_file_syncs_sandbox_with_explicit_user_id(tmp_path, monke
 
         monkeypatch.setattr("app.channels.feishu.get_paths", lambda: Paths(base_dir=tmp_path))
         monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
-        monkeypatch.setattr("app.channels.feishu.get_effective_user_id", lambda: "default")
 
+        # user_id is accepted for signature compatibility but must NOT affect the
+        # disk bucket — thread-only tenancy keys storage by thread_id alone.
         virtual_path = await channel._receive_single_file("message-1", "file-key", "file", "thread-1", user_id="ou-user")
 
         assert virtual_path == "/mnt/user-data/uploads/report.md"
-        assert (tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads" / "report.md").read_bytes() == b"file-bytes"
-        provider.acquire.assert_called_once_with("thread-1", user_id="ou-user")
+        assert (tmp_path / "threads" / "thread-1" / "user-data" / "uploads" / "report.md").read_bytes() == b"file-bytes"
+        provider.acquire.assert_called_once_with("thread-1")
         sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/report.md", b"file-bytes")
 
     _run(go())
