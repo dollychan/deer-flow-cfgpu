@@ -39,6 +39,7 @@ export interface Translations {
     exportAsMarkdown: string;
     exportAsJSON: string;
     exportSuccess: string;
+    regenerate: string;
   };
 
   home: {
@@ -93,6 +94,7 @@ export interface Translations {
     followupConfirmDescription: string;
     followupConfirmAppend: string;
     followupConfirmReplace: string;
+    suggestionPlaceholderRequired: string;
     suggestions: {
       suggestion: string;
       prompt: string;
@@ -439,6 +441,9 @@ export interface Translations {
       role: string;
       changePasswordTitle: string;
       changePasswordDescription: string;
+      ssoProvider: string;
+      ssoPasswordDescription: string;
+      ssoPasswordMessage: string;
       currentPassword: string;
       newPassword: string;
       confirmNewPassword: string;
@@ -453,6 +458,33 @@ export interface Translations {
     acknowledge: {
       emptyTitle: string;
       emptyDescription: string;
+    };
+  };
+
+  // Login / Auth
+  login: {
+    signInTitle: string;
+    createAccountTitle: string;
+    email: string;
+    emailPlaceholder: string;
+    password: string;
+    passwordPlaceholder: string;
+    pleaseWait: string;
+    signIn: string;
+    createAccount: string;
+    orContinueWith: string;
+    ssoHint: string;
+    continueWith: (provider: string) => string;
+    noAccountSignUp: string;
+    haveAccountSignIn: string;
+    backToHome: string;
+    networkError: string;
+    authFailed: string;
+    errors: {
+      sso_failed: string;
+      sso_cancelled: string;
+      sso_account_exists: string;
+      sso_not_allowed: string;
     };
   };
 }

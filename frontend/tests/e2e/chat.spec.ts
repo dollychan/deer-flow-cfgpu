@@ -44,6 +44,44 @@ test.describe("Chat workspace", () => {
     await expect(textarea).toHaveValue("/data-analysis ");
   });
 
+  test("uses arrow keys to navigate skill suggestions before prompt history", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("/");
+
+    const dataAnalysis = page.getByRole("option", {
+      name: /data-analysis/i,
+    });
+    const frontendDesign = page.getByRole("option", {
+      name: /frontend-design/i,
+    });
+    await expect(dataAnalysis).toBeVisible();
+    await expect(frontendDesign).toBeVisible();
+    await expect(dataAnalysis).toHaveAttribute("aria-selected", "true");
+
+    await textarea.press("ArrowDown");
+
+    await expect(textarea).toHaveValue("/");
+    await expect(dataAnalysis).toHaveAttribute("aria-selected", "false");
+    await expect(frontendDesign).toHaveAttribute("aria-selected", "true");
+
+    await textarea.press("ArrowUp");
+
+    await expect(textarea).toHaveValue("/");
+    await expect(dataAnalysis).toHaveAttribute("aria-selected", "true");
+    await expect(frontendDesign).toHaveAttribute("aria-selected", "false");
+
+    await textarea.press("ArrowDown");
+    await textarea.press("Enter");
+
+    await expect(textarea).toHaveValue("/frontend-design ");
+  });
+
   test("keeps Shift+Enter as newline while skill suggestions are visible", async ({
     page,
   }) => {
@@ -103,6 +141,77 @@ test.describe("Chat workspace", () => {
     await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
       timeout: 10_000,
     });
+  });
+
+  test("blocks suggestion template placeholders until replaced", async ({
+    page,
+  }) => {
+    let streamCalled = false;
+    let submittedText: string | undefined;
+    await page.route("**/runs/stream", (route) => {
+      streamCalled = true;
+      const body = route.request().postDataJSON() as {
+        input?: { messages?: Array<{ content?: unknown }> };
+      };
+      const content = body.input?.messages?.at(-1)?.content;
+      if (typeof content === "string") {
+        submittedText = content;
+      } else if (Array.isArray(content)) {
+        submittedText = content
+          .map((block) =>
+            typeof block === "object" &&
+            block !== null &&
+            "text" in block &&
+            typeof block.text === "string"
+              ? block.text
+              : "",
+          )
+          .join("");
+      }
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await page.getByRole("button", { name: /research/i }).click();
+    await expect(textarea).toHaveValue(
+      "Conduct a deep dive research on [topic], and summarize the findings.",
+    );
+
+    await textarea.press("Enter");
+    await page.waitForTimeout(500);
+
+    expect(streamCalled).toBe(false);
+    await expect(textarea).toHaveValue(
+      "Conduct a deep dive research on [topic], and summarize the findings.",
+    );
+    await expect
+      .poll(
+        () =>
+          textarea.evaluate((element) => {
+            const input = element as HTMLTextAreaElement;
+            return input.value.slice(input.selectionStart, input.selectionEnd);
+          }),
+        { timeout: 5_000 },
+      )
+      .toBe("[topic]");
+
+    await textarea.pressSequentially("AI agents");
+    await expect(textarea).toHaveValue(
+      "Conduct a deep dive research on AI agents, and summarize the findings.",
+    );
+
+    await textarea.press("Enter");
+
+    await expect.poll(() => streamCalled, { timeout: 10_000 }).toBeTruthy();
+    await expect
+      .poll(() => submittedText, { timeout: 10_000 })
+      .toBe(
+        "Conduct a deep dive research on AI agents, and summarize the findings.",
+      );
   });
 
   test("slash skill command is submitted as normal chat text", async ({
@@ -309,5 +418,48 @@ test.describe("Chat workspace", () => {
       timeout: 10_000,
     });
     await expect(promptForm.getByText("report.docx")).toBeHidden();
+  });
+
+  test("does not fetch follow-up suggestions when disabled in config", async ({
+    page,
+  }) => {
+    await page.route("**/api/suggestions/config", (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ enabled: false }),
+      });
+    });
+
+    let suggestionsFetched = false;
+    await page.route("**/api/threads/*/suggestions", (route) => {
+      suggestionsFetched = true;
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ suggestions: [] }),
+      });
+    });
+
+    let streamCalled = false;
+    await page.route("**/runs/stream", (route) => {
+      streamCalled = true;
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("Hello");
+    await textarea.press("Enter");
+
+    await expect.poll(() => streamCalled, { timeout: 10_000 }).toBeTruthy();
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.waitForTimeout(1000);
+    expect(suggestionsFetched).toBe(false);
   });
 });

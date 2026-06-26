@@ -36,21 +36,22 @@ def validate_thread_id(thread_id: str) -> None:
         raise ValueError(f"Invalid thread_id: {thread_id!r}")
 
 
-def get_uploads_dir(thread_id: str) -> Path:
+def get_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
     """Return the uploads directory path for a thread (no side effects).
 
     Thread-only tenancy (thread-tenancy.md §4.1): keyed by thread_id alone, matching the
     sandbox mount source and ThreadDataMiddleware so HTTP uploads land in the same bucket
-    the agent reads. No graph state here (HTTP/embedded path), so it resolves directly
-    with user_id=None per I3+.
+    the agent reads. The ``user_id`` parameter is accepted for call-site signature
+    compatibility (upstream/channel callers still pass it) but is intentionally NOT used
+    for disk layout — the bucket resolves with thread_id alone per I3+.
     """
     validate_thread_id(thread_id)
     return get_paths().sandbox_uploads_dir(thread_id)
 
 
-def ensure_uploads_dir(thread_id: str) -> Path:
+def ensure_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
     """Return the uploads directory for a thread, creating it if needed."""
-    base = get_uploads_dir(thread_id)
+    base = get_uploads_dir(thread_id, user_id=user_id)
     base.mkdir(parents=True, exist_ok=True)
     return base
 

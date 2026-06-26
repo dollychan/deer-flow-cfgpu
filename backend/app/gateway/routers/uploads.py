@@ -226,6 +226,7 @@ async def upload_files(
         raise HTTPException(status_code=413, detail=f"Too many files: maximum is {limits.max_files}")
 
     try:
+        # Thread-only tenancy (thread-tenancy.md §4.1): uploads land in the thread bucket.
         uploads_dir = ensure_uploads_dir(thread_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
