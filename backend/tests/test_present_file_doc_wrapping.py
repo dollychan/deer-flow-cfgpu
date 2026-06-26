@@ -37,6 +37,22 @@ def test_build_doc_html_markdown_label():
     assert "复制 Markdown" in html
 
 
+# ── build_iframe_html (§6.3) ─────────────────────────────────────────────────
+
+
+def test_build_iframe_html_embeds_url_and_download():
+    url = "https://oss.example/local/report.pdf?sig=abc&exp=1"
+    html = mod.build_iframe_html(url, "report.pdf")
+    # The iframe src and the download link both point at the original file URL,
+    # HTML-attribute-escaped (& → &amp;).
+    assert 'src="https://oss.example/local/report.pdf?sig=abc&amp;exp=1"' in html
+    assert "download" in html
+    assert "report.pdf" in html
+    # Self-contained shell: no source-viewer copy button, no external CSS/JS.
+    assert "doc-copy" not in html
+    assert "<iframe" in html
+
+
 # ── classification branch ───────────────────────────────────────────────────
 
 
@@ -163,6 +179,56 @@ def test_oversize_text_falls_back_to_bare_link(wired, monkeypatch):
     item = _items(result)[0]
     assert "poster" not in item
     assert wired.uploader.local_calls
+
+
+def test_pdf_produces_iframe_item_with_download(wired):
+    f = wired.outputs_dir / "deck.pdf"
+    f.write_bytes(b"%PDF-1.4\n%binary\xff\xfe")
+
+    result = _present(runtime=_make_runtime(str(wired.outputs_dir)), filepaths=[str(f)], tool_call_id="tc")
+
+    item = _items(result)[0]
+    assert item["mime"] == "text/html"
+    assert item["source_name"] == "deck.pdf"
+    # Original PDF uploaded as-is for download (never converted, I8) and reused as iframe src.
+    assert wired.uploader.local_calls and wired.uploader.local_calls[0].endswith("deck.pdf")
+    assert item["download"].endswith("deck.pdf")
+    # Shell HTML + poster PNG uploaded inline; ref is the snapshot PNG, html the shell.
+    assert item["ref"].endswith(".png") and "images" in item["ref"]
+    assert item["html"].endswith(".html") or "documents" in item["html"]
+    assert len(wired.uploader.inline_calls) == 2
+    # The snapshot rendered an iframe shell embedding the original file URL.
+    snapped = wired.sandbox.calls[0]
+    assert "<iframe" in snapped and item["download"] in snapped
+
+
+def test_pdf_iframe_no_poster_when_sandbox_absent(wired, monkeypatch):
+    monkeypatch.setattr(mod, "_resolve_snapshot_sandbox", lambda runtime: None)
+    f = wired.outputs_dir / "deck.pdf"
+    f.write_bytes(b"%PDF-1.4\n%binary\xff\xfe")
+
+    result = _present(runtime=_make_runtime(str(wired.outputs_dir)), filepaths=[str(f)], tool_call_id="tc")
+
+    item = _items(result)[0]
+    assert item["ref"] is None  # no snapshot → no poster (I1/I8)
+    assert item["html"].endswith(".html") or "documents" in item["html"]
+    assert item["download"].endswith("deck.pdf")  # download still delivered
+    assert item["mime"] == "text/html"
+    # original upload + shell HTML inline; no PNG.
+    assert wired.uploader.local_calls and len(wired.uploader.inline_calls) == 1
+
+
+def test_non_renderable_binary_office_falls_back_to_bare_link(wired):
+    # PPT/Word stay as bare download links — never converted, no iframe shell.
+    f = wired.outputs_dir / "slides.pptx"
+    f.write_bytes(b"PK\x03\x04binary-ooxml\xff")
+
+    result = _present(runtime=_make_runtime(str(wired.outputs_dir)), filepaths=[str(f)], tool_call_id="tc")
+
+    item = _items(result)[0]
+    assert "download" not in item and "html" not in item
+    assert wired.uploader.local_calls and wired.uploader.local_calls[0].endswith("slides.pptx")
+    assert not wired.uploader.inline_calls  # no shell wrapping
 
 
 def test_image_file_uses_media_branch(wired):

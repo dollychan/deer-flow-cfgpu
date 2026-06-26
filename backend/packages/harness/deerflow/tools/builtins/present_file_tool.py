@@ -91,7 +91,7 @@ def _normalize_presented_filepath(
         # fragility). The relative_to(outputs_dir) check below still confines presents to
         # the outputs subtree, so workspace/uploads virtual paths are rejected as before.
         user_data_dir = outputs_dir.parent
-        relative = stripped[len(virtual_prefix):].lstrip("/")
+        relative = stripped[len(virtual_prefix) :].lstrip("/")
         actual_path = (user_data_dir / relative).resolve()
     else:
         actual_path = Path(filepath).expanduser().resolve()
@@ -106,7 +106,7 @@ def _normalize_presented_filepath(
 
 def _virtual_to_physical(virtual_path: str, outputs_path: str) -> str:
     """Derive the physical filesystem path from a normalized virtual outputs path."""
-    relative = virtual_path[len(OUTPUTS_VIRTUAL_PREFIX):].lstrip("/")
+    relative = virtual_path[len(OUTPUTS_VIRTUAL_PREFIX) :].lstrip("/")
     return str(Path(outputs_path).resolve() / relative)
 
 
@@ -153,6 +153,20 @@ def _lang_for(filename: str) -> str:
 
 def _is_html(filename: str) -> bool:
     return Path(filename).suffix.lower() in (".html", ".htm")
+
+
+# Browser-renderable binary suffixes: instead of a bare download link, deliver an
+# <iframe> preview shell + snapshot (cfgpu-docs/present-files-tool.md §6.3). The set
+# is the binaries a browser renders natively; today only PDF (built-in PDFium).
+# Detected by suffix (not mimetypes) to avoid the blocking mimetypes.init() on first
+# call, mirroring _is_html. The original file is never converted — it is uploaded
+# as-is and remains downloadable (I8); other binaries (ppt/doc/xls/zip…) fall back
+# to a bare download link unchanged.
+_IFRAME_RENDERABLE_SUFFIXES = {".pdf"}
+
+
+def _is_iframe_renderable(filename: str) -> bool:
+    return Path(filename).suffix.lower() in _IFRAME_RENDERABLE_SUFFIXES
 
 
 def _inline_key(thread_id: str, category: str, data: bytes, name: str) -> str:
@@ -228,6 +242,50 @@ def build_doc_html(text: str, filename: str, lang: str) -> str:
         lang_label=lang_label,
         escaped=html_lib.escape(text),
         source_json=json.dumps(text),
+    )
+
+
+_IFRAME_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  * {{ box-sizing: border-box; }}
+  html, body {{ margin: 0; height: 100%; }}
+  body {{ display: flex; flex-direction: column; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f5f7; }}
+  .doc-bar {{ display: flex; align-items: center; justify-content: space-between;
+             padding: 10px 16px; background: #2a2a3c; color: #e6e6e6; font-size: 13px; flex: none; }}
+  .doc-name {{ font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .doc-dl {{ color: #9ecbff; text-decoration: none; flex: none; margin-left: 12px; }}
+  iframe {{ flex: 1 1 auto; width: 100%; min-height: 0; border: 0; background: #fff; }}
+</style>
+</head>
+<body>
+  <div class="doc-bar">
+    <span class="doc-name">{name}</span>
+    <a class="doc-dl" href="{src}" download>下载原文件</a>
+  </div>
+  <iframe src="{src}" title="{name}"></iframe>
+</body>
+</html>"""
+
+
+def build_iframe_html(file_url: str, filename: str) -> str:
+    """Wrap a browser-renderable binary (e.g. PDF) in a self-contained <iframe> shell.
+
+    The original file is referenced by ``file_url`` (a presigned OSS URL) for both the
+    iframe ``src`` (preview) and the download link — it is **never** inlined, so the
+    shell is a stable content-hash OSS object while its iframe ``src`` expires with the
+    presigned URL. That lifetime mismatch is the accepted debt (cfgpu-docs §6.3 / D8 /
+    I8): the shell still opens after expiry but the embedded preview goes blank/403.
+    """
+    safe_url = html_lib.escape(file_url, quote=True)
+    return _IFRAME_HTML_TEMPLATE.format(
+        title=html_lib.escape(filename),
+        name=html_lib.escape(filename),
+        src=safe_url,
     )
 
 
@@ -314,6 +372,54 @@ async def _build_rich_item(
         "ref": snapshot_ref,
         "mime": "text/html",
         "html": html_ref,
+        "source_name": filename,
+    }
+    return html_ref, item
+
+
+async def _build_iframe_item(
+    uploader,
+    sandbox,
+    thread_id: str,
+    filename: str,
+    file_url: str,
+) -> tuple[str, dict]:
+    """Wrap a browser-renderable binary (PDF) as an <iframe> shell + snapshot → rich item.
+
+    ``file_url`` is the original file's OSS reference (already uploaded), used as both
+    the iframe ``src`` (preview) and the ``download`` link. Unlike ``_build_rich_item``
+    the original is **not** read into memory or inlined — large PDFs stay on disk and
+    the shell references them by URL (so the shell outlives its presigned src; accepted
+    debt, cfgpu-docs §6.3 / D8 / I8). The snapshot is best-effort: headless chromium
+    rarely renders an embedded PDF, so ``ref`` (poster) may be ``None`` while ``html``
+    still carries the shell — the file is delivered without a poster (I1/I8).
+    """
+    html_doc = build_iframe_html(file_url, filename)
+    html_bytes = html_doc.encode("utf-8")
+    html_key = _inline_key(thread_id, "documents", html_bytes, f"{filename}.html")
+    html_ref = await uploader.upload_inline_bytes(html_key, html_bytes, "text/html")
+
+    snapshot_ref = None
+    if sandbox is not None:
+        png = await asyncio.to_thread(sandbox.snapshot_html, html_doc)
+        if png:
+            png_key = _inline_key(thread_id, "images", png, f"{Path(filename).stem}.png")
+            snapshot_ref = await uploader.upload_inline_bytes(png_key, png, "image/png")
+        else:
+            logger.warning("present_files: snapshot returned no PNG for %s — delivering iframe without snapshot", filename)
+    else:
+        logger.info("present_files: no snapshot sandbox for %s — delivering iframe without snapshot", filename)
+
+    # Same rich-item shape as the text path (``ref``=poster png, ``html``=shell), plus
+    # ``download`` carrying the original file URL so the client always has the as-is
+    # file even when the preview is unavailable. ``kind``/``expires_at`` classify off
+    # ``html_ref`` (poster and shell share the OSS scheme), holding when poster is None.
+    item = {
+        **_artifact_item(html_ref),
+        "ref": snapshot_ref,
+        "mime": "text/html",
+        "html": html_ref,
+        "download": file_url,
         "source_name": filename,
     }
     return html_ref, item
@@ -427,6 +533,15 @@ async def present_file_tool(
                         url = await uploader.upload_local_file(vpath, physical, thread_id)
                         artifacts.append(url)
                         items.append(_artifact_item(url))
+                        continue
+                    if _is_iframe_renderable(Path(physical).name):
+                        # Browser-renderable binary (PDF, §6.3): upload the original as-is
+                        # (download + iframe src — never converted, I8) then wrap it in an
+                        # <iframe> shell + snapshot. No bytes read into memory.
+                        file_url = await uploader.upload_local_file(vpath, physical, thread_id)
+                        ref, item = await _build_iframe_item(uploader, sandbox, thread_id, Path(physical).name, file_url)
+                        artifacts.append(ref)
+                        items.append(item)
                         continue
                     # Non-media: try wrapping as HTML doc + snapshot poster.
                     raw = await asyncio.to_thread(_read_bytes, physical)

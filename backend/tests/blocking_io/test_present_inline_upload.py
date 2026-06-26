@@ -68,5 +68,19 @@ async def test_present_wrapping_does_not_block_event_loop(tmp_path: Path) -> Non
     assert result is not None
     ref, item = result
     assert item["mime"] == "text/html"
-    assert item["poster"] is not None
+    assert item["ref"] is not None  # poster PNG (snapshot)
     assert uploader.inline_calls == 2  # HTML + PNG
+
+
+async def test_present_iframe_does_not_block_event_loop(tmp_path: Path) -> None:
+    """The PDF iframe-shell path (§6.3) offloads the same blocking sinks (I5/I8)."""
+    uploader = _BlockingUploader()
+    sandbox = _BlockingSandbox()
+
+    # No bytes are read for the iframe path; only the shell upload + snapshot run.
+    ref, item = await mod._build_iframe_item(uploader, sandbox, "thread-1", "report.pdf", "https://oss.example/local/report.pdf")
+
+    assert item["mime"] == "text/html"
+    assert item["download"] == "https://oss.example/local/report.pdf"
+    assert item["ref"] is not None  # poster PNG (snapshot)
+    assert uploader.inline_calls == 2  # shell HTML + PNG
