@@ -11,7 +11,9 @@ from dataclasses import dataclass, field, replace
 
 import pytest
 from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 
+import deerflow.agents.materials.materialize as mz
 import deerflow.agents.materials.middleware as mw
 from deerflow.agents.materials.middleware import MaterialsMiddleware
 
@@ -19,9 +21,16 @@ from deerflow.agents.materials.middleware import MaterialsMiddleware
 
 
 @dataclass
+class FakeRuntime:
+    context: dict = field(default_factory=dict)
+    config: dict = field(default_factory=dict)
+
+
+@dataclass
 class FakeRequest:
     tool_call: dict
     state: dict | None = field(default_factory=dict)
+    runtime: FakeRuntime | None = None
 
     def override(self, **overrides):
         return replace(self, **overrides)
@@ -260,3 +269,63 @@ async def test_awrap_resolves_and_short_circuits(fake_oss):
     out = await MaterialsMiddleware().awrap_tool_call(_request({"image": "m99"}, materials={}), handler2)
     assert isinstance(out, ToolMessage) and out.status == "error"
     assert called["n"] == 0
+
+
+# --- local 素材：I14 resolve 挡 + awrap 自动 stage（§4.8.4, P10）---------------
+
+
+def _local(mid: str, local_path: str) -> dict:
+    return {"id": mid, "kind": "image", "origin": "local", "ref_type": "local", "local_path": local_path}
+
+
+@pytest.mark.asyncio
+async def test_local_material_rejected_when_not_stageable(fake_oss):
+    """I14：纯 local 素材撞 resolve（无 runtime → 自动 stage 跳过）→ error，不调 cfdream。"""
+    materials = {"m1": _local("m1", "/mnt/user-data/outputs/a.png")}
+    called = {"n": 0}
+
+    async def handler(_request):
+        called["n"] += 1
+        return ToolMessage(content="done", tool_call_id="tc_1", name="cfdream_edit_image")
+
+    # 无 runtime → _thread_id_from_request 返回 "" → auto-stage 跳过 → resolve 按 I14 报错
+    out = await MaterialsMiddleware().awrap_tool_call(_request({"image": "m1"}, materials), handler)
+    assert isinstance(out, ToolMessage) and out.status == "error"
+    assert "m1" in out.content
+    assert called["n"] == 0
+
+
+class _FakeUploader:
+    def __init__(self) -> None:
+        self.upload_calls: list = []
+
+    async def upload_local_file(self, virtual_path, physical_path, thread_id):
+        self.upload_calls.append((virtual_path, thread_id))
+        return f"agent-artifacts/{thread_id}/files/{virtual_path.rsplit('/', 1)[-1]}"
+
+
+@pytest.mark.asyncio
+async def test_awrap_auto_stages_local_then_resolves(fake_oss, monkeypatch):
+    """便利层（D16d）：cfdream 入参引用 local 素材 → awrap 前段自动上传 oss_path → resolve 签发。"""
+    up = _FakeUploader()
+    monkeypatch.setattr(mz, "get_oss_uploader", lambda: up)
+    materials = {"m1": _local("m1", "/mnt/user-data/outputs/a.png")}
+    req = FakeRequest(
+        tool_call={"name": "cfdream_edit_image", "args": {"image": "m1"}, "id": "tc_1"},
+        state={"materials": materials, "thread_data": {"outputs_path": "/host/threads/t1/user-data/outputs"}},
+        runtime=FakeRuntime(context={"thread_id": "t1"}),
+    )
+    box: dict = {}
+
+    async def handler(request):
+        box["signed"] = request.tool_call["args"]["image"]
+        return ToolMessage(content="ok", tool_call_id="tc_1", name="cfdream_edit_image")
+
+    out = await MaterialsMiddleware().awrap_tool_call(req, handler)
+    # 自动上传发生（懒上传命中真消费）
+    assert up.upload_calls == [("/mnt/user-data/outputs/a.png", "t1")]
+    # resolve 把升级后的 oss_path 签成 presigned 交给 cfdream
+    assert box["signed"] == "https://oss.test/agent-artifacts/t1/files/a.png?Signature=SIG"
+    # local→oss_path 升级折进结果 Command 以持久化
+    assert isinstance(out, Command)
+    assert out.update["materials"]["m1"]["ref_type"] == "oss_path"
