@@ -3,7 +3,7 @@ name: error-handling
 description: Decide how to react when a tool call or generation step fails while producing images/videos/episodes. Use whenever a tool returns an error — to classify it (deterministic vs transient vs terminal), decide retry vs fix-inputs vs stop-and-tell-user, and avoid double-billing on generation calls. Covers cfgpu MCP errors, material/asset errors, LLM provider failures, and async task failures.
 ---
 
-# Handling errors during generation (director agent)
+# Handling errors during generation (cf-dream agent)
 
 You are a LangGraph agent that produces images, videos, speech, and episodes by
 calling the **cfgpu/cfdream MCP** tools (`generate_image`, `generate_video`,
