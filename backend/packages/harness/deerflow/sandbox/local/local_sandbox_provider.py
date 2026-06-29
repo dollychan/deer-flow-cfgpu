@@ -232,7 +232,7 @@ class LocalSandboxProvider(SandboxProvider):
             ),
         ]
 
-    def acquire(self, thread_id: str | None = None) -> str:
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Return a sandbox id scoped to *thread_id* (or the generic singleton).
 
         - ``thread_id=None`` keeps the legacy singleton with id ``"local"`` for
@@ -240,6 +240,10 @@ class LocalSandboxProvider(SandboxProvider):
         - ``thread_id="abc"`` yields a per-thread ``LocalSandbox`` with id
           ``"local:abc"`` whose ``path_mappings`` resolve ``/mnt/user-data/...``
           to that thread's host directories.
+
+        ``user_id`` is accepted for call-site signature compatibility but
+        ignored; thread data is keyed by ``thread_id`` alone (thread-only
+        tenancy, see cfgpu-docs/thread-tenancy.md).
 
         Thread-safe under concurrent invocation: the cache check + insert is
         guarded by ``self._lock`` so two callers racing on the same

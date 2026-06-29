@@ -695,7 +695,7 @@ class AioSandboxProvider(SandboxProvider):
 
     # ── Core: acquire / get / release / shutdown ─────────────────────────
 
-    def acquire(self, thread_id: str | None = None) -> str:
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment and return its ID.
 
         For the same thread_id, this method will return the same sandbox_id
@@ -706,6 +706,11 @@ class AioSandboxProvider(SandboxProvider):
 
         Args:
             thread_id: Optional thread ID for thread-specific configurations.
+            user_id: Accepted for call-site signature compatibility but ignored.
+                AIO sandboxes are keyed by ``thread_id`` alone via
+                ``_identity_key`` (thread-only tenancy; see
+                cfgpu-docs/thread-tenancy.md and aio-localbackend-sandbox.md D11
+                retirement). Multiple users sharing a thread share one container.
 
         Returns:
             The ID of the acquired sandbox environment.
@@ -717,12 +722,16 @@ class AioSandboxProvider(SandboxProvider):
         else:
             return self._acquire_internal(thread_id)
 
-    async def acquire_async(self, thread_id: str | None = None) -> str:
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment without blocking the event loop.
 
         Mirrors ``acquire()`` while keeping blocking backend operations off the
         event loop and using async-native readiness polling for newly created
         sandboxes.
+
+        ``user_id`` is accepted for call-site signature compatibility but
+        ignored; sandboxes are keyed by ``thread_id`` alone (thread-only
+        tenancy, see ``acquire``).
         """
         if thread_id:
             thread_lock = self._get_thread_lock(thread_id)

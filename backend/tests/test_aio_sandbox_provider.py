@@ -316,6 +316,52 @@ async def test_acquire_async_cancelled_waiter_does_not_block_successor(tmp_path,
 
 
 @pytest.mark.anyio
+async def test_acquire_async_accepts_and_ignores_user_id(tmp_path, monkeypatch):
+    """acquire_async must accept the user_id kwarg (base-class signature) and ignore it.
+
+    Regression for ``acquire_async() got an unexpected keyword argument 'user_id'``:
+    SandboxMiddleware / sandbox tools call ``acquire_async(thread_id, user_id=...)``,
+    but sandboxes are keyed by thread_id alone (thread-only tenancy). The kwarg must
+    be accepted for call-site compatibility and must not change the acquired id.
+    """
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._thread_locks = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    seen_thread_ids: list[str | None] = []
+
+    async def fake_acquire_internal_async(thread_id: str | None) -> str:
+        seen_thread_ids.append(thread_id)
+        await asyncio.sleep(0)
+        return f"sandbox-for-{thread_id}"
+
+    monkeypatch.setattr(provider, "_acquire_internal_async", fake_acquire_internal_async)
+
+    thread_id = "thread-shared"
+    sid_a = await provider.acquire_async(thread_id, user_id="user-a")
+    sid_b = await provider.acquire_async(thread_id, user_id="user-b")
+
+    # Different users sharing a thread resolve to the same sandbox id.
+    assert sid_a == sid_b == "sandbox-for-thread-shared"
+    assert seen_thread_ids == [thread_id, thread_id]
+
+
+def test_acquire_accepts_and_ignores_user_id(tmp_path, monkeypatch):
+    """Sync acquire mirrors acquire_async: accept user_id, key by thread_id alone."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._thread_locks = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    monkeypatch.setattr(provider, "_acquire_internal", lambda thread_id: f"sandbox-for-{thread_id}")
+
+    thread_id = "thread-shared-sync"
+    assert provider.acquire(thread_id, user_id="user-a") == "sandbox-for-thread-shared-sync"
+    assert provider.acquire(thread_id, user_id="user-b") == "sandbox-for-thread-shared-sync"
+
+
+@pytest.mark.anyio
 async def test_acquire_internal_async_offloads_cached_reuse_health_check(tmp_path, monkeypatch):
     """Async cached reuse must keep backend health checks off the event loop."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
