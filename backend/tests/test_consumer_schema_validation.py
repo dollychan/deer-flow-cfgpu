@@ -158,6 +158,30 @@ class TestValidEnvelopes:
         assert msg.thread_id == ""
         assert msg.threads == ["t1", "t2"]
 
+    def test_valid_delete_without_client_id(self):
+        # v2.6: delete is a cross-thread batch op not bound to a single client session,
+        # so clientId may be absent/empty (MQ消息协议.md「delete」).
+        env = {
+            "schema_version": "2.6",
+            "message_id": "d1",
+            "type": "delete",
+            "payload": {"threads": ["t1"]},
+        }
+        msg = TaskMessage.from_dict(env)
+        assert msg.client_id == ""
+        # downlink echo (deleted ack) tolerates the empty clientId — omitted, not "".
+        assert "clientId" not in msg.downlink_echo()
+
+    def test_valid_delete_empty_client_id(self):
+        env = {
+            "schema_version": "2.6",
+            "message_id": "d1",
+            "type": "delete",
+            "clientId": "",
+            "payload": {"threads": ["t1"]},
+        }
+        assert TaskMessage.from_dict(env).client_id == ""
+
     def test_delete_empty_threads_rejected(self):
         env = {
             "schema_version": "2.6",

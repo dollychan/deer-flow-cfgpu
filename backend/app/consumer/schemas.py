@@ -282,10 +282,12 @@ class TaskMessage:
         if msg_type not in _THREAD_EXEMPT_TYPES and not data.get("thread_id"):
             raise SchemaValidationError("Missing required field: thread_id")
 
-        # clientId — required, non-empty on every uplink message (task/cancel/ping).
+        # clientId — required on task/cancel/ping; delete is exempt (v2.6).
         # Consumer treats it as an opaque originating-client tag and echoes it back
-        # unchanged on every downlink reply (MQ消息协议.md envelope table).
-        if not data.get("clientId"):
+        # unchanged on every downlink reply (MQ消息协议.md envelope table). delete is a
+        # cross-thread batch operation not bound to a single originating client session,
+        # so its clientId may be empty; when present it is still echoed on the deleted ack.
+        if msg_type != "delete" and not data.get("clientId"):
             raise SchemaValidationError("Missing required field: clientId")
 
         # payload — required, must be an object
