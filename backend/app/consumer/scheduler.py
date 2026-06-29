@@ -87,6 +87,7 @@ class Scheduler:
         """
         while not stop_event.is_set():
             await self._drain_claims()
+            await self._drain_tombstones()
 
             self._wake.clear()
             woken = await self._wait(stop_event)
@@ -151,6 +152,42 @@ class Scheduler:
         finally:
             self._sem.release()
             self.poke()  # slot_available: re-scan for the next claimable candidate
+
+    async def _drain_tombstones(self) -> None:
+        """Claim + dispatch idle/paused delete tombstones while slots remain (§5.5, P7).
+
+        delete does not enqueue a ``thread_msg_queue`` row, so its destroy cannot ride the
+        queue claim. This is the Scheduler's second candidate source: ``claim_tombstone``
+        durably claims one SENTINEL idle/paused thread (running tombstones are destroyed
+        inline by their own run's finalize hook), then ``AgentRunner.destroy`` runs the heavy
+        FS/OSS + DB cleanup off the poll-loop under the same slot semaphore.
+        """
+        while not self._stopped:
+            if self._sem.locked():  # no free slot — wait for slot_available poke
+                return
+            try:
+                tid = await self._registry.claim_tombstone(self._instance_id)
+            except Exception:
+                logger.exception("claim_tombstone failed; backing off to next tick")
+                return
+            if tid is None:
+                return
+
+            await self._sem.acquire()  # cannot block: checked not-locked just above
+            task = asyncio.create_task(self._destroy_and_release(tid), name=f"destroy-{tid[:8]}")
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+            logger.info("Dispatched destroy for delete-tombstoned thread=%s", tid)
+
+    async def _destroy_and_release(self, thread_id: str) -> None:
+        """Destroy one delete-tombstoned thread, then free the slot and re-poke."""
+        try:
+            await self._runner.destroy(thread_id)
+        except Exception:
+            logger.exception("AgentRunner.destroy crashed for thread=%s", thread_id)
+        finally:
+            self._sem.release()
+            self.poke()
 
     # ── Shutdown ───────────────────────────────────────────────────────────────
 

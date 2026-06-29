@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from app.consumer.constants import (
+    DELETE_SENTINEL,
     ClaimResult,
     InstanceStatus,
     ProcessedStatus,
@@ -46,6 +47,24 @@ _EXECUTABLE_POLICIES = (
 # Outbox publish retry backoff (§9.3): exponential, capped.
 _DELIVERY_BACKOFF_BASE_SECONDS = 5
 _DELIVERY_BACKOFF_CAP_SECONDS = 300
+
+# delete ack held-gate time (§5.5, P7 method B). A pre-staged ``deleted`` ack is parked
+# with next_delivery_at = this far-future sentinel so the outbox producer skips it
+# (fetch_undelivered filters next_delivery_at <= now); destroy's last txn flips it to NULL
+# to release. A concrete far-future datetime — NOT a Postgres 'infinity' literal — so the
+# `<= now` comparison behaves identically under aiosqlite (no infinity-timestamp semantics).
+_DELETE_ACK_HELD_UNTIL = datetime(9999, 12, 31, 23, 59, 59, tzinfo=UTC)
+
+
+def delete_ack_message_id(delete_message_id: str, thread_id: str) -> str:
+    """Synthetic per-thread PK for a delete's pre-staged ``deleted`` ack (§5.5).
+
+    N threads share one uplink ``delete.message_id``; the real ``message_id`` PK on
+    processed_messages would collide, so the held ack row is keyed by this synthetic id
+    (same ``:`` convention as the cancel-cleared drain row's ``<paused>:drain``). The real
+    downlink ``message_id`` (== the uplink delete id) rides in result_cache.echo instead.
+    """
+    return f"{delete_message_id}:deleted:{thread_id}"
 
 
 @dataclass
@@ -835,6 +854,12 @@ class RunRegistry:
         drain is excluded (B′): it may sit below a later watermark but must still run.
         Returns the number of rows swept.
         """
+        # delete tombstone (§5.5): a SENTINEL watermark covers *every* pending row, but
+        # delete must NOT spray a per-message ``cancelled`` for each (it emits a single
+        # ``deleted``). destroy() wipes these rows wholesale, so skip the cancelled-cleanup
+        # entirely here (covers both claim phase-3 and the tick sweep_cancelled fallback).
+        if watermark >= DELETE_SENTINEL:
+            return 0
         covered = (
             await session.execute(
                 select(ThreadMsgQueueRow).where(
@@ -1189,6 +1214,26 @@ class RunRegistry:
                 ):
                     return False
 
+                # ── delete tombstone branch (§5.5): the thread is being destroyed ──
+                # The running run was hard-cancelled by the SENTINEL watermark. Do NOT write
+                # a per-message terminal (the single ``deleted`` ack covers the whole thread);
+                # just drop the running/merged queue rows and leave the thread for destroy().
+                # Stay tombstoned (cancel_watermark=SENTINEL) and go idle so the Scheduler
+                # tombstone sweep / the runner's own post-finalize destroy hook reclaims it.
+                if (state.cancel_watermark or 0) >= DELETE_SENTINEL and not paused:
+                    await session.execute(
+                        delete(ThreadMsgQueueRow).where(
+                            ThreadMsgQueueRow.thread_id == thread_id,
+                            ThreadMsgQueueRow.status.in_(
+                                [QueueRowStatus.RUNNING.value, QueueRowStatus.MERGED.value]
+                            ),
+                        )
+                    )
+                    state.status = ThreadStatus.IDLE.value
+                    state.retry_count = 0
+                    state.last_heartbeat = now
+                    return True
+
                 # ── drain branch (§6.5/§7.3): no downlink, no processed_messages ──
                 if status == QueuePolicy.DRAIN.value:
                     await session.execute(
@@ -1388,4 +1433,158 @@ class RunRegistry:
                 state.status = ThreadStatus.IDLE.value
                 state.retry_count = (state.retry_count or 0) + 1
                 state.last_heartbeat = now
+                return True
+
+    # ── (g) v2.6 delete: tombstone + held ack + destroy (§5.5, P7) ───────────────
+
+    async def ingest_delete(
+        self,
+        threads: list[str],
+        delete_message_id: str,
+        echo_base: dict | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """Fan-out a ``type=delete`` into per-thread tombstones + held acks (§5.5, method B).
+
+        One transaction. For each (1-based index i, tid) in ``threads``: ensure the state
+        row exists, raise its ``cancel_watermark`` to ``DELETE_SENTINEL`` (GREATEST — cancels
+        everything + durably marks for destroy), and pre-stage the ``deleted`` ack into
+        processed_messages keyed by the synthetic per-thread PK ``{delete}:deleted:{tid}``,
+        ``delivered=false`` and ``next_delivery_at`` parked far-future so the outbox HOLDS it
+        until destroy releases it. The real downlink ``message_id`` (== the uplink delete id),
+        ``message_seq`` 1..N and ``thread_msg_seq=0`` ride in result_cache.echo. Idempotent:
+        a redelivered delete re-raises GREATEST(SENTINEL)=SENTINEL and ON CONFLICT skips the
+        already-staged ack. Returns the number of threads stamped (== len(deduped threads)).
+        """
+        now = now or datetime.now(UTC)
+        async with self._sf() as session:
+            async with session.begin():
+                for i, tid in enumerate(threads, start=1):
+                    # lock/upsert the state row (claim's mutex point §6.4) and raise the sentinel.
+                    await self._insert_state_if_absent(session, tid, now)
+                    state = (
+                        await session.execute(
+                            select(ThreadRunStateRow)
+                            .where(ThreadRunStateRow.thread_id == tid)
+                            .with_for_update()
+                        )
+                    ).scalar_one()
+                    state.cancel_watermark = max(state.cancel_watermark or 0, DELETE_SENTINEL)
+
+                    echo = dict(echo_base or {})
+                    echo["message_id"] = delete_message_id
+                    echo["thread_id"] = tid
+                    echo["thread_msg_seq"] = 0
+                    echo["message_seq"] = i  # per-message_id 1..N (MQ消息协议.md「deleted」)
+                    await self._insert_if_absent(
+                        session,
+                        ProcessedMessageRow,
+                        {
+                            "message_id": delete_ack_message_id(delete_message_id, tid),
+                            "thread_id": tid,
+                            "status": ProcessedStatus.DELETED.value,
+                            "result_cache": {"type": "deleted", "payload": {}, "echo": echo},
+                            "delivered": False,
+                            "delivered_at": None,
+                            "delivery_attempts": 0,
+                            "next_delivery_at": _DELETE_ACK_HELD_UNTIL,  # held until destroy
+                            "processed_at": now,
+                        },
+                        ProcessedMessageRow.message_id,
+                    )
+                return len(threads)
+
+    async def is_tombstoned(self, thread_id: str) -> bool:
+        """True iff this thread carries the delete tombstone (cancel_watermark == SENTINEL)."""
+        state = await self.get_thread_state(thread_id)
+        return state is not None and (state.cancel_watermark or 0) >= DELETE_SENTINEL
+
+    async def claim_tombstone(self, instance_id: str) -> str | None:
+        """Scheduler second candidate source: claim one idle/paused delete tombstone (§5.5).
+
+        delete does not enqueue a ``thread_msg_queue`` row, so there is nothing for the
+        normal queue claim to pick up. This scans ``thread_run_state`` for a SENTINEL row in
+        ``idle``/``paused`` (a ``running`` tombstone is handled inline by its own run's
+        finalize→destroy), locks it ``FOR UPDATE SKIP LOCKED`` so peers don't double-claim,
+        and flips it to ``running`` owned by this instance — a durable claim so a crash mid
+        destroy leaves a running+SENTINEL row that §8 stale-recovery reclaims (requeue→idle→
+        re-swept here). Returns the thread_id to destroy, or None when none is pending.
+        """
+        now = datetime.now(UTC)
+        async with self._sf() as session:
+            async with session.begin():
+                row = (
+                    await session.execute(
+                        select(ThreadRunStateRow)
+                        .where(
+                            ThreadRunStateRow.cancel_watermark >= DELETE_SENTINEL,
+                            ThreadRunStateRow.status.in_(
+                                [ThreadStatus.IDLE.value, ThreadStatus.PAUSED.value]
+                            ),
+                        )
+                        .limit(1)
+                        .with_for_update(skip_locked=True)
+                    )
+                ).scalars().first()
+                if row is None:
+                    return None
+                row.status = ThreadStatus.RUNNING.value
+                row.instance_id = instance_id
+                row.message_id = None
+                row.started_at = now
+                row.last_heartbeat = now
+                return row.thread_id
+
+    async def destroy_thread_state(self, thread_id: str) -> bool:
+        """Wipe a delete-tombstoned thread's DB run-state and release its held ack (§5.5 step b).
+
+        Single transaction under the state-row lock (idempotent / serialized — a concurrent
+        destroyer that loses the row lock re-checks and no-ops). Requires no delete context:
+        the held ack is found by ``status='deleted'`` on the thread, not by a passed id, so a
+        cross-instance / crash re-run reads only persisted tombstone state. Steps:
+          - verify the row is still tombstoned (cancel_watermark == SENTINEL) else no-op;
+          - delete all run-state rows for the thread EXCEPT the ``deleted`` ack
+            (thread_msg_queue wholesale; processed_messages where status != 'deleted');
+          - release the held ack(s): next_delivery_at = NULL so the outbox publishes ``deleted``;
+          - delete the tombstone state row.
+        Returns True if a tombstone was found and cleared, False on no-op.
+
+        FS/OSS recycling (checkpoint / threadData dir / OSS prefix) is the caller's
+        non-transactional, best-effort prelude (AgentRunner.destroy) — it never touches DB.
+        """
+        async with self._sf() as session:
+            async with session.begin():
+                state = (
+                    await session.execute(
+                        select(ThreadRunStateRow)
+                        .where(ThreadRunStateRow.thread_id == thread_id)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if state is None or (state.cancel_watermark or 0) < DELETE_SENTINEL:
+                    return False  # already destroyed / never a tombstone — no-op
+
+                await session.execute(
+                    delete(ThreadMsgQueueRow).where(ThreadMsgQueueRow.thread_id == thread_id)
+                )
+                await session.execute(
+                    delete(ProcessedMessageRow).where(
+                        ProcessedMessageRow.thread_id == thread_id,
+                        ProcessedMessageRow.status != ProcessedStatus.DELETED.value,
+                    )
+                )
+                # release the held ack(s) so the outbox delivers ``deleted`` (§5.5 method B).
+                await session.execute(
+                    update(ProcessedMessageRow)
+                    .where(
+                        ProcessedMessageRow.thread_id == thread_id,
+                        ProcessedMessageRow.status == ProcessedStatus.DELETED.value,
+                        ProcessedMessageRow.delivered.is_(False),
+                    )
+                    .values(next_delivery_at=None)
+                )
+                await session.execute(
+                    delete(ThreadRunStateRow).where(ThreadRunStateRow.thread_id == thread_id)
+                )
                 return True

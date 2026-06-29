@@ -176,8 +176,11 @@ class ProcessedMessageRow(Base):
     message_id: Mapped[str] = mapped_column(Text, primary_key=True)
     thread_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     status: Mapped[str] = mapped_column(Text, nullable=False)
-    # "completed" | "failed" | "cancelled" | "paused_for_approval"
+    # "completed" | "failed" | "cancelled" | "paused_for_approval" | "deleted"
     # paused_for_approval: run triggered HIL interrupt; thread itself is idle
+    # deleted (v2.6, §5.5/P7): a type=delete's per-thread ack, pre-staged held at ingest
+    #   (next_delivery_at far-future), released to the outbox by destroy. Bare Text column —
+    #   adding this value is a no-op DDL-wise (no CHECK constraint, no alembic revision).
     result_cache: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # cached result payload for replay on duplicate delivery / outbox publish
     delivered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

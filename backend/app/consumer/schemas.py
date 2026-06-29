@@ -14,7 +14,12 @@ from app.consumer.constants import MessageMode, QueuePolicy
 from app.consumer.timeutil import parse_beijing_to_utc
 
 # Uplink message types accepted from upstream (task topic + signals topic).
-UPLINK_TYPES: frozenset[str] = frozenset({"task", "cancel", "ping"})
+# delete (v2.6): cross-thread batch delete; envelope thread_id/thread_msg_seq exempt,
+# targets carried in payload.threads (MQ消息协议.md「delete — 批量删除 thread」).
+UPLINK_TYPES: frozenset[str] = frozenset({"task", "cancel", "delete", "ping"})
+
+# Types that do not bind to a single thread → envelope thread_id / thread_msg_seq exempt.
+_THREAD_EXEMPT_TYPES: frozenset[str] = frozenset({"ping", "delete"})
 
 # Accepted schema_version major component.  Minor bumps are backwards-compatible.
 _SUPPORTED_SCHEMA_MAJOR = "2"
@@ -144,6 +149,7 @@ class TaskMessage:
     thread_msg_seq: int = 0  # monotonic sequence within a thread; echoed to downlink
     biz_type: str = "agent_task"  # global message type for the frontend; echoed to downlink
     client_id: str = ""  # originating client id (envelope ``clientId``); required uplink, echoed to downlink
+    threads: list[str] = field(default_factory=list)  # delete (v2.6): deduped target thread_ids (§5.5)
 
     # ── derived helpers ───────────────────────────────────────────────────────
 
@@ -268,11 +274,12 @@ class TaskMessage:
                 f"Unknown message type={msg_type!r}; expected one of {sorted(UPLINK_TYPES)}"
             )
 
-        # thread_id — required for task/cancel; ping is exempt.
+        # thread_id — required for task/cancel; ping and delete are exempt.
         # Per protocol (MQ消息协议.md field table note): ping carries no thread_id —
-        # it is a stateless health check answerable by any instance. _handle_ping
-        # never reads thread_id, so an absent value is harmless.
-        if msg_type != "ping" and not data.get("thread_id"):
+        # it is a stateless health check answerable by any instance. delete is a
+        # cross-thread batch operation whose targets live in payload.threads, so its
+        # envelope thread_id is empty/ignored (§5.5). Neither handler reads thread_id.
+        if msg_type not in _THREAD_EXEMPT_TYPES and not data.get("thread_id"):
             raise SchemaValidationError("Missing required field: thread_id")
 
         # clientId — required, non-empty on every uplink message (task/cancel/ping).
@@ -293,6 +300,25 @@ class TaskMessage:
         # task-specific payload rules
         if msg_type == "task":
             cls._validate_task_payload(payload)
+
+        # delete-specific payload rules (v2.6, §5.5)
+        if msg_type == "delete":
+            cls._validate_delete_payload(payload)
+
+    @classmethod
+    def _validate_delete_payload(cls, payload: dict) -> None:
+        """Validate a delete envelope's payload: ``threads`` must be a non-empty array
+        of non-empty strings (MQ消息协议.md「delete」: 空数组 → INVALID_SCHEMA)."""
+        threads = payload.get("threads")
+        if not isinstance(threads, list) or len(threads) == 0:
+            raise SchemaValidationError(
+                "delete message requires payload.threads (non-empty array of thread_id)"
+            )
+        for i, tid in enumerate(threads):
+            if not isinstance(tid, str) or not tid:
+                raise SchemaValidationError(
+                    f"payload.threads[{i}] must be a non-empty string"
+                )
 
     @classmethod
     def _validate_task_payload(cls, payload: dict) -> None:
@@ -376,6 +402,14 @@ class TaskMessage:
         # ping: instance_id is a top-level payload field, not nested under config
         if data.get("type") == "ping" and "instance_id" in payload:
             config["instance_id"] = payload["instance_id"]
+        # delete (v2.6): dedup payload.threads, preserving first-seen order (§5.5).
+        threads: list[str] = []
+        if data.get("type") == "delete":
+            seen: set[str] = set()
+            for tid in payload.get("threads") or []:
+                if tid not in seen:
+                    seen.add(tid)
+                    threads.append(tid)
         return cls(
             schema_version=data.get("schema_version", "2.5"),
             message_id=data["message_id"],
@@ -393,6 +427,7 @@ class TaskMessage:
             thread_msg_seq=data.get("thread_msg_seq", 0),
             biz_type=data.get("bizType") or "agent_task",
             client_id=data.get("clientId") or "",
+            threads=threads,
         )
 
     @classmethod

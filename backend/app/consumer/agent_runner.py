@@ -204,13 +204,23 @@ class AgentRunner:
             # cancelled runs still need a checkpoint_id (fork anchor, §7.4)
             checkpoint_id = await self._safe_checkpoint_id(agent, runnable_config)
             result_cache = {"status": ProcessedStatus.CANCELLED.value, "checkpoint_id": checkpoint_id}
-            await self._bridge.publish_result(
-                run_id,
-                status=ProcessedStatus.CANCELLED,
-                stream_events=message.reply_config.stream_events,
-                checkpoint_id=checkpoint_id,
-            )
-            downlink_sent = True  # set only after a successful publish (else producer retries)
+            # delete tombstone (§5.5): this run was hard-cancelled to destroy the thread. The
+            # single ``deleted`` ack covers the whole thread, so suppress the per-run
+            # ``cancelled`` downlink (and its outbox row, via _finalize's SENTINEL branch) so
+            # the client sees only ``deleted`` — not cancelled-then-deleted.
+            if await self._registry.is_tombstoned(thread_id):
+                logger.info(
+                    "Run %s cancelled by delete tombstone; suppressing cancelled downlink (deleted ack covers it)",
+                    run_id,
+                )
+            else:
+                await self._bridge.publish_result(
+                    run_id,
+                    status=ProcessedStatus.CANCELLED,
+                    stream_events=message.reply_config.stream_events,
+                    checkpoint_id=checkpoint_id,
+                )
+                downlink_sent = True  # set only after a successful publish (else producer retries)
 
         except TimeoutError:
             processed_status = ProcessedStatus.FAILED
@@ -278,6 +288,15 @@ class AgentRunner:
             # does not re-send (at-least-once; a missed mark just double-sends, deduped).
             if closed and downlink_sent:
                 await self._registry.mark_delivered(run_id)
+            # delete tombstone (§5.5): if this thread was delete-tombstoned while running, the
+            # finalize above left it idle+SENTINEL. Destroy it now reusing this run's slot (no
+            # second Scheduler round-trip). Best-effort — on failure the Scheduler tombstone
+            # sweep / §8 stale-recovery re-runs destroy (idempotent).
+            try:
+                if await self._registry.is_tombstoned(thread_id):
+                    await self.destroy(thread_id)
+            except Exception:
+                logger.exception("Post-run destroy of tombstoned thread=%s failed; sweep will retry", thread_id)
 
     # ── Core execution ────────────────────────────────────────────────────────
 
@@ -490,6 +509,63 @@ class AgentRunner:
         except Exception:
             logger.exception("Drain reject-resume failed thread=%s; finalizing anyway", thread_id)
         await self._registry.finalize_run(drain_id, None, QueuePolicy.DRAIN.value)
+
+    # ── Delete / destroy (§5.5, P7) ─────────────────────────────────────────────
+
+    async def destroy(self, thread_id: str) -> None:
+        """Destroy a delete-tombstoned thread: FS/OSS recycling + DB run-state wipe (§5.5).
+
+        Dispatched off the poll-loop (Scheduler tombstone sweep, or inline after a running
+        thread's own run finalizes). Order = stop-before-destroy is already guaranteed by the
+        caller (the run is finalized / the thread is idle/paused before this runs). Steps:
+          a. FS/OSS non-transactional prelude (idempotent, safe to re-run on crash):
+             delete checkpoint + threadData dir, then the OSS ``agent-artifacts/{tid}/`` prefix
+             (best-effort — OSS failure is logged ERROR, never blocks the local wipe);
+          b. single DB txn (run_registry.destroy_thread_state): drop run-state rows, release
+             the held ``deleted`` ack (outbox then publishes it), delete the tombstone row.
+        """
+        await self._delete_thread_dir(thread_id)
+        await self._delete_oss_prefix(thread_id)
+        destroyed = await self._registry.destroy_thread_state(thread_id)
+        if destroyed:
+            logger.info("Destroyed delete-tombstoned thread=%s (local state cleared)", thread_id)
+
+    async def _delete_thread_dir(self, thread_id: str) -> None:
+        """Delete this thread's checkpoint + threadData directory (idempotent, §5.5 step a)."""
+        # checkpoint rows (LangGraph-owned): adelete_thread when the checkpointer supports it.
+        if self._checkpointer is not None and hasattr(self._checkpointer, "adelete_thread"):
+            try:
+                await self._checkpointer.adelete_thread(thread_id)
+            except Exception:
+                logger.warning("Could not delete checkpoints for thread=%s (best-effort)", thread_id, exc_info=True)
+        # threadData dir (sandbox workspace/uploads/outputs); rmtree is blocking → offload.
+        try:
+            from deerflow.config.paths import get_paths
+
+            await asyncio.to_thread(get_paths().delete_thread_dir, thread_id)
+        except Exception:
+            logger.warning("Could not delete threadData dir for thread=%s (best-effort)", thread_id, exc_info=True)
+
+    async def _delete_oss_prefix(self, thread_id: str) -> None:
+        """Best-effort delete of the thread's OSS artifact prefix (§5.5 step a).
+
+        OSS recycling is owned by the Consumer (materials.md §9): agent-uploaded objects are
+        keyed ``agent-artifacts/{thread_id}/...``, so deletion is a bounded by-prefix batch.
+        No-op when OSS is disabled. Failure is logged ERROR for manual ops and does NOT block
+        — the local wipe + ``deleted`` ack proceed regardless (``deleted`` = local state gone).
+        """
+        from deerflow.oss.client import get_oss_client
+
+        client = get_oss_client()
+        if client is None:
+            return
+        prefix = f"agent-artifacts/{thread_id}/"
+        try:
+            deleted = await asyncio.to_thread(client.delete_prefix, prefix)
+            logger.info("OSS recycled prefix=%s objects=%d thread=%s", prefix, deleted, thread_id)
+        except Exception:
+            # best-effort旁路: orphan objects left for manual ops; never blocks destroy.
+            logger.error("OSS prefix delete FAILED prefix=%s thread=%s — left for manual cleanup", prefix, thread_id, exc_info=True)
 
     # ── Thread Fork (§7.4) ──────────────────────────────────────────────────────
 

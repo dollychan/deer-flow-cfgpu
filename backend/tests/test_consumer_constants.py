@@ -59,6 +59,7 @@ class TestProcessedStatus:
             "failed",
             "cancelled",
             "paused_for_approval",
+            "deleted",  # v2.6 (P7): type=delete per-thread ack (§5.5)
         }
 
 

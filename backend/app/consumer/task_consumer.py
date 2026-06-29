@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 from app.consumer.constants import MessageMode, ThreadStatus
 from app.consumer.run_registry import RunRegistry
-from app.consumer.schemas import SchemaValidationError, TaskMessage
+from app.consumer.schemas import SchemaValidationError, TaskMessage, build_downlink_echo
 from app.consumer.stream_bridge.mq import MQStreamBridge
 from app.consumer.timeutil import format_beijing
 
@@ -138,6 +138,8 @@ class TaskConsumer:
                 await self._handle_ping(message)
             elif message.type == "cancel":
                 await self._handle_cancel(message)
+            elif message.type == "delete":
+                await self._handle_delete(message)
             elif message.type == "task":
                 await self._handle_task(message, raw_envelope)
         except Exception as exc:
@@ -193,6 +195,37 @@ class TaskConsumer:
             message.message_id,
             outcome.drain_synthesized,
             outcome.idle_ack_synthesized,
+        )
+
+    async def _handle_delete(self, message: TaskMessage) -> None:
+        """Fan-out a ``type=delete`` into per-thread tombstones + held acks (§5.5, P7).
+
+        Fire-and-forget like cancel: ingest only stamps the durable tombstone
+        (cancel_watermark=SENTINEL) + pre-stages the held ``deleted`` ack in one transaction,
+        then pokes the Scheduler so its tombstone sweep dispatches the heavy destroy (delete
+        checkpoint / threadData / queue / OSS prefix) off the poll-loop. The commit is the
+        durability point — a crash after ACK is recovered by the sweep re-running destroy.
+        ``message.threads`` is already deduped (schema). The downlink echo carries the uplink
+        delete's context (user_id / project_id / agent_name / bizType / clientId); ingest adds
+        the per-thread message_id / thread_id / message_seq.
+        """
+        echo_base = build_downlink_echo(
+            {
+                "message_id": message.message_id,
+                "bizType": message.biz_type,
+                "clientId": message.client_id,
+                "agent_name": message.agent_name,
+                "user_id": message.user_id,
+                "project_id": message.project_id,
+            }
+        )
+        count = await self._registry.ingest_delete(message.threads, message.message_id, echo_base)
+        self._poke()
+        logger.info(
+            "Delete ingested message_id=%s threads=%d (%s)",
+            message.message_id,
+            count,
+            ",".join(message.threads[:8]) + ("…" if len(message.threads) > 8 else ""),
         )
 
     async def _handle_task(self, message: TaskMessage, raw_envelope: dict) -> None:

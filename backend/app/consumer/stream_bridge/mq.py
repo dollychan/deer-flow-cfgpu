@@ -230,6 +230,18 @@ class MQStreamBridge(StreamBridge):
         _echo = echo or {}
         seq = 1
 
+        # delete ack (v2.6, §5.5): a single ``deleted`` terminal — no buffered events / no
+        # checkpoint. ``message_seq`` carries the per-thread index (1..N) within the delete's
+        # reply stream (shared uplink message_id, distinguished by thread_id + message_seq).
+        if result_cache.get("type") == "deleted":
+            await self._send(self._build_envelope(
+                type="deleted",
+                payload={},
+                seq=_echo.get("message_seq", result_cache.get("message_seq", 1)),
+                echo=_echo,
+            ))
+            return
+
         # Replay buffered custom event stream (present when stream_events=True).
         for event_data in result_cache.get("events", []):
             await self._send(self._build_envelope(

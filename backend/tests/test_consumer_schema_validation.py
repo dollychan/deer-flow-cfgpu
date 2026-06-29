@@ -145,6 +145,30 @@ class TestValidEnvelopes:
     def test_valid_hil_resume(self):
         TaskMessage.from_dict(_resume_envelope())
 
+    def test_valid_delete_without_thread_id(self):
+        # Protocol exempts delete from envelope thread_id; targets live in payload.threads (§5.5).
+        env = {
+            "schema_version": "2.6",
+            "message_id": "d1",
+            "type": "delete",
+            "clientId": "c1",
+            "payload": {"threads": ["t1", "t2"]},
+        }
+        msg = TaskMessage.from_dict(env)
+        assert msg.thread_id == ""
+        assert msg.threads == ["t1", "t2"]
+
+    def test_delete_empty_threads_rejected(self):
+        env = {
+            "schema_version": "2.6",
+            "message_id": "d1",
+            "type": "delete",
+            "clientId": "c1",
+            "payload": {"threads": []},
+        }
+        with pytest.raises(SchemaValidationError):
+            TaskMessage.from_dict(env)
+
     def test_schema_version_absent_is_ok(self):
         env = _task_envelope()
         del env["schema_version"]

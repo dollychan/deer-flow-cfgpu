@@ -10,6 +10,16 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+# ── cancel_watermark sentinel (delete tombstone, §5.5/P7) ─────────────────────────
+# cancel_watermark is normally a real, bounded thread_msg_seq (cancel-all-seq<N barrier).
+# A delete reuses the *same* column with an unreachable sentinel = INT_MAX (PG 32-bit
+# INTEGER max): it cancels everything (no real seq ever reaches it) AND durably marks the
+# thread for destroy at the resolution point. The column thus encodes three states:
+#   0           → no cancel       → resolve to idle
+#   finite N    → cancel barrier  → resolve to idle (cancel seq < N)
+#   INT_MAX     → delete tombstone→ resolve to destroy (delete checkpoint/dir/queue/OSS)
+DELETE_SENTINEL = 2147483647
+
 
 class ThreadStatus(StrEnum):
     IDLE = "idle"
@@ -60,6 +70,7 @@ class ProcessedStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     PAUSED_FOR_APPROVAL = "paused_for_approval"
+    DELETED = "deleted"  # v2.6 (P7): per-thread delete ack, pre-staged held at ingest, released by destroy (§5.5)
 
 
 class MessageMode(StrEnum):

@@ -86,6 +86,37 @@ class OSSClient:
         )
         return object_key
 
+    def delete_prefix(self, prefix: str) -> int:
+        """Delete every object under ``prefix`` (bounded batch delete). Returns the count.
+
+        Paginates ``list_objects_v2`` and batches keys into ``delete_multiple_objects``
+        (1000-key API cap per call). Used by the Consumer's ``type=delete`` flow to recycle a
+        thread's ``agent-artifacts/{thread_id}/`` objects (cfgpu-docs/materials.md §9). The
+        caller treats any raised exception as a best-effort failure (ERROR log, manual ops),
+        so this method does not swallow errors — it surfaces them.
+        """
+        deleted = 0
+        token: str | None = None
+        while True:
+            req_kwargs: dict = {"bucket": self._bucket, "prefix": prefix, "max_keys": 1000}
+            if token:
+                req_kwargs["continuation_token"] = token
+            listing = self._client.list_objects_v2(self._oss.ListObjectsV2Request(**req_kwargs))
+            keys = [obj.key for obj in (listing.contents or []) if obj.key]
+            if keys:
+                self._client.delete_multiple_objects(
+                    self._oss.DeleteMultipleObjectsRequest(
+                        bucket=self._bucket,
+                        objects=[self._oss.DeleteObject(key=k) for k in keys],
+                        quiet=True,
+                    )
+                )
+                deleted += len(keys)
+            if not listing.is_truncated:
+                break
+            token = listing.next_continuation_token
+        return deleted
+
     def presign(self, object_key: str) -> str:
         """Always return a presigned GET URL for ``object_key`` (local HMAC, no network IO).
 
