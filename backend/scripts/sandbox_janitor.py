@@ -43,8 +43,33 @@ from app.consumer import sandbox_locks
 
 logger = logging.getLogger("sandbox_janitor")
 
-DEFAULT_PREFIX = "deer-flow-sandbox"
+DEFAULT_PREFIX = "cfdream-sandbox"
 DEFAULT_WARM_TTL = 600.0  # seconds a parked container may sit before reclaim
+
+
+def _resolve_default_prefix() -> str:
+    """Resolve the container prefix from app config, falling back to ``DEFAULT_PREFIX``.
+
+    ``sandbox.container_prefix`` in ``config.yaml`` is the single source of truth — the AIO
+    provider filters on it (``aio_sandbox_provider.py``), so the janitor must sweep the same
+    value or it silently skips every container (a config that overrides the prefix without a
+    matching ``--prefix`` would otherwise leak forever). ``get_app_config()`` only *reads*
+    config.yaml + extensions_config.json (no mkdir, no DEER_FLOW_HOME write), so it is safe to
+    call from the hardened janitor unit **as long as that unit can read the config path** —
+    set ``DEER_FLOW_CONFIG_PATH`` and mount it read-only (see ``cfgpu-docs/vm-部署.md`` §6.5).
+
+    Best-effort: if config cannot be resolved on this host the janitor still runs on the
+    hardcoded default rather than crashing (it must reclaim orphans even when no consumer or
+    config is present). An explicit ``--prefix`` CLI arg overrides this entirely (see ``main``).
+    """
+    try:
+        from deerflow.config import get_app_config
+
+        prefix = get_app_config().sandbox.container_prefix
+    except Exception:
+        logger.warning("could not load app config for container prefix; falling back to %r (pass --prefix to override)", DEFAULT_PREFIX, exc_info=True)
+        return DEFAULT_PREFIX
+    return prefix or DEFAULT_PREFIX
 
 
 def _running_sandbox_containers(prefix: str) -> list[str]:
@@ -128,14 +153,15 @@ def reclaim_once(*, prefix: str = DEFAULT_PREFIX, warm_ttl: float = DEFAULT_WARM
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Per-host AIO sandbox orphan janitor (D13)")
-    parser.add_argument("--prefix", default=DEFAULT_PREFIX, help="container name prefix (default: %(default)s)")
+    parser.add_argument("--prefix", default=None, help=f"container name prefix (default: sandbox.container_prefix from config.yaml, else {DEFAULT_PREFIX!r})")
     parser.add_argument("--warm-ttl", type=float, default=DEFAULT_WARM_TTL, help="seconds a parked container may sit before reclaim (default: %(default)s)")
     parser.add_argument("--dry-run", action="store_true", help="report what would be reclaimed without removing")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    report = reclaim_once(prefix=args.prefix, warm_ttl=args.warm_ttl, dry_run=args.dry_run)
+    prefix = args.prefix or _resolve_default_prefix()
+    report = reclaim_once(prefix=prefix, warm_ttl=args.warm_ttl, dry_run=args.dry_run)
     print(f"kept={len(report['kept'])} reclaimed={len(report['reclaimed'])}")
     if report["reclaimed"]:
         print("reclaimed: " + ", ".join(report["reclaimed"]))

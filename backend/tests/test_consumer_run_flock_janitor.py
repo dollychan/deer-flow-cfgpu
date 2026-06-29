@@ -192,7 +192,7 @@ def test_janitor_keeps_container_with_active_run_flock(janitor):
     held = sandbox_locks.acquire_run_flock("abcd1234")
     try:
         with (
-            patch.object(janitor, "_running_sandbox_containers", return_value=["deer-flow-sandbox-abcd1234"]),
+            patch.object(janitor, "_running_sandbox_containers", return_value=["cfdream-sandbox-abcd1234"]),
             patch.object(janitor, "_docker_rm_f", side_effect=rm_calls.append),
         ):
             # warm_ttl=0 + far-future now: would reclaim if it could take the lock.
@@ -200,7 +200,7 @@ def test_janitor_keeps_container_with_active_run_flock(janitor):
     finally:
         sandbox_locks.release_run_flock(held)
     assert rm_calls == []
-    assert "deer-flow-sandbox-abcd1234" in result["kept"]
+    assert "cfdream-sandbox-abcd1234" in result["kept"]
 
 
 def test_janitor_reclaims_orphan_past_ttl(janitor):
@@ -209,12 +209,12 @@ def test_janitor_reclaims_orphan_past_ttl(janitor):
     path.touch()
     os.utime(path, (1000.0, 1000.0))  # parked long ago, no holder
     with (
-        patch.object(janitor, "_running_sandbox_containers", return_value=["deer-flow-sandbox-abcd1234"]),
+        patch.object(janitor, "_running_sandbox_containers", return_value=["cfdream-sandbox-abcd1234"]),
         patch.object(janitor, "_docker_rm_f", side_effect=rm_calls.append),
     ):
         result = janitor.reclaim_once(warm_ttl=600.0, now=2000.0)
-    assert rm_calls == ["deer-flow-sandbox-abcd1234"]
-    assert "deer-flow-sandbox-abcd1234" in result["reclaimed"]
+    assert rm_calls == ["cfdream-sandbox-abcd1234"]
+    assert "cfdream-sandbox-abcd1234" in result["reclaimed"]
 
 
 def test_janitor_keeps_fresh_orphan_within_ttl(janitor):
@@ -223,12 +223,12 @@ def test_janitor_keeps_fresh_orphan_within_ttl(janitor):
     path.touch()
     os.utime(path, (1900.0, 1900.0))  # parked recently, no holder
     with (
-        patch.object(janitor, "_running_sandbox_containers", return_value=["deer-flow-sandbox-abcd1234"]),
+        patch.object(janitor, "_running_sandbox_containers", return_value=["cfdream-sandbox-abcd1234"]),
         patch.object(janitor, "_docker_rm_f", side_effect=rm_calls.append),
     ):
         result = janitor.reclaim_once(warm_ttl=600.0, now=2000.0)
     assert rm_calls == []
-    assert "deer-flow-sandbox-abcd1234" in result["kept"]
+    assert "cfdream-sandbox-abcd1234" in result["kept"]
 
 
 def test_janitor_recovers_from_crash_released_flock(janitor):
@@ -239,21 +239,72 @@ def test_janitor_recovers_from_crash_released_flock(janitor):
     path = sandbox_locks.run_flock_path("abcd1234")
     os.utime(path, (1000.0, 1000.0))
     with (
-        patch.object(janitor, "_running_sandbox_containers", return_value=["deer-flow-sandbox-abcd1234"]),
+        patch.object(janitor, "_running_sandbox_containers", return_value=["cfdream-sandbox-abcd1234"]),
         patch.object(janitor, "_docker_rm_f", side_effect=rm_calls.append),
     ):
         janitor.reclaim_once(warm_ttl=600.0, now=2000.0)
-    assert rm_calls == ["deer-flow-sandbox-abcd1234"]
+    assert rm_calls == ["cfdream-sandbox-abcd1234"]
 
 
 def test_janitor_missing_flock_file_is_grace_kept(janitor):
     """A container with no flock file yet (fresh create) is given one TTL of grace."""
     rm_calls: list[str] = []
     with (
-        patch.object(janitor, "_running_sandbox_containers", return_value=["deer-flow-sandbox-abcd1234"]),
+        patch.object(janitor, "_running_sandbox_containers", return_value=["cfdream-sandbox-abcd1234"]),
         patch.object(janitor, "_docker_rm_f", side_effect=rm_calls.append),
     ):
         result = janitor.reclaim_once(warm_ttl=600.0, now=time.time())
     assert rm_calls == []
-    assert "deer-flow-sandbox-abcd1234" in result["kept"]
+    assert "cfdream-sandbox-abcd1234" in result["kept"]
     assert sandbox_locks.run_flock_path("abcd1234").exists()  # adopted with fresh mtime
+
+
+# ── prefix resolution: config is the single source of truth, with safe fallback ──
+
+
+def _fake_config(container_prefix):
+    cfg = MagicMock()
+    cfg.sandbox.container_prefix = container_prefix
+    return cfg
+
+
+def test_resolve_default_prefix_reads_config(janitor):
+    """When config loads, its sandbox.container_prefix wins (matches the provider).
+
+    Uses a value distinct from DEFAULT_PREFIX so a pass proves config was read, not the
+    hardcoded fallback coincidentally matching.
+    """
+    with patch("deerflow.config.get_app_config", return_value=_fake_config("from-config-prefix")):
+        assert janitor._resolve_default_prefix() == "from-config-prefix"
+
+
+def test_resolve_default_prefix_falls_back_when_config_unset(janitor):
+    """A None container_prefix (config default) falls back to the hardcoded prefix."""
+    with patch("deerflow.config.get_app_config", return_value=_fake_config(None)):
+        assert janitor._resolve_default_prefix() == janitor.DEFAULT_PREFIX
+
+
+def test_resolve_default_prefix_falls_back_when_config_unavailable(janitor):
+    """If the config load chain raises, the janitor still runs on the hardcoded default."""
+    with patch("deerflow.config.get_app_config", side_effect=RuntimeError("no config on this host")):
+        assert janitor._resolve_default_prefix() == janitor.DEFAULT_PREFIX
+
+
+def test_main_uses_config_prefix_when_no_cli_arg(janitor):
+    """`sandbox_janitor.py` (no --prefix) sweeps the prefix configured in config.yaml."""
+    with (
+        patch("deerflow.config.get_app_config", return_value=_fake_config("from-config-prefix")),
+        patch.object(janitor, "reclaim_once", return_value={"kept": [], "reclaimed": []}) as reclaim,
+    ):
+        janitor.main([])
+    assert reclaim.call_args.kwargs["prefix"] == "from-config-prefix"
+
+
+def test_main_cli_prefix_overrides_config(janitor):
+    """An explicit --prefix beats both config and the hardcoded default."""
+    with (
+        patch("deerflow.config.get_app_config", return_value=_fake_config("cfdream-sandbox")),
+        patch.object(janitor, "reclaim_once", return_value={"kept": [], "reclaimed": []}) as reclaim,
+    ):
+        janitor.main(["--prefix", "explicit-prefix"])
+    assert reclaim.call_args.kwargs["prefix"] == "explicit-prefix"
