@@ -386,18 +386,68 @@ class TestOSSDeletePrefix:
         assert c._client.deleted == []
 
 
+def _patch_oss_recycle(monkeypatch, *, enabled: bool) -> None:
+    """Force the ``oss.delete_artifacts_on_thread_delete`` switch in _delete_oss_prefix."""
+    from deerflow.oss.oss_config import OSSConfig
+
+    monkeypatch.setattr(
+        "deerflow.oss.oss_config.get_oss_config",
+        lambda: OSSConfig(delete_artifacts_on_thread_delete=enabled),
+    )
+
+
 class TestAgentRunnerOSSPrelude:
+    @pytest.mark.anyio
+    async def test_recycle_disabled_preserves_prefix(self, reg, monkeypatch):
+        # Default off: delete_prefix must NOT be called even with a live client (preserve).
+        from app.consumer.agent_runner import AgentRunner
+
+        _patch_oss_recycle(monkeypatch, enabled=False)
+
+        class _Spy:
+            called = False
+
+            def delete_prefix(self, prefix):
+                _Spy.called = True
+                return 1
+
+        monkeypatch.setattr("deerflow.oss.client.get_oss_client", lambda: _Spy())
+        runner = AgentRunner(reg, _StubBridge(), checkpointer=None)
+        await runner._delete_oss_prefix("t1")
+        assert _Spy.called is False
+
+    @pytest.mark.anyio
+    async def test_recycle_enabled_deletes_prefix(self, reg, monkeypatch):
+        # Switch on: delete_prefix called with the thread's agent-artifacts prefix.
+        from app.consumer.agent_runner import AgentRunner
+
+        _patch_oss_recycle(monkeypatch, enabled=True)
+        seen: list[str] = []
+
+        class _Spy:
+            def delete_prefix(self, prefix):
+                seen.append(prefix)
+                return 3
+
+        monkeypatch.setattr("deerflow.oss.client.get_oss_client", lambda: _Spy())
+        runner = AgentRunner(reg, _StubBridge(), checkpointer=None)
+        await runner._delete_oss_prefix("t1")
+        assert seen == ["agent-artifacts/t1/"]
+
     @pytest.mark.anyio
     async def test_oss_off_is_noop(self, reg, monkeypatch):
         from app.consumer.agent_runner import AgentRunner
 
+        _patch_oss_recycle(monkeypatch, enabled=True)
         monkeypatch.setattr("deerflow.oss.client.get_oss_client", lambda: None)
         runner = AgentRunner(reg, _StubBridge(), checkpointer=None)
-        await runner._delete_oss_prefix("t1")  # no client → silent no-op
+        await runner._delete_oss_prefix("t1")  # switch on but no client → silent no-op
 
     @pytest.mark.anyio
     async def test_oss_failure_is_swallowed(self, reg, monkeypatch):
         from app.consumer.agent_runner import AgentRunner
+
+        _patch_oss_recycle(monkeypatch, enabled=True)
 
         class _Boom:
             def delete_prefix(self, prefix):

@@ -17,6 +17,11 @@ class OSSConfig(BaseModel):
     URL before writing to ``artifacts``; with ``presigned_url`` false it writes the
     bare object key (the path inside the bucket) instead.
 
+    ``delete_artifacts_on_thread_delete`` (default false) gates whether handling an MQ
+    ``type=delete`` also recycles the thread's OSS artifact prefix
+    ``agent-artifacts/{thread_id}/``. Off by default so OSS artifacts survive a thread
+    delete; turn on to have the Consumer reclaim them alongside the local state wipe.
+
     Config path: ``oss:`` section in config.yaml.
     All string fields support ``$ENV_VAR`` substitution via AppConfig.resolve_env_variables.
 
@@ -46,6 +51,10 @@ class OSSConfig(BaseModel):
     presigned_url: bool = Field(
         default=True,
         description="When true, uploads return a presigned GET URL; when false, return the bare object key (bucket path).",
+    )
+    delete_artifacts_on_thread_delete: bool = Field(
+        default=False,
+        description="When true, handling an MQ type=delete also recycles the thread's OSS artifact prefix agent-artifacts/{thread_id}/; when false (default), OSS artifacts are left untouched and preserved.",
     )
 
 

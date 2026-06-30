@@ -1622,6 +1622,7 @@ run_events:
 #   region: cn-beijing                 # AliOSS region, required for V4 signing
 #   presigned_url_expires_days: 7      # max 7 days (AliOSS V4 limit)
 #   presigned_url: true                # true: return presigned URL; false: return bare object key (bucket path)
+#   delete_artifacts_on_thread_delete: false  # true: deleting a thread (MQ type=delete) also recycles its OSS prefix agent-artifacts/{thread_id}/; false (default): preserve OSS artifacts
 
 # ============================================================================
 # SSO / OIDC Authentication (optional)

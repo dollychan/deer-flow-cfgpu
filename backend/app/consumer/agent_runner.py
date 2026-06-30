@@ -551,11 +551,17 @@ class AgentRunner:
 
         OSS recycling is owned by the Consumer (materials.md §9): agent-uploaded objects are
         keyed ``agent-artifacts/{thread_id}/...``, so deletion is a bounded by-prefix batch.
-        No-op when OSS is disabled. Failure is logged ERROR for manual ops and does NOT block
-        — the local wipe + ``deleted`` ack proceed regardless (``deleted`` = local state gone).
+        Gated by ``oss.delete_artifacts_on_thread_delete`` (default off): when off, the OSS
+        prefix is left untouched and preserved; only the local state is wiped. Also a no-op
+        when OSS is disabled. Failure is logged ERROR for manual ops and does NOT block — the
+        local wipe + ``deleted`` ack proceed regardless (``deleted`` = local state gone).
         """
         from deerflow.oss.client import get_oss_client
+        from deerflow.oss.oss_config import get_oss_config
 
+        if not get_oss_config().delete_artifacts_on_thread_delete:
+            logger.debug("OSS artifact recycling disabled (oss.delete_artifacts_on_thread_delete=false); preserving prefix for thread=%s", thread_id)
+            return
         client = get_oss_client()
         if client is None:
             return
