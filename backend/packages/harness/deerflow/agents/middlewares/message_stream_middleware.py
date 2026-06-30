@@ -19,9 +19,12 @@ Hooks:
         the LLM still sees the error and stops retrying.
       * Artifact tool with no items: an ``artifact`` tool emits an ``artifact`` event only
         when it carries stable items. With no items it either suppresses (in-flight
-        intermediate, e.g. generate_*/task_* polling a not-yet-ready URL — status="success")
-        or falls back to a ``tool_result`` (terminal failure — status="error") so the client
-        still learns the generation failed.
+        intermediate, e.g. generate_*/task_* polling a not-yet-ready URL — status="success",
+        no error key) or falls back to a ``tool_result`` (terminal failure) so the client
+        still learns the generation failed. A failure is recognised either by
+        status="error" or by a truthy ``error`` in the tool's own content (cfgpu media tools
+        report task_failed as a non-raising ``{"error": true, ...}`` with status="success");
+        the fallback ``tool_result`` is emitted with an explicit ``error`` status.
     For MCP tools, any ``structuredContent`` (carried on
     ``ToolMessage.artifact["structured_content"]``) is merged into the emitted
     event ``content`` — a client-only side channel that the model never saw, so the
@@ -335,7 +338,7 @@ class MessageStreamMiddleware(AgentMiddleware):
                 return {"items": parsed}
         return {"message": _truncate(text, self._max_content_chars)}
 
-    def _emit_tool_result(self, tool_msg: ToolMessage) -> None:
+    def _emit_tool_result(self, tool_msg: ToolMessage, status: str | None = None) -> None:
         content = self._structure_content(_extract_text_content(tool_msg.content))
         # Empty search result (content carries an ``error`` key, value-agnostic) → suppress
         # the downstream tool_result. content/ToolMessage is unchanged, so the LLM still sees
@@ -350,7 +353,11 @@ class MessageStreamMiddleware(AgentMiddleware):
         sc = self._structured_side_channel(tool_msg)
         if sc:
             content = {**content, **sc}
-        status = getattr(tool_msg, "status", None) or "success"
+        # ``status`` override lets the artifact terminal-failure fallback surface a uniform
+        # ``error`` status even when the tool reported the failure in its content while leaving
+        # ToolMessage.status at the default ``success`` (cfgpu media tools — see
+        # _content_signals_error). Otherwise derive it from the ToolMessage.
+        status = status or getattr(tool_msg, "status", None) or "success"
 
         self._emit({
             "type": "tool_result",
@@ -465,6 +472,31 @@ class MessageStreamMiddleware(AgentMiddleware):
             self._stamp_display(result, [it["id"] for it in items])
         return items
 
+    @staticmethod
+    def _content_signals_error(tool_msg: ToolMessage) -> bool:
+        """True when the tool's own result content marks a terminal failure.
+
+        cfgpu media tools report a failed task as a *normal* (non-raising) result whose
+        content JSON carries ``{"error": true, "error_type": ...}`` while
+        ``ToolMessage.status`` stays ``"success"`` — the cfgpu MCP server does not set the
+        MCP ``isError`` flag (if it did, ``deerflow/mcp/tools.py`` would raise a
+        ``ToolException`` that ``ToolErrorHandlingMiddleware`` — wrapped *outside* this
+        middleware — would catch, so the resulting error ToolMessage would never reach this
+        hook). Gating only on ``ToolMessage.status`` would therefore misclassify such a
+        failure as an in-flight intermediate and silently drop it. An in-flight poll
+        (``task_status`` → ``{"status": "processing"}``) has no ``error`` key, so this stays
+        false for it; the ``error`` value is checked for truthiness so a ``false``/absent
+        ``error`` field on a success result does not trip it.
+        """
+        text = _extract_text_content(tool_msg.content)
+        if not text:
+            return False
+        try:
+            parsed = json.loads(text.strip())
+        except (ValueError, TypeError):
+            return False
+        return isinstance(parsed, dict) and bool(parsed.get("error"))
+
     def _emit_for_tool_message(self, request: Any, tool_msg: ToolMessage, result: Any) -> None:
         """Dispatch a resolved ToolMessage to the right event by tool visibility, then
         strip the client-only ``structured_content`` so it never reaches the checkpoint.
@@ -474,16 +506,20 @@ class MessageStreamMiddleware(AgentMiddleware):
             # artifact-visibility tools only put an ``artifact`` event on the wire when they
             # carry stable items (self-built or projected from captured materials). With no
             # items the result is either an in-flight intermediate (generate_*/task_* polling
-            # a not-yet-ready URL — status="success") or a terminal failure (status="error").
+            # a not-yet-ready URL — status="success", no error key) or a terminal failure. A
+            # failure surfaces in one of two shapes: ToolMessage.status=="error", or the tool's
+            # own content carries a truthy ``error`` (cfgpu media tools report task_failed as a
+            # non-raising {"error": true, ...} with status="success"; see _content_signals_error).
             # We suppress the intermediate (the client should only see the deliverable, not the
-            # waiting chatter) but still surface a terminal failure as a tool_result so the
-            # client learns the generation failed. ToolMessage.content is never modified — the
-            # LLM sees every intermediate/terminal result regardless of what we emit (I5).
+            # waiting chatter) but surface either failure shape as a tool_result — with an
+            # explicit ``error`` status so the client gets a uniform signal — so the client
+            # learns the generation failed. ToolMessage.content is never modified — the LLM
+            # sees every intermediate/terminal result regardless of what we emit (I5).
             items = self._artifact_items(request, result, tool_msg)
             if items:
                 self._emit_artifact(tool_msg, items)
-            elif (getattr(tool_msg, "status", None) or "success") == "error":
-                self._emit_tool_result(tool_msg)
+            elif (getattr(tool_msg, "status", None) or "success") == "error" or self._content_signals_error(tool_msg):
+                self._emit_tool_result(tool_msg, status="error")
         elif visibility == VISIBILITY_PROGRESS:
             self._emit_tool_result(tool_msg)
         # The side channel has now been delivered downstream (or, for internal tools,

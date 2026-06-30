@@ -416,6 +416,46 @@ class TestWrapToolCallSync:
         assert captured[0]["type"] == "tool_result"
         assert "Error" in captured[0]["content"]["message"]
 
+    def test_artifact_tool_content_error_falls_back_to_tool_result(self):
+        """An artifact tool whose content reports a failure (truthy ``error``) while
+        ToolMessage.status stays ``success`` — cfgpu's non-raising task_failed shape — still
+        surfaces as a tool_result with an explicit ``error`` status so the client learns the
+        generation failed (it would otherwise be misread as an in-flight intermediate)."""
+        from langgraph.types import Command
+        mw = _middleware()
+        payload = {"error": True, "error_type": "task_failed", "message": "任务执行失败", "retryable": False}
+        tm = _tool_msg(content=json.dumps(payload), name="cfdream_generate_image", status="success")
+        cmd = Command(update={"messages": [tm]})
+        req = _tool_request(_tool("cfdream_generate_image", "artifact"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=cmd))
+
+        assert len(captured) == 1
+        evt = captured[0]
+        assert evt["type"] == "tool_result"
+        assert evt["status"] == "error"  # uniform error signal despite ToolMessage.status="success"
+        assert evt["content"] == payload  # clean structured error preserved (no prose mangling)
+
+    def test_artifact_tool_falsy_error_key_not_treated_as_failure(self):
+        """A success result carrying ``error: false`` (no items) is an in-flight intermediate,
+        not a failure — it must stay suppressed."""
+        from langgraph.types import Command
+        mw = _middleware()
+        payload = {"task_id": "task-1", "status": "processing", "error": False}
+        tm = _tool_msg(content=json.dumps(payload), name="cfdream_task_status", status="success")
+        cmd = Command(update={"messages": [tm]})
+        req = _tool_request(_tool("cfdream_task_status", "artifact"))
+        captured: list[dict] = []
+
+        with patch("deerflow.agents.middlewares.message_stream_middleware.get_stream_writer") as mock_writer:
+            mock_writer.return_value = captured.append
+            mw.wrap_tool_call(req, MagicMock(return_value=cmd))
+
+        assert captured == []
+
     def test_artifact_tool_intermediate_success_no_items_suppressed(self):
         """An artifact tool's in-flight intermediate (status='success', no items — e.g.
         generate_*/task_* polling a not-yet-ready URL) emits nothing downstream. The LLM
