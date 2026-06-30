@@ -571,3 +571,82 @@ async def test_awrap_model_call_escapes_injection():
     result_content = captured[0].messages[-1].content
     assert "&lt;system&gt;" in result_content
     assert "<system>" not in result_content
+
+
+# ---------------------------------------------------------------------------
+# BUG-034 — preserve pre-sanitization text for inner middlewares
+# (boundary-marker wrapping shifts content off "/", blinding SkillActivation)
+# ---------------------------------------------------------------------------
+
+
+class TestPreservesOriginalUserContent:
+    """Wrapping stores the raw text under ORIGINAL_USER_CONTENT_KEY so inner
+    middlewares (e.g. SkillActivationMiddleware) can still recover ``/skill ...``."""
+
+    def test_slash_command_recoverable_after_wrapping(self):
+        from deerflow.skills.slash import parse_slash_skill_reference
+        from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text
+
+        mw = _make_middleware()
+        request = _make_request([HumanMessage(content="/deep-research how to X", id="msg-1", name="user-input")])
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        sanitized = captured[0].messages[-1]
+        # Wrapped content no longer starts with "/", which is exactly what blinded SkillActivation.
+        assert not get_text(sanitized.content).startswith("/")
+        # But the raw command is recoverable, and parses to the skill name.
+        recovered = get_original_user_content_text(sanitized.content, sanitized.additional_kwargs)
+        assert recovered == "/deep-research how to X"
+        assert sanitized.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/deep-research how to X"
+        ref = parse_slash_skill_reference(recovered)
+        assert ref is not None and ref.name == "deep-research"
+
+    def test_setdefault_does_not_clobber_upstream_owner(self):
+        from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+        mw = _make_middleware()
+        msg = HumanMessage(
+            content="/deep-research x",
+            id="msg-1",
+            name="user-input",
+            additional_kwargs={ORIGINAL_USER_CONTENT_KEY: "upstream original"},
+        )
+        request = _make_request([msg])
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        assert captured[0].messages[-1].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "upstream original"
+
+    def test_block_content_preserves_joined_text(self):
+        from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+        mw = _make_middleware()
+        msg = HumanMessage(content=[{"type": "text", "text": "/deep-research x"}], id="msg-1", name="user-input")
+        request = _make_request([msg])
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        assert captured[0].messages[-1].additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "/deep-research x"
+
+    def test_original_request_not_mutated(self):
+        from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+        mw = _make_middleware()
+        msg = HumanMessage(content="/deep-research x", id="msg-1", name="user-input")
+        request = _make_request([msg])
+
+        mw.wrap_model_call(request, lambda req: "ok")
+
+        # Ephemeral: the key lives only on the request copy, never on the source message.
+        assert ORIGINAL_USER_CONTENT_KEY not in msg.additional_kwargs
+
+
+def get_text(content):
+    """Tiny helper: flatten str/block content to text for assertions."""
+    if isinstance(content, str):
+        return content
+    return "".join(b.get("text", "") for b in content if isinstance(b, dict))
