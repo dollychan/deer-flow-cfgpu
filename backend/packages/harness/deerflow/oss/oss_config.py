@@ -34,7 +34,8 @@ class OSSConfig(BaseModel):
           bucket: cf-dream
           region: cn-beijing
           presigned_url_expires_days: 7
-          presigned_url: true
+          presigned_url: false
+          delete_artifacts_on_thread_delete: false
     """
 
     enabled: bool = Field(default=False, description="Enable OSS upload for presented files")
@@ -49,7 +50,7 @@ class OSSConfig(BaseModel):
         description="Presigned URL validity in days (AliOSS V4 max: 7 days)",
     )
     presigned_url: bool = Field(
-        default=True,
+        default=False,
         description="When true, uploads return a presigned GET URL; when false, return the bare object key (bucket path).",
     )
     delete_artifacts_on_thread_delete: bool = Field(
