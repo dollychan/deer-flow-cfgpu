@@ -12,12 +12,13 @@ import asyncio
 import contextlib
 import json
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.consumer.agent_runner import AgentRunner
+from app.consumer import agent_runner as ar_mod
+from app.consumer.agent_runner import AgentRunner, _StopOutcome
 from app.consumer.constants import ProcessedStatus, QueuePolicy, ThreadStatus
 from app.consumer.models import (  # noqa: F401  (register tables on Base)
     ConsumerInstanceRow,
@@ -109,7 +110,10 @@ class TestBuildRunMessage:
     def test_merges_prefix_and_collect_batch(self):
         runner = _runner(MagicMock())
         claimed = ClaimedRun(
-            thread_id="t1", message_id="c1", policy=QueuePolicy.COLLECT.value, seq=2,
+            thread_id="t1",
+            message_id="c1",
+            policy=QueuePolicy.COLLECT.value,
+            seq=2,
             input_bodies=[
                 _envelope("p0", seq=1, messages=[{"role": "user", "content": "history"}]),
                 _envelope("c1", seq=2, messages=[{"role": "user", "content": "first"}]),
@@ -126,8 +130,13 @@ class TestBuildRunMessage:
     def test_single_followup_no_merge(self):
         runner = _runner(MagicMock())
         claimed = ClaimedRun(
-            thread_id="t1", message_id="m1", policy=QueuePolicy.FOLLOWUP.value, seq=1,
-            input_bodies=[_envelope("m1", seq=1)], batch_message_ids=["m1"], prefix_message_ids=[],
+            thread_id="t1",
+            message_id="m1",
+            policy=QueuePolicy.FOLLOWUP.value,
+            seq=1,
+            input_bodies=[_envelope("m1", seq=1)],
+            batch_message_ids=["m1"],
+            prefix_message_ids=[],
         )
         msg = runner._build_run_message(claimed)
         assert msg.message_id == "m1"
@@ -144,7 +153,8 @@ class TestRunFinalize:
         runner = _runner(reg)
         monkeypatch.setattr(runner, "_build_graph", lambda cfg: MagicMock())
         monkeypatch.setattr(
-            runner, "_execute",
+            runner,
+            "_execute",
             lambda *a, **k: _coro((False, {"status": "success", "checkpoint_id": "ck1"})),
         )
         await runner.run(claimed)
@@ -164,7 +174,8 @@ class TestRunFinalize:
         runner = _runner(reg)
         monkeypatch.setattr(runner, "_build_graph", lambda cfg: MagicMock())
         monkeypatch.setattr(
-            runner, "_execute",
+            runner,
+            "_execute",
             lambda *a, **k: _coro((True, {"status": "paused_for_approval", "checkpoint_id": "ck1"})),
         )
         await runner.run(claimed)
@@ -267,10 +278,7 @@ class _DrainAgent:
     def __init__(self, pending_ids):
         self.astream_calls = []
         snap = SimpleNamespace(
-            tasks=[SimpleNamespace(interrupts=[
-                SimpleNamespace(value={"type": "tool_approval_required",
-                                       "tool_calls": [{"id": i} for i in pending_ids]})
-            ])] if pending_ids else [],
+            tasks=[SimpleNamespace(interrupts=[SimpleNamespace(value={"type": "tool_approval_required", "tool_calls": [{"id": i} for i in pending_ids]})])] if pending_ids else [],
             config={"configurable": {"checkpoint_id": "ck"}},
             values={},
         )
@@ -291,10 +299,16 @@ class TestDrainBranch:
     async def test_drain_rejects_and_finalizes_no_downlink(self, reg, sf, monkeypatch):
         # synthesize a drain row via fold (paused gate cleared)
         async with sf() as session:
-            session.add(ThreadRunStateRow(
-                thread_id="t1", instance_id="i", message_id="run3",
-                status=ThreadStatus.PAUSED, last_resolved_seq=3, cancel_watermark=0,
-            ))
+            session.add(
+                ThreadRunStateRow(
+                    thread_id="t1",
+                    instance_id="i",
+                    message_id="run3",
+                    status=ThreadStatus.PAUSED,
+                    last_resolved_seq=3,
+                    cancel_watermark=0,
+                )
+            )
             await session.commit()
         await reg.fold_cancel_watermark("t1", 5)
         claimed = await reg.claim_next_runnable("i1")
@@ -326,10 +340,16 @@ class TestDrainBranch:
     @pytest.mark.anyio
     async def test_drain_already_empty_just_finalizes(self, reg, sf, monkeypatch):
         async with sf() as session:
-            session.add(ThreadRunStateRow(
-                thread_id="t1", instance_id="i", message_id="run3",
-                status=ThreadStatus.PAUSED, last_resolved_seq=3, cancel_watermark=0,
-            ))
+            session.add(
+                ThreadRunStateRow(
+                    thread_id="t1",
+                    instance_id="i",
+                    message_id="run3",
+                    status=ThreadStatus.PAUSED,
+                    last_resolved_seq=3,
+                    cancel_watermark=0,
+                )
+            )
             await session.commit()
         await reg.fold_cancel_watermark("t1", 5)
         claimed = await reg.claim_next_runnable("i1")
@@ -367,8 +387,12 @@ class _FakeCheckpointer:
 
 def _fork_message(new_tid="child", parent="parent"):
     env = {
-        "schema_version": "2.5", "message_id": "f1", "type": "task", "thread_id": new_tid,
-        "thread_msg_seq": 1, "clientId": "c1",
+        "schema_version": "2.5",
+        "message_id": "f1",
+        "type": "task",
+        "thread_id": new_tid,
+        "thread_msg_seq": 1,
+        "clientId": "c1",
         "payload": {
             "config": {"fork": {"parent_thread_id": parent}},
             "command": {"update": {"tool_approvals": {"tc1": {"status": "approved"}}}},
@@ -382,7 +406,8 @@ class TestForkInit:
     @pytest.mark.anyio
     async def test_copies_parent_and_strips_resume(self, reg):
         parent_tuple = SimpleNamespace(
-            checkpoint={"id": "p-ckpt"}, metadata={"m": 1},
+            checkpoint={"id": "p-ckpt"},
+            metadata={"m": 1},
             pending_writes=[("task-a", "__resume__", "old"), ("task-a", "__interrupt__", "keep")],
             config={"configurable": {"thread_id": "parent"}},
         )
@@ -412,10 +437,15 @@ class TestCancelWatcher:
     @pytest.mark.anyio
     async def test_cancels_when_watermark_covers_seq(self, reg, sf):
         async with sf() as session:
-            session.add(ThreadRunStateRow(
-                thread_id="t1", instance_id="i", message_id="m1",
-                status=ThreadStatus.RUNNING, cancel_watermark=9,
-            ))
+            session.add(
+                ThreadRunStateRow(
+                    thread_id="t1",
+                    instance_id="i",
+                    message_id="m1",
+                    status=ThreadStatus.RUNNING,
+                    cancel_watermark=9,
+                )
+            )
             await session.commit()
         runner = _runner(reg)
 
@@ -433,10 +463,15 @@ class TestCancelWatcher:
     @pytest.mark.anyio
     async def test_no_cancel_when_seq_above_watermark(self, reg, sf):
         async with sf() as session:
-            session.add(ThreadRunStateRow(
-                thread_id="t1", instance_id="i", message_id="m1",
-                status=ThreadStatus.RUNNING, cancel_watermark=2,
-            ))
+            session.add(
+                ThreadRunStateRow(
+                    thread_id="t1",
+                    instance_id="i",
+                    message_id="m1",
+                    status=ThreadStatus.RUNNING,
+                    cancel_watermark=2,
+                )
+            )
             await session.commit()
         runner = _runner(reg)
         target = asyncio.create_task(asyncio.sleep(0.05))
@@ -450,10 +485,15 @@ class TestCancelWatcher:
     async def test_sets_cancel_event_then_hard_cancel_when_unprotected(self, reg, sf):
         """No protected tool in flight → cooperative event set AND hard cancel (BUG-009 §4.3)."""
         async with sf() as session:
-            session.add(ThreadRunStateRow(
-                thread_id="t1", instance_id="i", message_id="m1",
-                status=ThreadStatus.RUNNING, cancel_watermark=9,
-            ))
+            session.add(
+                ThreadRunStateRow(
+                    thread_id="t1",
+                    instance_id="i",
+                    message_id="m1",
+                    status=ThreadStatus.RUNNING,
+                    cancel_watermark=9,
+                )
+            )
             await session.commit()
         runner = _runner(reg)
         cancel_state = CancelState(event=asyncio.Event())  # protected_in_flight=0
@@ -462,9 +502,7 @@ class TestCancelWatcher:
             await asyncio.sleep(5)
 
         target = asyncio.create_task(_target())
-        watcher = asyncio.create_task(
-            runner._cancel_watcher("t1", current_task_seq=3, runner_task=target, cancel_state=cancel_state, poll_interval=0)
-        )
+        watcher = asyncio.create_task(runner._cancel_watcher("t1", current_task_seq=3, runner_task=target, cancel_state=cancel_state, poll_interval=0))
         with pytest.raises(asyncio.CancelledError):
             await target
         assert cancel_state.event.is_set()  # cooperative flag raised alongside the hard cancel
@@ -478,10 +516,15 @@ class TestCancelWatcher:
         so its tool_result is not lost to the astream teardown. Once it drains
         (protected_in_flight→0), the next poll hard-cancels."""
         async with sf() as session:
-            session.add(ThreadRunStateRow(
-                thread_id="t1", instance_id="i", message_id="m1",
-                status=ThreadStatus.RUNNING, cancel_watermark=9,
-            ))
+            session.add(
+                ThreadRunStateRow(
+                    thread_id="t1",
+                    instance_id="i",
+                    message_id="m1",
+                    status=ThreadStatus.RUNNING,
+                    cancel_watermark=9,
+                )
+            )
             await session.commit()
         runner = _runner(reg)
         cancel_state = CancelState(event=asyncio.Event(), protected_in_flight=1)
@@ -491,9 +534,7 @@ class TestCancelWatcher:
 
         target = asyncio.create_task(_target())
         # Small non-zero interval so the defer path does not hot-loop the DB.
-        watcher = asyncio.create_task(
-            runner._cancel_watcher("t1", current_task_seq=3, runner_task=target, cancel_state=cancel_state, poll_interval=0.01)
-        )
+        watcher = asyncio.create_task(runner._cancel_watcher("t1", current_task_seq=3, runner_task=target, cancel_state=cancel_state, poll_interval=0.01))
         # Let the watcher poll a few times: event must be set, but the run is NOT
         # hard-cancelled while the protected tool is in flight.
         await asyncio.sleep(0.08)
@@ -507,6 +548,219 @@ class TestCancelWatcher:
         watcher.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await watcher  # release the watcher's DB session before sf disposes the engine
+
+
+# ── timeout reuses the cancel path (BUG-022) ─────────────────────────────────
+
+
+class TestTimeoutReusesCancelPath:
+    """``timeout_seconds`` now fires through the cancel-watcher's conditional hard-cancel +
+    docker-kill path instead of a bare ``asyncio.wait_for`` (BUG-022). A bare wait_for only
+    cancels its inner task and never docker-kills, so a tool wedged below asyncio's reach
+    (e.g. an MCP call that never returns) hung the wait_for forever and silently defeated the
+    timeout. Routing through the watcher gives the deadline the same teeth as a user cancel.
+    """
+
+    @pytest.mark.anyio
+    async def test_timeout_hard_cancels_and_records_reason(self, reg):
+        """No watermark, nothing protected → soft deadline → hard cancel + kill, reason=timeout."""
+        runner = _runner(reg)
+        runner._kill_thread_sandbox = AsyncMock()
+        cancel_state = CancelState(event=asyncio.Event())  # protected_in_flight=0
+        outcome = _StopOutcome()
+
+        async def _target():
+            await asyncio.sleep(5)
+
+        target = asyncio.create_task(_target())
+        watcher = asyncio.create_task(
+            runner._cancel_watcher(
+                "t1",
+                current_task_seq=3,
+                runner_task=target,
+                cancel_state=cancel_state,
+                poll_interval=0.01,
+                timeout_seconds=0.02,
+                outcome=outcome,
+            )
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await target
+        await watcher
+        assert outcome.reason == "timeout"
+        assert cancel_state.event.is_set()  # cooperative flag raised alongside the hard cancel
+        runner._kill_thread_sandbox.assert_awaited_once_with("t1")
+
+    @pytest.mark.anyio
+    async def test_user_cancel_wins_reason_over_timeout(self, reg, sf):
+        """A cancel-watermark covering the seq records reason='cancel' even if the deadline also passed."""
+        async with sf() as session:
+            session.add(
+                ThreadRunStateRow(
+                    thread_id="t1",
+                    instance_id="i",
+                    message_id="m1",
+                    status=ThreadStatus.RUNNING,
+                    cancel_watermark=9,
+                )
+            )
+            await session.commit()
+        runner = _runner(reg)
+        runner._kill_thread_sandbox = AsyncMock()
+        cancel_state = CancelState(event=asyncio.Event())
+        outcome = _StopOutcome()
+
+        async def _target():
+            await asyncio.sleep(5)
+
+        target = asyncio.create_task(_target())
+        watcher = asyncio.create_task(
+            runner._cancel_watcher(
+                "t1",
+                current_task_seq=3,
+                runner_task=target,
+                cancel_state=cancel_state,
+                poll_interval=0.01,
+                timeout_seconds=0.02,
+                outcome=outcome,
+            )
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await target
+        await watcher
+        assert outcome.reason == "cancel"
+
+    @pytest.mark.anyio
+    async def test_timeout_force_cancels_wedged_protected_tool_after_grace(self, reg, monkeypatch):
+        """Safety net: a protected tool that never drains must not defeat the deadline. After
+        ``_TIMEOUT_HARD_GRACE_SECONDS`` the watcher force-cancels regardless of
+        ``protected_in_flight`` — the gap the old wait_for could not close."""
+        monkeypatch.setattr(ar_mod, "_TIMEOUT_HARD_GRACE_SECONDS", 0.05)
+        runner = _runner(reg)
+        runner._kill_thread_sandbox = AsyncMock()
+        cancel_state = CancelState(event=asyncio.Event(), protected_in_flight=1)  # never drains
+
+        async def _target():
+            await asyncio.sleep(5)
+
+        target = asyncio.create_task(_target())
+        outcome = _StopOutcome()
+        watcher = asyncio.create_task(
+            runner._cancel_watcher(
+                "t1",
+                current_task_seq=3,
+                runner_task=target,
+                cancel_state=cancel_state,
+                poll_interval=0.01,
+                timeout_seconds=0.02,
+                outcome=outcome,
+            )
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await target  # force-cancelled despite protected_in_flight=1
+        await watcher
+        assert outcome.reason == "timeout"
+        runner._kill_thread_sandbox.assert_awaited_once_with("t1")
+
+    @pytest.mark.anyio
+    async def test_user_cancel_keeps_deferring_to_protected_drain(self, reg, sf, monkeypatch):
+        """A *user* cancel still defers to a draining protected tool indefinitely (unchanged):
+        the hard-grace force override applies only on the timeout path, not to user cancel."""
+        monkeypatch.setattr(ar_mod, "_TIMEOUT_HARD_GRACE_SECONDS", 0.02)
+        async with sf() as session:
+            session.add(
+                ThreadRunStateRow(
+                    thread_id="t1",
+                    instance_id="i",
+                    message_id="m1",
+                    status=ThreadStatus.RUNNING,
+                    cancel_watermark=9,
+                )
+            )
+            await session.commit()
+        runner = _runner(reg)
+        runner._kill_thread_sandbox = AsyncMock()
+        cancel_state = CancelState(event=asyncio.Event(), protected_in_flight=1)
+
+        async def _target():
+            await asyncio.sleep(5)
+
+        target = asyncio.create_task(_target())
+        outcome = _StopOutcome()
+        # No timeout_seconds → pure user cancel; protected tool in flight → withhold forever.
+        watcher = asyncio.create_task(
+            runner._cancel_watcher(
+                "t1",
+                current_task_seq=3,
+                runner_task=target,
+                cancel_state=cancel_state,
+                poll_interval=0.01,
+                outcome=outcome,
+            )
+        )
+        await asyncio.sleep(0.1)
+        assert outcome.reason == "cancel"
+        assert cancel_state.event.is_set()
+        assert not target.done()  # never force-cancelled: user cancel waits for the drain
+        runner._kill_thread_sandbox.assert_not_awaited()
+        watcher.cancel()
+        target.cancel()
+
+    @pytest.mark.anyio
+    async def test_run_reports_agent_timeout(self, reg, monkeypatch):
+        """End-to-end in _run: a timeout-reason stop finalizes FAILED + AGENT_TIMEOUT error."""
+        await _enqueue(reg, "t1", "m1", 1)
+        claimed = await reg.claim_next_runnable("i1")
+        runner = _runner(reg)
+        monkeypatch.setattr(runner, "_build_graph", lambda cfg: MagicMock())
+
+        async def _hang(*a, **k):
+            await asyncio.sleep(100)
+
+        monkeypatch.setattr(runner, "_execute", _hang)
+
+        async def _fake_watcher(thread_id, seq, runner_task, cancel_state=None, poll_interval=2, *, timeout_seconds=None, outcome=None):
+            # Mirror the real watcher's timeout branch: record reason, then hard-cancel.
+            await asyncio.sleep(0.02)
+            if outcome is not None:
+                outcome.reason = "timeout"
+            runner_task.cancel()
+
+        monkeypatch.setattr(runner, "_cancel_watcher", _fake_watcher)
+        await runner.run(claimed)
+
+        proc = await reg.check_processed("m1")
+        assert proc.status == ProcessedStatus.FAILED
+        assert runner._bridge.errors[0][0] == "AGENT_TIMEOUT"
+        assert runner._bridge.errors[0][3] is True  # retriable
+
+    @pytest.mark.anyio
+    async def test_run_still_reports_cancelled_for_user_cancel(self, reg, monkeypatch):
+        """The shared path must still report CANCELLED (not AGENT_TIMEOUT) when reason='cancel'."""
+        await _enqueue(reg, "t1", "m1", 1)
+        claimed = await reg.claim_next_runnable("i1")
+        runner = _runner(reg)
+        monkeypatch.setattr(runner, "_build_graph", lambda cfg: MagicMock())
+        monkeypatch.setattr(runner, "_safe_checkpoint_id", lambda *a, **k: _coro("ck1"))
+
+        async def _hang(*a, **k):
+            await asyncio.sleep(100)
+
+        monkeypatch.setattr(runner, "_execute", _hang)
+
+        async def _fake_watcher(thread_id, seq, runner_task, cancel_state=None, poll_interval=2, *, timeout_seconds=None, outcome=None):
+            await asyncio.sleep(0.02)
+            if outcome is not None:
+                outcome.reason = "cancel"
+            runner_task.cancel()
+
+        monkeypatch.setattr(runner, "_cancel_watcher", _fake_watcher)
+        await runner.run(claimed)
+
+        proc = await reg.check_processed("m1")
+        assert proc.status == ProcessedStatus.CANCELLED
+        assert runner._bridge.errors == []  # cancel publishes a result, not an error
+        assert runner._bridge.results[0][1] == ProcessedStatus.CANCELLED
 
 
 # ── cooperative cancel at super-step boundary (BUG-009 / cancel.md §4.3) ──────
@@ -539,8 +793,13 @@ class _StreamingAgent:
 
 def _message(reg):
     claimed = ClaimedRun(
-        thread_id="t1", message_id="m1", policy=QueuePolicy.FOLLOWUP.value, seq=1,
-        input_bodies=[_envelope("m1", seq=1)], batch_message_ids=["m1"], prefix_message_ids=[],
+        thread_id="t1",
+        message_id="m1",
+        policy=QueuePolicy.FOLLOWUP.value,
+        seq=1,
+        input_bodies=[_envelope("m1", seq=1)],
+        batch_message_ids=["m1"],
+        prefix_message_ids=[],
     )
     return _runner(reg)._build_run_message(claimed)
 
@@ -630,7 +889,8 @@ class TestUserContext:
         runner = _runner(reg)
         monkeypatch.setattr(runner, "_build_graph", lambda cfg: MagicMock())
         monkeypatch.setattr(
-            runner, "_execute",
+            runner,
+            "_execute",
             lambda *a, **k: _coro((False, {"status": "success", "checkpoint_id": "ck1"})),
         )
         assert get_current_user() is None  # no_auto_user → clean baseline
@@ -702,4 +962,5 @@ class TestUserContext:
 def _coro(value):
     async def _c():
         return value
+
     return _c()

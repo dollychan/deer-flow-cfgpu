@@ -59,6 +59,30 @@ class _ConsumerUser:
     id: str
 
 
+# After the soft ``timeout_seconds`` deadline fires, the cancel-watcher routes the stop
+# through the SAME conditional hard-cancel path as a user cancel (cancel.md §4.3): it sets
+# the cooperative event and withholds the hard cancel while a protected tool (cfdream
+# generate) drains, so the in-flight result still downlinks + checkpoints (BUG-022). This
+# grace bounds that drain — once ``timeout_seconds + _TIMEOUT_HARD_GRACE_SECONDS`` elapses
+# the watcher force-cancels and docker-kills regardless of ``protected_in_flight``, so a
+# tool wedged forever (e.g. an MCP call that never returns) can no longer defeat the
+# timeout the way the old bare ``asyncio.wait_for`` did.
+_TIMEOUT_HARD_GRACE_SECONDS = 60
+
+
+@dataclass
+class _StopOutcome:
+    """Why the cancel-watcher stopped the run, so ``_run`` picks the right terminal envelope.
+
+    ``None`` until the watcher fires; ``"cancel"`` for a user cancel-watermark (→ CANCELLED),
+    ``"timeout"`` for the ``timeout_seconds`` deadline (→ FAILED / AGENT_TIMEOUT, BUG-022).
+    Both now travel the one conditional hard-cancel path, so ``_run`` can no longer tell them
+    apart from the raised ``CancelledError`` alone.
+    """
+
+    reason: str | None = None
+
+
 # LangGraph's RESUME pending-write channel (== langgraph.constants.RESUME). Hardcoded to
 # the stable channel name so fork_init does not import the now-private constant (§7.4).
 _RESUME_CHANNEL = "__resume__"
@@ -143,9 +167,9 @@ class AgentRunner:
         # non-cancellable tool (e.g. cfdream generate, no remote cancel API) and drains it
         # — and with the _execute astream loop, which stops at the next super-step
         # boundary once this is set. Installed on a task-local ContextVar so the in-graph
-        # middleware reads the same Event: it runs in this run task, or in the wait_for
-        # inner task (timeout path), which snapshots this context at creation. The watcher
-        # gets the Event explicitly (it is a sibling task, not in this context).
+        # middleware reads the same Event; the agent runs directly in this run task (the
+        # timeout no longer wraps it in a separate wait_for inner task — BUG-022). The
+        # watcher gets the CancelState explicitly (it is a sibling task, not in this context).
         cancel_event = asyncio.Event()
         cancel_event_token = install_cancel_event(cancel_event)
         # The watcher is a sibling task that does not inherit later ContextVar
@@ -154,13 +178,26 @@ class AgentRunner:
         # never None here.
         cancel_state = get_cancel_state()
 
+        # The watcher is the single interrupter for BOTH user cancel-watermark and the
+        # timeout_seconds deadline (BUG-022): it records which fired in stop_outcome so the
+        # except-CancelledError handler below can publish CANCELLED vs AGENT_TIMEOUT.
+        stop_outcome = _StopOutcome()
+
         self._bridge.register_run(run_id, message.reply_config, echo=message.downlink_echo())
         heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(thread_id, interval=10),
             name=f"heartbeat-{run_id[:8]}",
         )
         cancel_watcher_task = asyncio.create_task(
-            self._cancel_watcher(thread_id, seq, runner_task, cancel_state, poll_interval=2),
+            self._cancel_watcher(
+                thread_id,
+                seq,
+                runner_task,
+                cancel_state,
+                poll_interval=2,
+                timeout_seconds=message.timeout_seconds,
+                outcome=stop_outcome,
+            ),
             name=f"cancel-watcher-{run_id[:8]}",
         )
 
@@ -186,11 +223,13 @@ class AgentRunner:
             runnable_config = self._build_config(message, run_id)
             agent = self._build_graph(runnable_config)
 
-            coro = self._execute(message, run_id, agent, runnable_config, cancel_event)
-            if message.timeout_seconds:
-                is_paused, result_cache = await asyncio.wait_for(coro, timeout=message.timeout_seconds)
-            else:
-                is_paused, result_cache = await coro
+            # Run the graph directly in this task — NO asyncio.wait_for wrapper. The
+            # timeout_seconds deadline is enforced by the cancel-watcher (BUG-022), which
+            # cancels via the SAME conditional hard-cancel + docker-kill path as a user
+            # cancel. A bare wait_for only cancels its inner task and never docker-kills, so
+            # a tool wedged below asyncio's reach (e.g. an MCP call that never returns) would
+            # hang the wait_for forever and silently defeat the timeout (cancel.md §4.3/§4.4).
+            is_paused, result_cache = await self._execute(message, run_id, agent, runnable_config, cancel_event)
             # _execute published the terminal envelope inline before returning (every
             # return path is preceded by publish_result); a publish failure would have
             # raised instead of returning, so a normal return ⟹ inline delivery ok.
@@ -200,43 +239,48 @@ class AgentRunner:
                 processed_status = ProcessedStatus.PAUSED_FOR_APPROVAL
 
         except asyncio.CancelledError:
-            processed_status = ProcessedStatus.CANCELLED
-            # cancelled runs still need a checkpoint_id (fork anchor, §7.4)
-            checkpoint_id = await self._safe_checkpoint_id(agent, runnable_config)
-            result_cache = {"status": ProcessedStatus.CANCELLED.value, "checkpoint_id": checkpoint_id}
-            # delete tombstone (§5.5): this run was hard-cancelled to destroy the thread. The
-            # single ``deleted`` ack covers the whole thread, so suppress the per-run
-            # ``cancelled`` downlink (and its outbox row, via _finalize's SENTINEL branch) so
-            # the client sees only ``deleted`` — not cancelled-then-deleted.
-            if await self._registry.is_tombstoned(thread_id):
-                logger.info(
-                    "Run %s cancelled by delete tombstone; suppressing cancelled downlink (deleted ack covers it)",
-                    run_id,
+            # Both user cancel and the timeout_seconds deadline now arrive here as a
+            # CancelledError raised by the cancel-watcher (hard cancel) or the cooperative
+            # super-step boundary. stop_outcome.reason — set by the watcher when it fired —
+            # tells the two apart (BUG-022). reason is None only for an external cancel that
+            # did not pass through the watcher (process shutdown); treat that as CANCELLED.
+            if stop_outcome.reason == "timeout":
+                processed_status = ProcessedStatus.FAILED
+                timeout_msg = f"Agent execution timed out after {message.timeout_seconds}s"
+                # error envelopes never carry checkpoint_id: fork anchors come only from
+                # result (success / cancelled / paused_for_approval), §7.4 / prerequisites P0.2.
+                result_cache = {
+                    "error": {"code": "AGENT_TIMEOUT", "retriable": True, "message": timeout_msg},
+                }
+                await self._bridge.publish_error(
+                    "AGENT_TIMEOUT",
+                    echo=message.downlink_echo(),
+                    retriable=True,
+                    message=timeout_msg,
                 )
+                downlink_sent = True
             else:
-                await self._bridge.publish_result(
-                    run_id,
-                    status=ProcessedStatus.CANCELLED,
-                    stream_events=message.reply_config.stream_events,
-                    checkpoint_id=checkpoint_id,
-                )
-                downlink_sent = True  # set only after a successful publish (else producer retries)
-
-        except TimeoutError:
-            processed_status = ProcessedStatus.FAILED
-            timeout_msg = f"Agent execution timed out after {message.timeout_seconds}s"
-            # error envelopes never carry checkpoint_id: fork anchors come only from
-            # result (success / cancelled / paused_for_approval), §7.4 / prerequisites P0.2.
-            result_cache = {
-                "error": {"code": "AGENT_TIMEOUT", "retriable": True, "message": timeout_msg},
-            }
-            await self._bridge.publish_error(
-                "AGENT_TIMEOUT",
-                echo=message.downlink_echo(),
-                retriable=True,
-                message=timeout_msg,
-            )
-            downlink_sent = True
+                processed_status = ProcessedStatus.CANCELLED
+                # cancelled runs still need a checkpoint_id (fork anchor, §7.4)
+                checkpoint_id = await self._safe_checkpoint_id(agent, runnable_config)
+                result_cache = {"status": ProcessedStatus.CANCELLED.value, "checkpoint_id": checkpoint_id}
+                # delete tombstone (§5.5): this run was hard-cancelled to destroy the thread. The
+                # single ``deleted`` ack covers the whole thread, so suppress the per-run
+                # ``cancelled`` downlink (and its outbox row, via _finalize's SENTINEL branch) so
+                # the client sees only ``deleted`` — not cancelled-then-deleted.
+                if await self._registry.is_tombstoned(thread_id):
+                    logger.info(
+                        "Run %s cancelled by delete tombstone; suppressing cancelled downlink (deleted ack covers it)",
+                        run_id,
+                    )
+                else:
+                    await self._bridge.publish_result(
+                        run_id,
+                        status=ProcessedStatus.CANCELLED,
+                        stream_events=message.reply_config.stream_events,
+                        checkpoint_id=checkpoint_id,
+                    )
+                    downlink_sent = True  # set only after a successful publish (else producer retries)
 
         except _LLMFallbackError as exc:
             processed_status = ProcessedStatus.FAILED
@@ -831,53 +875,80 @@ class AgentRunner:
         current_task_seq: int,
         runner_task: asyncio.Task,
         cancel_state: CancelState | None = None,
-        poll_interval: int = 2,
+        poll_interval: float = 2,
+        *,
+        timeout_seconds: float | None = None,
+        outcome: _StopOutcome | None = None,
     ) -> None:
-        """Poll thread_run_state.cancel_watermark; cancel the run when it covers this seq (§7.1).
+        """Poll the cancel-watermark AND the timeout deadline; stop the run when either fires.
 
-        Pure interrupter — touches no DB writes. cancel persistence already lives in the
-        folded watermark, so the watcher just translates ``seq < watermark`` into a stop.
+        Single interrupter for two triggers (§7.1, BUG-022):
+          - user cancel: ``thread_run_state.cancel_watermark`` covers this ``seq`` (DB write
+            already persisted by the ingest fold — the watcher just reads it).
+          - timeout: ``timeout_seconds`` elapses since the watcher started. The timeout no
+            longer rides a separate ``asyncio.wait_for`` (which only cancels its inner task
+            and never docker-kills, so a wedged tool defeated it — cancel.md §4.3/§4.4); it
+            now goes through the very same conditional hard-cancel path below.
+        ``outcome.reason`` records which fired ("cancel" / "timeout") for ``_run``'s terminal
+        envelope; a concurrent user cancel wins (set on first trigger).
 
-        Conditional hard cancel (BUG-009 / cancel.md §4.3). The cooperative ``event`` is
-        set unconditionally; the hard ``runner_task.cancel()`` is issued **only when no
-        protected tool is in flight**. A hard cancel tears down ``astream`` and discards a
-        shielded tool's already-emitted ``tool_result`` (langgraph runs nodes in their own
-        tasks, so the cancel never lands inside the shield — it just unwinds the stream).
-        So:
+        Conditional hard cancel (BUG-009 / cancel.md §4.3). The cooperative ``event`` is set
+        unconditionally; the hard ``runner_task.cancel()`` is issued **only when no protected
+        tool is in flight**. A hard cancel tears down ``astream`` and discards a shielded
+        tool's already-emitted ``tool_result`` (langgraph runs nodes in their own tasks, so
+        the cancel never lands inside the shield — it just unwinds the stream). So:
           - protected tool (cfdream) in flight → set the Event, do NOT hard-cancel; the run
             stops cooperatively at the next super-step boundary, after the result has been
             downlinked and checkpointed. Keep polling: once it drains (and if the run has
             not already stopped on the cooperative flag) a later iteration hard-cancels.
           - nothing protected in flight (LLM / bash / parked) → set the Event AND hard-cancel
             for an immediate interrupt, then return.
+        Timeout safety net: once ``timeout_seconds + _TIMEOUT_HARD_GRACE_SECONDS`` elapses the
+        watcher force-cancels (and docker-kills) even while a protected tool is "draining", so
+        a tool wedged forever (e.g. an MCP call that never returns) can no longer hold the run
+        open past the deadline. A user cancel keeps deferring to the drain indefinitely
+        (unchanged) — the force override applies only on the timeout path.
         """
+        loop = asyncio.get_running_loop()
+        soft_deadline = loop.time() + timeout_seconds if timeout_seconds else None
+        hard_deadline = soft_deadline + _TIMEOUT_HARD_GRACE_SECONDS if soft_deadline is not None else None
         event_set = False
         while True:
             await asyncio.sleep(poll_interval)
             try:
+                now = loop.time()
+                timed_out = soft_deadline is not None and now >= soft_deadline
+                hard_timed_out = hard_deadline is not None and now >= hard_deadline
                 state = await self._registry.get_thread_state(thread_id)
                 watermark = (state.cancel_watermark or 0) if state else 0
-                if watermark <= current_task_seq:
+                watermark_covers = watermark > current_task_seq
+                if not watermark_covers and not timed_out:
                     continue
+                # Record why we stopped on the first trigger; a user cancel takes precedence.
+                if outcome is not None and outcome.reason is None:
+                    outcome.reason = "cancel" if watermark_covers else "timeout"
+                reason = outcome.reason if outcome is not None else ("cancel" if watermark_covers else "timeout")
                 if cancel_state is not None and not event_set:
                     logger.info(
-                        "Cancel watermark=%d covers run seq=%d thread=%s — signalling cooperative stop",
-                        watermark,
+                        "Stop (%s) covers run seq=%d thread=%s — signalling cooperative stop",
+                        reason,
                         current_task_seq,
                         thread_id,
                     )
                     cancel_state.event.set()
                     event_set = True
-                # Withhold the hard cancel while a shielded tool is draining so its
-                # tool_result is not lost to the astream teardown.
-                if cancel_state is not None and cancel_state.protected_in_flight > 0:
+                # Withhold the hard cancel while a shielded tool is draining so its tool_result
+                # is not lost to the astream teardown — UNLESS the timeout hard grace elapsed
+                # (force the cancel so a wedged protected tool cannot defeat the deadline).
+                force_hard = hard_timed_out and reason != "cancel"
+                if cancel_state is not None and cancel_state.protected_in_flight > 0 and not force_hard:
                     logger.info(
-                        "Cancel: %d protected tool(s) draining thread=%s — deferring hard cancel",
+                        "Stop: %d protected tool(s) draining thread=%s — deferring hard cancel",
                         cancel_state.protected_in_flight,
                         thread_id,
                     )
                     continue
-                logger.info("Cancel: hard-cancelling run seq=%d thread=%s", current_task_seq, thread_id)
+                logger.info("Stop (%s): hard-cancelling run seq=%d thread=%s", reason, current_task_seq, thread_id)
                 runner_task.cancel()
                 # Break into the container (D7): runner_task.cancel() cannot reach a
                 # wedged execute_command offloaded via to_thread; docker kill frees it.
