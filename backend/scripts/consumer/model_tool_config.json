@@ -1,0 +1,793 @@
+{
+  "_comment": "Per-model parameter constraints for Human-in-the-Loop tool-call editing. Keyed by tool name, then by model. 'args' maps the unified (generic) arg names from tool_registry.py to the REAL value range/type of the underlying model (extracted from each model's card.md/adapter.yaml). Params a model does NOT support are omitted from that model's entry. quality_tier only affects model='auto' routing, so it appears only on the 'auto' entry. writable=false means the field is fixed/control-only and should not be exposed for editing. model_specific is a free-form passthrough dict (passthrough=true): its 'fields' map lists the documented per-model sub-keys with their ranges; users may still pass additional undocumented keys.",
+  "generate_video": [
+    {
+      "adapterId": "auto",
+      "modelId": "auto",
+      "displayName": "Auto (router selects a video model)",
+      "note": "Unified tool schema from GenerateVideoInput. Model not yet fixed; ranges are the union enum/limits of the unified schema, not a specific model. Once a model is chosen, switch to that model's entry for the real per-model ranges.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "enum", "options": ["auto", "wan-2-0", "wan-2-0-fast", "doubao-seedance-1-5-pro", "doubao-seedance-2-0", "doubao-seedance-2-0-fast", "doubao-seedance-2-0-mini", "happyhorse-1-0-t2v", "happyhorse-1-0-i2v", "happyhorse-1-0-r2v", "happyhorse-1-0-video-edit", "kling-video-o1", "kling-v3-omni", "wan-2-7-t2v", "wan-2-7-i2v", "wan-2-7-r2v", "wan-2-7-videoedit", "wan-2-6-t2v", "wan-2-6-i2v", "wan-2-6-r2v"], "default": "auto", "writable": "true" },
+        "aspect_ratio": { "type": "enum", "options": ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"], "default": "adaptive", "writable": "true" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "-1 = smart/auto duration (WAN 2.0 / Doubao Seedance 1.5 Pro); Seedance caps explicit durations at 12; HappyHorse requires explicit 4-15" },
+        "with_audio": { "type": "boolean", "default": true, "writable": "true" },
+        "first_frame": { "type": "url", "writable": "true" },
+        "last_frame": { "type": "url", "writable": "true" },
+        "reference_images": { "type": "url_array", "maxItems": 9, "writable": "true" },
+        "reference_videos": { "type": "url_array", "maxItems": 3, "writable": "true" },
+        "reference_audios": { "type": "url_array", "maxItems": 3, "writable": "true" },
+        "quality_tier": { "type": "enum", "options": ["fast", "balanced", "best"], "default": "balanced", "writable": "true", "note": "router selection preference; no effect once a specific model is chosen" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use resolved model's default" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "documented sub-fields depend on the resolved model; see that model's entry" }
+      }
+    },
+    {
+      "adapterId": "wan-2-0",
+      "modelId": "wan-video",
+      "displayName": "WAN 2.0 (Seedance 2.0)",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "wan-2-0", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], "default": "adaptive", "writable": "true" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "-1 = smart/auto duration" },
+        "with_audio": { "type": "boolean", "default": true, "writable": "true" },
+        "first_frame": { "type": "url", "writable": "true" },
+        "last_frame": { "type": "url", "writable": "true" },
+        "reference_images": { "type": "url_array", "maxItems": 9, "writable": "true" },
+        "reference_videos": { "type": "url_array", "maxItems": 3, "writable": "true", "note": "total reference video duration <= 15s" },
+        "reference_audios": { "type": "url_array", "maxItems": 3, "writable": "true" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use model default (true)" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "fields": {
+            "seed": { "type": "integer", "note": "generation seed" },
+            "tools": { "type": "array", "note": "web search, text-to-video only: [{\"type\": \"web_search\"}]" }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "wan-2-0-fast",
+      "modelId": "wan-video-fast",
+      "displayName": "WAN 2.0 Fast (Seedance 2.0 fast)",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "wan-2-0-fast", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], "default": "adaptive", "writable": "true" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 12, "default": 5, "writable": "true", "note": "-1 = smart/auto duration" },
+        "with_audio": { "type": "boolean", "default": true, "writable": "true" },
+        "first_frame": { "type": "url", "writable": "true" },
+        "last_frame": { "type": "url", "writable": "true" },
+        "reference_images": { "type": "url_array", "maxItems": 9, "writable": "true" },
+        "reference_videos": { "type": "url_array", "maxItems": 3, "writable": "true", "note": "total reference video duration <= 15s" },
+        "reference_audios": { "type": "url_array", "maxItems": 3, "writable": "true" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use model default (true)" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "fields": {
+            "seed": { "type": "integer", "note": "generation seed" },
+            "tools": { "type": "array", "note": "web search, text-to-video only: [{\"type\": \"web_search\"}]" }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "doubao-seedance-1-5-pro",
+      "modelId": "doubao-seedance-1-5-pro-251215",
+      "displayName": "Doubao Seedance 1.5 Pro",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "doubao-seedance-1-5-pro", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], "default": "adaptive", "writable": "true" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 12, "default": 5, "writable": "true", "note": "-1 = smart/auto duration" },
+        "with_audio": { "type": "boolean", "default": true, "writable": "true" },
+        "first_frame": { "type": "url", "writable": "true" },
+        "last_frame": { "type": "url", "writable": "true" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use model default (true)" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "fields": {
+            "sample_mode": { "type": "boolean", "default": false, "note": "low-quality fast preview mode" }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "happyhorse-1-0-t2v",
+      "modelId": "happyhorse-1.0-t2v",
+      "displayName": "happyhorse-1.0-t2v",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "happyhorse-1-0-t2v", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["16:9", "9:16", "1:1", "4:3", "3:4"], "default": "16:9", "writable": "true", "note": "21:9 and adaptive NOT supported; 4:5 and 5:4 available only via model_specific" },
+        "resolution": { "type": "enum", "options": ["720p", "1080p"], "default": "720p", "writable": "true", "note": "480p NOT supported (adapter rejects); value is uppercased to 720P/1080P for the API" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "explicit 4-15 only; -1 (smart) NOT supported (adapter rejects)" },
+        "first_frame": { "type": "url", "writable": "true" },
+        "reference_images": { "type": "url_array", "maxItems": 9, "writable": "true" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use model default (true)" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "note": "4:5 / 5:4 aspect ratios can only be set here (1080P is now reachable via the unified resolution arg)",
+          "fields": {
+            "seed": { "type": "integer", "min": 0, "max": 2147483647 }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "wan-2-7-t2v",
+      "modelId": "wan2.7-t2v",
+      "displayName": "万相 2.7 (文生视频)",
+      "note": "Text-to-video. Nested input envelope: input={prompt}, no media. Does not use aspect_ratio / with_audio / watermark.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "wan-2-7-t2v", "writable": "false" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true", "note": "value is uppercased to 480P/720P/1080P for the API" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "explicit 4-15 only; -1 (smart) NOT supported (adapter rejects)" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "free-form passthrough merged at top level; no documented sub-fields" }
+      }
+    },
+    {
+      "adapterId": "wan-2-7-i2v",
+      "modelId": "wan2.7-i2v",
+      "displayName": "万相 2.7 (图生视频)",
+      "note": "Image-to-video; first_frame required. input.media=[{type:first_frame,url}]. Does not use aspect_ratio / with_audio / watermark.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "wan-2-7-i2v", "writable": "false" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true", "note": "value is uppercased to 480P/720P/1080P for the API" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "explicit 4-15 only; -1 (smart) NOT supported (adapter rejects)" },
+        "first_frame": { "type": "url", "writable": "true", "note": "required (image-to-video)" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "free-form passthrough merged at top level; no documented sub-fields" }
+      }
+    },
+    {
+      "adapterId": "wan-2-7-r2v",
+      "modelId": "wan2.7-r2v",
+      "displayName": "万相 2.7 (参考生视频)",
+      "note": "Reference-to-video; requires >=1 reference_video or reference_image. input.media carries type=reference_video then reference_image (prompt refers to them as 视频1/图片3). Does not use aspect_ratio / with_audio / watermark / first_frame / reference_audios.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "wan-2-7-r2v", "writable": "false" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true", "note": "value is uppercased to 480P/720P/1080P for the API" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "explicit 4-15 only; -1 (smart) NOT supported (adapter rejects)" },
+        "reference_videos": { "type": "url_array", "writable": "true", "note": "mapped to media type=reference_video (listed before reference images)" },
+        "reference_images": { "type": "url_array", "writable": "true", "note": "mapped to media type=reference_image" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "free-form passthrough merged at top level; no documented sub-fields" }
+      }
+    },
+    {
+      "adapterId": "wan-2-7-videoedit",
+      "modelId": "wan2.7-videoedit",
+      "displayName": "万相 2.7 (视频编辑)",
+      "note": "Video edit; requires exactly 1 source video in reference_videos (mapped to media type=video) plus optional reference_images. Does not use aspect_ratio / with_audio / watermark / first_frame / reference_audios.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true", "note": "edit instruction, e.g. 将视频中女孩的衣服替换为图片中的衣服" },
+        "model": { "type": "string", "value": "wan-2-7-videoedit", "writable": "false" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true", "note": "value is uppercased to 480P/720P/1080P for the API" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "explicit 4-15 only; -1 (smart) NOT supported (adapter rejects)" },
+        "reference_videos": { "type": "url_array", "maxItems": 1, "writable": "true", "note": "the single source video to edit (mapped to media type=video); required" },
+        "reference_images": { "type": "url_array", "writable": "true", "note": "reference images driving the edit (mapped to media type=reference_image)" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "free-form passthrough merged at top level; no documented sub-fields" }
+      }
+    },
+    {
+      "adapterId": "wan-2-6-t2v",
+      "modelId": "wan2.6-t2v",
+      "displayName": "万相 2.6 (文生视频)",
+      "note": "Text-to-video. Flat input envelope: input={prompt} (no media array). Does not use aspect_ratio / with_audio / watermark.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "wan-2-6-t2v", "writable": "false" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true", "note": "value is uppercased to 480P/720P/1080P for the API" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "explicit 4-15 only; -1 (smart) NOT supported (adapter rejects)" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "free-form passthrough merged at top level; no documented sub-fields" }
+      }
+    },
+    {
+      "adapterId": "wan-2-6-i2v",
+      "modelId": "wan2.6-i2v",
+      "displayName": "万相 2.6 (图生视频)",
+      "note": "Image-to-video; first_frame required. Flat input: first_frame->input.img_url and optional reference_audios[0]->input.audio_url (audio-driven, e.g. rap). No media array. Does not use aspect_ratio / with_audio / watermark / last_frame / reference_images / reference_videos.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "wan-2-6-i2v", "writable": "false" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true", "note": "value is uppercased to 480P/720P/1080P for the API" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "explicit 4-15 only; -1 (smart) NOT supported (adapter rejects)" },
+        "first_frame": { "type": "url", "writable": "true", "note": "required; mapped to input.img_url" },
+        "reference_audios": { "type": "url_array", "maxItems": 1, "writable": "true", "note": "optional driving audio; first entry mapped to input.audio_url" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "free-form passthrough merged at top level; no documented sub-fields" }
+      }
+    },
+    {
+      "adapterId": "wan-2-6-r2v",
+      "modelId": "wan2.6-r2v",
+      "displayName": "万相 2.6 (参考生视频)",
+      "note": "Reference-to-video; requires >=1 reference_video or reference_image. Flat input: reference_videos + reference_images merged (videos first) into a single input.reference_urls list (no per-item type tags). Does not use aspect_ratio / with_audio / watermark / first_frame / reference_audios.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true", "note": "may refer to reference subjects as character1, etc." },
+        "model": { "type": "string", "value": "wan-2-6-r2v", "writable": "false" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true", "note": "value is uppercased to 480P/720P/1080P for the API" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "explicit 4-15 only; -1 (smart) NOT supported (adapter rejects)" },
+        "reference_videos": { "type": "url_array", "writable": "true", "note": "merged into input.reference_urls (listed before reference images)" },
+        "reference_images": { "type": "url_array", "writable": "true", "note": "merged into input.reference_urls" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "free-form passthrough merged at top level; no documented sub-fields" }
+      }
+    },
+    {
+      "adapterId": "doubao-seedance-2-0",
+      "modelId": "doubao-seedance-2-0-260128",
+      "displayName": "Doubao Seedance 2.0",
+      "note": "API-identical to WAN 2.0 (shares SeedanceVideoAdapter); full capability set incl. first/last frame, multimodal reference, video edit/extend, audio.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "doubao-seedance-2-0", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], "default": "adaptive", "writable": "true" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "-1 = smart/auto duration" },
+        "with_audio": { "type": "boolean", "default": true, "writable": "true" },
+        "first_frame": { "type": "url", "writable": "true" },
+        "last_frame": { "type": "url", "writable": "true" },
+        "reference_images": { "type": "url_array", "maxItems": 9, "writable": "true" },
+        "reference_videos": { "type": "url_array", "maxItems": 3, "writable": "true", "note": "total reference video duration <= 15s" },
+        "reference_audios": { "type": "url_array", "maxItems": 3, "writable": "true" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use model default (true)" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "fields": {
+            "seed": { "type": "integer", "note": "generation seed" },
+            "tools": { "type": "array", "note": "web search, text-to-video only: [{\"type\": \"web_search\"}]" }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "doubao-seedance-2-0-fast",
+      "modelId": "doubao-seedance-2-0-fast-260128",
+      "displayName": "Doubao Seedance 2.0 fast",
+      "note": "API-identical to WAN 2.0 (shares SeedanceVideoAdapter); faster/cheaper. Unlike wan-2-0-fast it has no documented 1080p text-to-video restriction.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "doubao-seedance-2-0-fast", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], "default": "adaptive", "writable": "true" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "-1 = smart/auto duration" },
+        "with_audio": { "type": "boolean", "default": true, "writable": "true" },
+        "first_frame": { "type": "url", "writable": "true" },
+        "last_frame": { "type": "url", "writable": "true" },
+        "reference_images": { "type": "url_array", "maxItems": 9, "writable": "true" },
+        "reference_videos": { "type": "url_array", "maxItems": 3, "writable": "true", "note": "total reference video duration <= 15s" },
+        "reference_audios": { "type": "url_array", "maxItems": 3, "writable": "true" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use model default (true)" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "fields": {
+            "seed": { "type": "integer", "note": "generation seed" },
+            "tools": { "type": "array", "note": "web search, text-to-video only: [{\"type\": \"web_search\"}]" }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "doubao-seedance-2-0-mini",
+      "modelId": "Doubao-Seedance-2.0-mini",
+      "displayName": "Doubao Seedance 2.0 mini",
+      "note": "API-identical to WAN 2.0 (shares SeedanceVideoAdapter); high-cost-performance tier, cheapest of the Seedance 2.0 family. Full capability set incl. first/last frame, multimodal reference, video edit/extend, audio.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "doubao-seedance-2-0-mini", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], "default": "adaptive", "writable": "true" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "-1 = smart/auto duration" },
+        "with_audio": { "type": "boolean", "default": true, "writable": "true" },
+        "first_frame": { "type": "url", "writable": "true" },
+        "last_frame": { "type": "url", "writable": "true" },
+        "reference_images": { "type": "url_array", "maxItems": 9, "writable": "true" },
+        "reference_videos": { "type": "url_array", "maxItems": 3, "writable": "true", "note": "total reference video duration <= 15s" },
+        "reference_audios": { "type": "url_array", "maxItems": 3, "writable": "true" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use model default (true)" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "fields": {
+            "seed": { "type": "integer", "note": "generation seed" },
+            "tools": { "type": "array", "note": "web search, text-to-video only: [{\"type\": \"web_search\"}]" }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "happyhorse-1-0-i2v",
+      "modelId": "happyhorse-1.0-i2v",
+      "displayName": "happyhorse-1.0-i2v",
+      "note": "Image-to-video variant of HappyHorse (shares the t2v adapter's validation): a first_frame, or up to 9 reference_images (mutually exclusive).",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "happyhorse-1-0-i2v", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["16:9", "9:16", "1:1", "4:3", "3:4"], "default": "16:9", "writable": "true", "note": "21:9 and adaptive NOT supported; 4:5 and 5:4 available only via model_specific" },
+        "resolution": { "type": "enum", "options": ["720p", "1080p"], "default": "720p", "writable": "true", "note": "480p NOT supported (adapter rejects); value is uppercased to 720P/1080P for the API" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "explicit 4-15 only; -1 (smart) NOT supported (adapter rejects)" },
+        "first_frame": { "type": "url", "writable": "true" },
+        "reference_images": { "type": "url_array", "maxItems": 9, "writable": "true", "note": "mutually exclusive with first_frame" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use model default (true)" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "note": "4:5 / 5:4 aspect ratios can only be set here",
+          "fields": {
+            "seed": { "type": "integer", "min": 0, "max": 2147483647 }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "happyhorse-1-0-r2v",
+      "modelId": "happyhorse-1.0-r2v",
+      "displayName": "happyhorse-1.0-r2v",
+      "note": "Reference-to-video variant of HappyHorse (shares the t2v adapter's validation): up to 9 reference_images.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "happyhorse-1-0-r2v", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["16:9", "9:16", "1:1", "4:3", "3:4"], "default": "16:9", "writable": "true", "note": "21:9 and adaptive NOT supported; 4:5 and 5:4 available only via model_specific" },
+        "resolution": { "type": "enum", "options": ["720p", "1080p"], "default": "720p", "writable": "true", "note": "480p NOT supported (adapter rejects); value is uppercased to 720P/1080P for the API" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "explicit 4-15 only; -1 (smart) NOT supported (adapter rejects)" },
+        "first_frame": { "type": "url", "writable": "true" },
+        "reference_images": { "type": "url_array", "maxItems": 9, "writable": "true" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use model default (true)" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "note": "4:5 / 5:4 aspect ratios can only be set here",
+          "fields": {
+            "seed": { "type": "integer", "min": 0, "max": 2147483647 }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "happyhorse-1-0-video-edit",
+      "modelId": "happyhorse-1.0-video-edit",
+      "displayName": "happyhorse-1.0-video-edit",
+      "note": "Natural-language video editing: 1 source video (reference_videos) + up to 5 reference_images. Output duration/ratio follow the source video, so duration_seconds and aspect_ratio are NOT sent.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true", "note": "edit instruction" },
+        "model": { "type": "string", "value": "happyhorse-1-0-video-edit", "writable": "false" },
+        "resolution": { "type": "enum", "options": ["720p", "1080p"], "default": "720p", "writable": "true", "note": "480p NOT supported (adapter rejects); value is uppercased to 720P/1080P for the API" },
+        "reference_videos": { "type": "url_array", "maxItems": 1, "writable": "true", "note": "the single source video to edit (required)" },
+        "reference_images": { "type": "url_array", "maxItems": 5, "writable": "true" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use model default (true)" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "fields": {
+            "seed": { "type": "integer", "min": 0, "max": 2147483647 }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "kling-video-o1",
+      "modelId": "kling-video-o1",
+      "displayName": "Kling Video O1 (可灵 O1)",
+      "note": "Text-to-video only. resolution + aspect_ratio are mapped to a pixel size (adaptive -> 16:9); quality_tier maps to Kling mode (best -> pro, else std) and IS meaningful here. Does not use with_audio / watermark / reference media.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "kling-video-o1", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], "default": "adaptive", "writable": "true", "note": "adaptive treated as 16:9; mapped with resolution to a pixel size" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true", "note": "mapped with aspect_ratio to a pixel size string" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "explicit only; -1 (smart) NOT supported (adapter rejects)" },
+        "quality_tier": { "type": "enum", "options": ["fast", "balanced", "best"], "default": "balanced", "writable": "true", "note": "maps to Kling mode: best -> pro, fast/balanced -> std" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "free-form passthrough merged at top level (can override size/mode/seconds); no documented sub-fields" }
+      }
+    },
+    {
+      "adapterId": "kling-v3-omni",
+      "modelId": "kling-v3-omni",
+      "displayName": "Kling V3 Omni (可灵 V3 全能版)",
+      "note": "Text-to-video only (shares KlingVideoAdapter with O1). resolution + aspect_ratio map to a pixel size (adaptive -> 16:9); quality_tier maps to Kling mode (best -> pro, else std). Does not use with_audio / watermark / reference media.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "kling-v3-omni", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], "default": "adaptive", "writable": "true", "note": "adaptive treated as 16:9; mapped with resolution to a pixel size" },
+        "resolution": { "type": "enum", "options": ["480p", "720p", "1080p"], "default": "720p", "writable": "true", "note": "mapped with aspect_ratio to a pixel size string" },
+        "duration_seconds": { "type": "integer", "min": 4, "max": 15, "default": 5, "writable": "true", "note": "explicit only; -1 (smart) NOT supported (adapter rejects)" },
+        "quality_tier": { "type": "enum", "options": ["fast", "balanced", "best"], "default": "balanced", "writable": "true", "note": "maps to Kling mode: best -> pro, fast/balanced -> std" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "free-form passthrough merged at top level (can override size/mode/seconds); no documented sub-fields" }
+      }
+    }
+  ],
+  "generate_image": [
+    {
+      "adapterId": "auto",
+      "modelId": "auto",
+      "displayName": "Auto (router selects an image model)",
+      "note": "Unified tool schema from GenerateImageInput. Model not yet fixed; ranges are the union enum/limits of the unified schema, not a specific model. Once a model is chosen, switch to that model's entry for the real per-model ranges.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "enum", "options": ["auto", "doubao-seedream-5-0-lite", "doubao-seedream-4-0", "doubao-seedream-4-5", "gpt-image-2", "nano-banana-2", "nano-banana-pro", "nano-banana-pro-official", "nano-banana-pro-premium"], "default": "auto", "writable": "true" },
+        "aspect_ratio": { "type": "enum", "options": ["1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16", "21:9"], "default": "1:1", "writable": "true" },
+        "resolution": { "type": "enum", "options": ["1K", "2K", "3K", "4K"], "default": "2K", "writable": "true" },
+        "reference_images": { "type": "url_array", "writable": "true" },
+        "n": { "type": "integer", "min": 1, "max": 15, "default": 1, "writable": "true", "note": "group/sequential image count (组图); only doubao-seedream-* support n>1, other image models generate 1" },
+        "quality_tier": { "type": "enum", "options": ["fast", "balanced", "best"], "default": "balanced", "writable": "true", "note": "router selection preference; no effect once a specific model is chosen" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use resolved model's default; ignored by gpt-image-2 / nano-banana" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "documented sub-fields depend on the resolved model; see that model's entry" }
+      }
+    },
+    {
+      "adapterId": "doubao-seedream-5-0-lite",
+      "modelId": "doubao-seedream-5-0-260128",
+      "displayName": "Doubao Seedream 5.0 lite",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "doubao-seedream-5-0-lite", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["1:1", "4:3", "3:4", "16:9", "9:16", "21:9"], "default": "1:1", "writable": "true", "note": "maps to size hint; output ratio range [1/16, 16]" },
+        "resolution": { "type": "enum", "options": ["2K", "3K", "4K"], "default": "2K", "writable": "true" },
+        "reference_images": { "type": "url_array", "maxItems": 14, "writable": "true" },
+        "n": { "type": "integer", "min": 1, "max": 15, "default": 1, "writable": "true", "note": "group/sequential image count (组图); drives sequential_image_generation; input ref images + generated <= 15" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use model default (true); adds an \"AI generated\" watermark" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "fields": {
+            "response_format": { "type": "enum", "options": ["url", "b64_json"], "default": "url" },
+            "output_format": { "type": "enum", "options": ["jpeg", "png"], "default": "jpeg" },
+            "stream": { "type": "boolean", "default": false },
+            "tools": { "type": "array", "note": "web search: [{\"type\": \"web_search\"}]" },
+            "optimize_prompt_options.mode": { "type": "enum", "options": ["standard", "fast"], "default": "standard" }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "doubao-seedream-4-0",
+      "modelId": "doubao-seedream-4-0-250828",
+      "displayName": "Doubao Seedream 4.0",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "doubao-seedream-4-0", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["1:1", "4:3", "3:4", "16:9", "9:16", "21:9"], "default": "1:1", "writable": "true", "note": "maps to size hint; output ratio range [1/16, 16]" },
+        "resolution": { "type": "enum", "options": ["2K", "3K", "4K"], "default": "2K", "writable": "true" },
+        "reference_images": { "type": "url_array", "maxItems": 14, "writable": "true" },
+        "n": { "type": "integer", "min": 1, "max": 15, "default": 1, "writable": "true", "note": "group/sequential image count (组图); drives sequential_image_generation; input ref images + generated <= 15" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use model default (true); adds an \"AI generated\" watermark" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "fields": {
+            "response_format": { "type": "enum", "options": ["url", "b64_json"], "default": "url" },
+            "output_format": { "type": "enum", "options": ["jpeg", "png"], "default": "jpeg" },
+            "stream": { "type": "boolean", "default": false },
+            "tools": { "type": "array", "note": "web search: [{\"type\": \"web_search\"}]" },
+            "optimize_prompt_options.mode": { "type": "enum", "options": ["standard", "fast"], "default": "standard" }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "doubao-seedream-4-5",
+      "modelId": "doubao-seedream-4-5-251128",
+      "displayName": "Doubao Seedream 4.5",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "doubao-seedream-4-5", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["1:1", "4:3", "3:4", "16:9", "9:16", "21:9"], "default": "1:1", "writable": "true", "note": "maps to size hint; output ratio range [1/16, 16]" },
+        "resolution": { "type": "enum", "options": ["2K", "3K", "4K"], "default": "2K", "writable": "true" },
+        "reference_images": { "type": "url_array", "maxItems": 14, "writable": "true" },
+        "n": { "type": "integer", "min": 1, "max": 15, "default": 1, "writable": "true", "note": "group/sequential image count (组图); drives sequential_image_generation; input ref images + generated <= 15" },
+        "watermark": { "type": "boolean", "writable": "true", "note": "null = use model default (false); adds an \"AI generated\" watermark" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "fields": {
+            "response_format": { "type": "enum", "options": ["url", "b64_json"], "default": "url" },
+            "output_format": { "type": "enum", "options": ["jpeg", "png"], "default": "jpeg" },
+            "stream": { "type": "boolean", "default": false },
+            "tools": { "type": "array", "note": "web search: [{\"type\": \"web_search\"}]" },
+            "optimize_prompt_options.mode": { "type": "enum", "options": ["standard", "fast"], "default": "standard" }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "gpt-image-2",
+      "modelId": "gpt-image-2",
+      "displayName": "GPT Image 2",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "gpt-image-2", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16"], "default": "1:1", "writable": "true" },
+        "reference_images": { "type": "url_array", "writable": "true", "note": "presence switches to image-edit mode" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "free-form passthrough to the API; no documented sub-fields" }
+      }
+    },
+    {
+      "adapterId": "nano-banana-2",
+      "modelId": "nano2",
+      "displayName": "Nano Banana 2",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "nano-banana-2", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"], "default": "1:1", "writable": "true" },
+        "resolution": { "type": "enum", "options": ["1K", "2K", "4K"], "default": "2K", "writable": "true", "note": "maps to image_size" },
+        "reference_images": { "type": "url_array", "writable": "true", "note": "presence switches to image-edit mode" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "free-form passthrough to the API; no documented sub-fields" }
+      }
+    },
+    {
+      "adapterId": "nano-banana-pro",
+      "modelId": "nano-pro",
+      "displayName": "Nano Banana Pro",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "nano-banana-pro", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"], "default": "1:1", "writable": "true" },
+        "resolution": { "type": "enum", "options": ["1K", "2K", "4K"], "default": "2K", "writable": "true", "note": "maps to image_size" },
+        "reference_images": { "type": "url_array", "writable": "true", "note": "presence switches to image-edit mode" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "free-form passthrough to the API; no documented sub-fields" }
+      }
+    },
+    {
+      "adapterId": "nano-banana-pro-official",
+      "modelId": "nano-pro-official",
+      "displayName": "Nano Banana Pro (official)",
+      "note": "Shares NanoBanana adapter with nano-banana-pro; same parameters, official channel.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "nano-banana-pro-official", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"], "default": "1:1", "writable": "true" },
+        "resolution": { "type": "enum", "options": ["1K", "2K", "4K"], "default": "2K", "writable": "true", "note": "maps to image_size" },
+        "reference_images": { "type": "url_array", "writable": "true", "note": "presence switches to image-edit mode" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "free-form passthrough to the API; no documented sub-fields" }
+      }
+    },
+    {
+      "adapterId": "nano-banana-pro-premium",
+      "modelId": "nano-pro-premium",
+      "displayName": "Nano Banana Pro (premium)",
+      "note": "Shares NanoBanana adapter with nano-banana-pro; same parameters, premium channel.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true" },
+        "model": { "type": "string", "value": "nano-banana-pro-premium", "writable": "false" },
+        "aspect_ratio": { "type": "enum", "options": ["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"], "default": "1:1", "writable": "true" },
+        "resolution": { "type": "enum", "options": ["1K", "2K", "4K"], "default": "2K", "writable": "true", "note": "maps to image_size" },
+        "reference_images": { "type": "url_array", "writable": "true", "note": "presence switches to image-edit mode" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "free-form passthrough to the API; no documented sub-fields" }
+      }
+    }
+  ],
+  "generate_audio": [
+    {
+      "adapterId": "auto",
+      "modelId": "auto",
+      "displayName": "Auto (router selects a voice model)",
+      "note": "Unified tool schema from GenerateAudioInput (text-to-speech). Model not yet fixed; ranges are the union of the unified schema, not a specific model. Once a model is chosen, switch to that model's entry — seed-tts-2-0 ignores speed/volume/pitch/emotion/bitrate.",
+      "args": {
+        "text": { "type": "text", "writable": "true", "note": "text to synthesize (required)" },
+        "model": { "type": "enum", "options": ["auto", "minimax-speech-2-8-hd", "minimax-speech-2-8-turbo", "seed-tts-2-0"], "default": "auto", "writable": "true" },
+        "voice": { "type": "string", "writable": "true", "note": "voice/speaker id; null = each model's own default. MiniMax uses voice ids (e.g. male-qn-qingse); seed-tts uses speaker ids (e.g. zh_female_xiaohe_uranus_bigtts). See each model's card for the full list" },
+        "audio_format": { "type": "enum", "options": ["mp3", "wav", "pcm", "flac"], "default": "mp3", "writable": "true" },
+        "sample_rate": { "type": "integer", "writable": "true", "note": "output sample rate in Hz (e.g. 24000, 32000); null = model default" },
+        "bitrate": { "type": "integer", "writable": "true", "note": "output bitrate in bps (MiniMax only, e.g. 128000); null = model default" },
+        "speed": { "type": "number", "default": 1.0, "writable": "true", "note": "speech speed multiplier (MiniMax only)" },
+        "volume": { "type": "number", "default": 1.0, "writable": "true", "note": "speech volume multiplier (MiniMax only)" },
+        "pitch": { "type": "integer", "default": 0, "writable": "true", "note": "speech pitch offset (MiniMax only)" },
+        "emotion": { "type": "string", "writable": "true", "note": "emotion hint, e.g. happy/sad/angry (MiniMax only); null lets the model infer from text" },
+        "quality_tier": { "type": "enum", "options": ["fast", "balanced", "best"], "default": "balanced", "writable": "true", "note": "router selection preference; no effect once a specific model is chosen" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": { "type": "object", "fields": {}, "note": "documented sub-fields depend on the resolved model; see that model's entry" }
+      }
+    },
+    {
+      "adapterId": "minimax-speech-2-8-hd",
+      "modelId": "MiniMax/speech-2.8-hd",
+      "displayName": "MiniMax 语音 2.8 HD",
+      "note": "Synchronous text-to-speech, high-fidelity tier. Supports the full MiniMax voice-control set (speed/volume/pitch/emotion/bitrate). Billed per character.",
+      "args": {
+        "text": { "type": "text", "writable": "true", "note": "text to synthesize (required); supports inline emotion/event tags like (laughs)" },
+        "model": { "type": "string", "value": "minimax-speech-2-8-hd", "writable": "false" },
+        "voice": { "type": "string", "default": "male-qn-qingse", "writable": "true", "note": "maps to input.voice_setting.voice_id; 327 system voices across 中文/粤语/英/日/韩/西/葡/法 etc. — see card.md for the full list" },
+        "audio_format": { "type": "enum", "options": ["mp3", "wav", "pcm", "flac"], "default": "mp3", "writable": "true", "note": "maps to input.audio_setting.format" },
+        "sample_rate": { "type": "integer", "default": 32000, "writable": "true", "note": "maps to input.audio_setting.sample_rate" },
+        "bitrate": { "type": "integer", "default": 128000, "writable": "true", "note": "maps to input.audio_setting.bitrate" },
+        "speed": { "type": "number", "default": 1.0, "writable": "true", "note": "maps to input.voice_setting.speed" },
+        "volume": { "type": "number", "default": 1.0, "writable": "true", "note": "maps to input.voice_setting.vol" },
+        "pitch": { "type": "integer", "default": 0, "writable": "true", "note": "maps to input.voice_setting.pitch" },
+        "emotion": { "type": "string", "writable": "true", "note": "maps to input.voice_setting.emotion (e.g. happy/sad/angry); null = auto-infer" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "note": "merged at the top of input; other direct MiniMax fields",
+          "fields": {
+            "pronunciation_dict": { "type": "object", "note": "custom pronunciation, e.g. {\"tone\": [\"处理/(chu3)(li3)\", \"危险/dangerous\"]}" },
+            "subtitle_enable": { "type": "boolean", "default": false, "note": "return subtitle timing" }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "minimax-speech-2-8-turbo",
+      "modelId": "MiniMax/speech-2.8-turbo",
+      "displayName": "MiniMax 语音 2.8 Turbo",
+      "note": "Synchronous text-to-speech; faster/cheaper Turbo tier. Inherits minimax-speech-2-8-hd: identical parameters and request structure, only the model id differs.",
+      "args": {
+        "text": { "type": "text", "writable": "true", "note": "text to synthesize (required); supports inline emotion/event tags like (laughs)" },
+        "model": { "type": "string", "value": "minimax-speech-2-8-turbo", "writable": "false" },
+        "voice": { "type": "string", "default": "male-qn-qingse", "writable": "true", "note": "maps to input.voice_setting.voice_id; 327 system voices — see minimax-speech-2-8-hd card.md for the full list" },
+        "audio_format": { "type": "enum", "options": ["mp3", "wav", "pcm", "flac"], "default": "mp3", "writable": "true", "note": "maps to input.audio_setting.format" },
+        "sample_rate": { "type": "integer", "default": 32000, "writable": "true", "note": "maps to input.audio_setting.sample_rate" },
+        "bitrate": { "type": "integer", "default": 128000, "writable": "true", "note": "maps to input.audio_setting.bitrate" },
+        "speed": { "type": "number", "default": 1.0, "writable": "true", "note": "maps to input.voice_setting.speed" },
+        "volume": { "type": "number", "default": 1.0, "writable": "true", "note": "maps to input.voice_setting.vol" },
+        "pitch": { "type": "integer", "default": 0, "writable": "true", "note": "maps to input.voice_setting.pitch" },
+        "emotion": { "type": "string", "writable": "true", "note": "maps to input.voice_setting.emotion (e.g. happy/sad/angry); null = auto-infer" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "note": "merged at the top of input; other direct MiniMax fields",
+          "fields": {
+            "pronunciation_dict": { "type": "object", "note": "custom pronunciation, e.g. {\"tone\": [\"处理/(chu3)(li3)\", \"危险/dangerous\"]}" },
+            "subtitle_enable": { "type": "boolean", "default": false, "note": "return subtitle timing" }
+          }
+        }
+      }
+    },
+    {
+      "adapterId": "seed-tts-2-0",
+      "modelId": "seed-tts-2.0",
+      "displayName": "豆包语音合成 2.0 (Seed-TTS 2.0)",
+      "note": "Asynchronous text-to-speech (submit then poll). 122 expressive Chinese system voices (角色扮演/有声阅读/客服/视频配音), emotion + ASMR support. Only voice / audio_format / sample_rate are used — speed/volume/pitch/emotion/bitrate are MiniMax-only and ignored here.",
+      "args": {
+        "text": { "type": "text", "writable": "true", "note": "maps to req_params.text (required)" },
+        "model": { "type": "string", "value": "seed-tts-2-0", "writable": "false" },
+        "voice": { "type": "string", "default": "zh_female_xiaohe_uranus_bigtts", "writable": "true", "note": "maps to req_params.speaker; *_uranus_bigtts voices support 情感变化/指令遵循/ASMR — see card.md for the full list" },
+        "audio_format": { "type": "enum", "options": ["mp3", "wav", "pcm", "flac"], "default": "mp3", "writable": "true", "note": "maps to req_params.audio_params.format" },
+        "sample_rate": { "type": "integer", "default": 24000, "writable": "true", "note": "maps to req_params.audio_params.sample_rate" },
+        "wait": { "type": "boolean", "default": true, "writable": "false" },
+        "timeout": { "type": "integer", "writable": "false" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false" },
+        "model_specific": {
+          "type": "object",
+          "note": "merged at the top of req_params; other direct seed-tts fields",
+          "fields": {
+            "callback_url": { "type": "string", "note": "async completion callback URL" }
+          }
+        }
+      }
+    }
+  ],
+  "understand_vision": [
+    {
+      "adapterId": "auto",
+      "modelId": "auto",
+      "displayName": "Auto (router selects a vision-understanding model)",
+      "note": "Unified tool schema from UnderstandVisionInput. Vision-language: returns a TEXT answer (not media). Always synchronous — no task_id, no wait/timeout. prompt is required even when media is attached.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true", "note": "instruction/question about the supplied media (required)" },
+        "model": { "type": "enum", "options": ["auto", "qwen3-vl-30b-a3b-thinking"], "default": "auto", "writable": "true" },
+        "images": { "type": "url_array", "writable": "true", "note": "public image URLs; multiple images reasoned over jointly" },
+        "video": { "type": "url", "writable": "true", "note": "a single public video URL (long video supported)" },
+        "system_prompt": { "type": "text", "writable": "true", "note": "null = generic 'You are a helpful assistant.'" },
+        "max_tokens": { "type": "integer", "writable": "true", "note": "max output tokens; null = model default" },
+        "temperature": { "type": "number", "writable": "true", "note": "sampling temperature; null = model default" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false", "note": "include token usage; the answer and reasoning_content are always returned" },
+        "model_specific": { "type": "object", "fields": {}, "note": "documented sub-fields depend on the resolved model; see that model's entry" }
+      }
+    },
+    {
+      "adapterId": "qwen3-vl-30b-a3b-thinking",
+      "modelId": "qwen3-vl-30b-a3b-thinking",
+      "displayName": "Qwen3-VL 30B A3B Thinking",
+      "note": "Vision-language understanding/reasoning over images & video (Thinking variant: also returns reasoning_content). Synchronous via OpenAI-compatible /model/v1/chat/completions; 128K context. Returns text, not media — no wait/timeout/watermark.",
+      "args": {
+        "prompt": { "type": "text", "writable": "true", "note": "maps to messages[user].content[].text (required)" },
+        "model": { "type": "string", "value": "qwen3-vl-30b-a3b-thinking", "writable": "false" },
+        "images": { "type": "url_array", "writable": "true", "note": "maps to messages[user].content[].image_url.url; multiple images reasoned over jointly" },
+        "video": { "type": "url", "writable": "true", "note": "maps to messages[user].content[].video_url.url; single video, long video supported" },
+        "system_prompt": { "type": "text", "writable": "true", "note": "maps to messages[system].content; null = 'You are a helpful assistant.'" },
+        "max_tokens": { "type": "integer", "writable": "true", "note": "maps to max_tokens; null = model default" },
+        "temperature": { "type": "number", "writable": "true", "note": "maps to temperature; null = model default" },
+        "return_metadata": { "type": "boolean", "default": true, "writable": "false", "note": "include usage; choices[0].message.reasoning_content is returned when true" },
+        "model_specific": {
+          "type": "object",
+          "note": "merged at the top level of the chat/completions request",
+          "fields": {
+            "top_p": { "type": "number", "note": "nucleus sampling" },
+            "tools": { "type": "array", "note": "tool/function-calling definitions" }
+          }
+        }
+      }
+    }
+  ]
+}
