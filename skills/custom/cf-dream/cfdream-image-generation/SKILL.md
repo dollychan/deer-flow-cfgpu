@@ -1,6 +1,6 @@
 ---
 name: cfdream-image-generation
-description: Use this skill when the user requests to generate, create, imagine, or visualize images — characters, scenes, products, comics, or any visual content — by calling the cfdream MCP generate_image tool. Covers prompt craft, reference images, image groups (组图), and aspect ratio / resolution choices.
+description: Use this skill when the user requests to generate, create, imagine, or visualize images — characters, scenes, products, comics, or any visual content — by calling the cfdream MCP generate_image tool. Covers reading user intent — especially when a reference image is given (style/identity reference vs. edit, reframe, or upscale) — plus prompt craft, reference images, image groups (组图), and aspect ratio / resolution choices.
 ---
 
 # Image Generation Skill (cfdream MCP)
@@ -11,16 +11,32 @@ Generate high-quality images by calling the cfdream MCP `generate_image` tool. T
 
 > `generate_image` takes a **single text `prompt` string** plus typed parameters — there is **no JSON prompt file**. Compose the structured thinking below into one rich English description, and map everything else (references, ratio, resolution) onto the tool's schema fields.
 
-## Step 1 — Understand the request
+## Step 1 — Understand the request (do this first, it decides everything)
 
-Identify before composing:
+The single most important step is reading **what the user actually wants** — the same image and words can mean very different jobs, and misreading the intent wastes a billed generation. Identify before composing:
 
+- **Goal / operation** — what should happen? (create something new, keep a character's identity, restyle, edit one element, reframe, upscale …) — see the reference-image table below.
 - **Subject / content** — what is in the image (character, scene, product, comic panel …)
 - **Style** — art style, mood, color palette, rendering (photographic, illustration, 3D …)
-- **Composition & technical** — framing, lighting, level of detail, aspect ratio
-- **References** — any material ids (uploads / prior generations / search hits) that should guide identity, style, or composition
+- **Composition & technical** — framing, lighting, level of detail, aspect ratio, resolution
+- **References** — any material ids (uploads / prior generations / search hits) and, crucially, **the role each one plays** for this goal.
 
 You do **not** need to inspect `/mnt/user-data` folders first.
+
+### When a reference image is involved — read the intent, don't assume
+
+A reference image is **not** self-explanatory. Before calling the tool, decide which of these the user means — each is a different job:
+
+| The user wants to… | Intent | How to handle |
+|---|---|---|
+| Create something **new** guided by the reference (borrow style/composition/mood) | Style / composition reference | Pass the id via `reference_images`; describe the new subject in the prompt, referring to the ref positionally ("in the style of reference 1"). |
+| **Keep the same character/subject/product** in a new pose, scene, or outfit | Identity reference | `reference_images` + a prompt that fixes the identity and changes only the context ("the same woman from reference 1, now walking on a beach"). Consider `image_search` for extra angles. |
+| **Combine** elements from several images (this character + that background/object) | Multi-reference composition | Multiple ids in `reference_images`; name each positionally in the prompt ("character from reference 1, jacket from reference 2"). |
+| **Edit / modify** one thing in the image (swap an object, change a color, add/remove an element) | Local edit | `reference_images` + a precise prompt describing *only* the change and what to preserve. |
+| **Reframe / recompose** — change aspect ratio, crop, or extend the canvas (outpaint) | Reframe | Set the target `aspect_ratio`; prompt to extend/recompose while preserving the subject. For an **exact** crop/resize with no content change, prefer a local tool (ffmpeg/ImageMagick in the sandbox) over a billed re-generation. |
+| **Upscale / enhance** — higher resolution or cleaner detail, same content | Upscale | Raise `resolution` (and `quality_tier`) with a faithful prompt. If the user only wants a bigger file with identical pixels, a local upscale is cheaper than regenerating. |
+
+If the goal is genuinely ambiguous (e.g. "use this image" — reference vs. edit vs. upscale?), **ask one focused question** before generating rather than guessing. State the interpretation you're acting on when you proceed, so the user can correct it.
 
 ## Step 2 — Compose the prompt (the craft)
 

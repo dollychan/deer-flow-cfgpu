@@ -40,13 +40,11 @@ Fields: `title` (optional, used as transcript heading), `locale` (`en`/`zh`), `l
 - *Tone*: natural, conversational — two friends chatting; casual transitions, reactions, follow-up questions; avoid academic/formal tone.
 - *Content*: frequent back-and-forth; short, easy-to-speak sentences; plain text only (no markdown/formulas/code); translate technical concepts into accessible language; exclude meta info (dates, author names, document structure).
 
-### Step 3 — Pick the two host voices
+### Step 3 — Cast the two host voices
 
-Choose **one male and one female voice** and keep them fixed for the whole episode. Pass them via the `voice` parameter of `generate_audio`:
+Use the `cfdream-audio-model-select` skill to pick the **model** and **one male + one female voice** for the episode's language. Keep both voices **from the same model** and **fixed for the whole episode**, and pass each via the `voice` parameter of `generate_audio`. Confirm both ids actually exist (via that skill / `get_model_card` / `list_models(task_type="audio")`) — **never invent a voice id**; fall back to a model default if a described voice isn't available.
 
-- **English / multilingual** → MiniMax presenter voices read well as hosts: `voice="presenter_male"` and `voice="presenter_female"` (model `minimax-speech-2-8-hd` or `-turbo`). See `minimax-speech` for the full 327-voice list.
-- **Chinese** → either the MiniMax presenters above, or Doubao `seed-tts-2-0` voices (female default `zh_female_xiaohe_uranus_bigtts`; pick a 通用/视频配音 male voice from `get_model_card("seed-tts-2-0")`). See `seed-tts`.
-- Or leave `model="auto"` and just set the two `voice` ids — but confirm both ids exist (call `get_model_card`/`list_models(task_type="audio")`); never invent a voice id.
+Rules of thumb it will apply: English/multilingual → MiniMax (HD, or Turbo for cost); Chinese character/audiobook timbre → Doubao seed-tts. Both hosts must share one model so timbre and loudness match across the cut.
 
 ### Step 4 — Synthesize each line
 

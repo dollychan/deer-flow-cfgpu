@@ -1,111 +1,47 @@
 ---
 name: minimax-speech
-description: Synthesize speech from text with the MiniMax speech 2.8 models (HD / Turbo) by calling the cfgpu MCP generate_audio tool — synchronous text-to-speech with fine voice control (327 system voices, speed/volume/pitch/emotion, pronunciation dictionary). Use when the user wants MiniMax TTS, English/multilingual narration, or fine-grained voice tuning.
+description: Understand what a user wants from text-to-speech and match it to the right MiniMax speech 2.8 model (HD / Turbo), the right voice, and voice-control values (speed / volume / pitch / emotion / format) that fit their intent. Use when the user wants MiniMax TTS, English/multilingual narration, or fine-grained voice tuning.
 ---
 
-# Synthesizing speech with MiniMax (MCP)
+# Choosing a MiniMax speech model and voice settings
 
-This skill is for an agent that calls the **cfgpu MCP server** tools. The relevant tools:
+The job of this skill is to read the user's request, figure out what they actually want to hear, and translate that into: **which MiniMax model**, **which voice**, and **which voice-control values**. Focus on intent — not on how the audio is technically produced.
 
-- `generate_audio(...)` — synthesize speech (the main one)
-- `list_models(task_type="audio")` — enumerate voice models
-- `get_model_card(model_name)` — fetch a model's full parameter/usage doc, including the **full system voice list (327 voice_ids)**
+## Step 1 — Pick the model
 
-> Tool names may be namespaced by the host (e.g. `mcp__cfgpu__generate_audio`). Use whatever prefix your environment exposes; the parameters below are identical.
-
-MiniMax speech is **synchronous** — the audio URL comes back in the same `generate_audio` call. Leave `wait=true` (the default); there is no task to poll.
-
-## Step 1 — Pick the model (`model` parameter)
-
-| `model` (adapter_id) | Best for | 价格 | cost / speed |
-|---|---|---|---|
-| `minimax-speech-2-8-hd` | Highest fidelity, emotion, pronunciation dict | 0.3675 元/万字符 | cost 2/5 · speed 3/5 |
-| `minimax-speech-2-8-turbo` | Faster + cheaper, same voices/controls | 0.21 元/万字符 | cost 1/5 · speed 4/5 |
-
-Decision guide:
-- Best quality / emotional nuance → `minimax-speech-2-8-hd`
-- Lowest cost & latency, bulk narration → `minimax-speech-2-8-turbo`
-- Let the router restrict to MiniMax only → `model=["minimax-speech-2-8-hd", "minimax-speech-2-8-turbo"]`
-- Don't care which provider → `model="auto"`
-
-> For Chinese-only character/role voices or async submission, consider the **seed-tts** skill (Doubao seed-tts-2.0) instead.
-
-## Step 2 — Choose a voice (`voice` parameter)
-
-`voice` maps to MiniMax `voice_setting.voice_id`. Default (when omitted) is `male-qn-qingse`.
-
-The model card lists **all 327 system voices** across 中文/粤语/English/日本語/한국어/Español/Português/Français/Deutsch/Русский and ~14 more languages. **Always call `get_model_card("minimax-speech-2-8-hd")` to look up an exact `voice_id`** before promising a specific voice. Both HD and Turbo share the same voice list.
-
-A few common ids: `male-qn-qingse` (青涩青年), `female-shaonv` (少女), `presenter_male` / `presenter_female` (主持人), `audiobook_male_1` / `audiobook_female_1` (有声书).
-
-## Step 3 — Tune the voice (all MiniMax-only)
-
-| Parameter | Default | Range / notes |
+| Model | Best for | Cost / speed |
 |---|---|---|
-| `speed` | `1.0` | speech rate multiplier (~0.5–2.0) |
-| `volume` | `1.0` | volume multiplier |
-| `pitch` | `0` | pitch offset (negative = lower) |
-| `emotion` | none | `happy` / `sad` / `angry` / `fearful` / `disgusted` / `surprised` / `neutral` — omit to let the model infer from text |
-| `audio_format` | `mp3` | `mp3` / `wav` / `pcm` / `flac` |
-| `sample_rate` | `32000` | Hz, e.g. `16000` / `24000` / `32000` |
-| `bitrate` | `128000` | bps (MiniMax only) |
-| `model_specific` | — | raw API extras merged last, e.g. a `pronunciation_dict` to override pronunciations, or `subtitle_enable` |
+| `minimax-speech-2-8-hd` | Highest fidelity, emotional nuance, custom pronunciation | cost 2/5 · speed 3/5 |
+| `minimax-speech-2-8-turbo` | Faster + cheaper, same voices and controls | cost 1/5 · speed 4/5 |
 
-## Step 4 — Call the tool
+How to decide, based on intent:
 
-### Basic
-```json
-generate_audio({
-  "text": "明朝开国皇帝朱元璋也称这本书为，万物之根。",
-  "model": "minimax-speech-2-8-hd"
-})
-```
+- Wants **best quality** or emotional nuance → `minimax-speech-2-8-hd`
+- Cares about **cost or latency**, or is generating bulk narration → `minimax-speech-2-8-turbo`
+- No preference → `minimax-speech-2-8-hd`
 
-### Specific voice + emotion + faster, on Turbo
-```json
-generate_audio({
-  "text": "Welcome aboard! We are about to begin our journey.",
-  "model": "minimax-speech-2-8-turbo",
-  "voice": "presenter_female",
-  "speed": 1.1,
-  "emotion": "happy"
-})
-```
+> For Chinese-only character/role voices, consider the **seed-tts** skill (Doubao seed-tts-2.0) instead. MiniMax is the better fit for English/multilingual and fine voice tuning.
 
-### High-quality WAV with custom pronunciation
-```json
-generate_audio({
-  "text": "CFGPU 读作 C-F-G-P-U。",
-  "model": "minimax-speech-2-8-hd",
-  "voice": "audiobook_male_1",
-  "audio_format": "wav",
-  "sample_rate": 32000,
-  "model_specific": { "pronunciation_dict": { "tone": ["处理/(chu3)(li3)"] } }
-})
-```
+## Step 2 — Choose a voice
 
-## Reading the result
+MiniMax offers **327 system voices** across 中文 / 粤语 / English / 日本語 / 한국어 / Español / Português / Français / Deutsch / Русский and ~14 more languages; HD and Turbo share the same list. Match the voice to the user's described speaker — language, gender, age, and role.
 
-`generate_audio` returns a normalized object:
+A few common ones: `male-qn-qingse` (青涩青年, the default), `female-shaonv` (少女), `presenter_male` / `presenter_female` (主持人), `audiobook_male_1` / `audiobook_female_1` (有声书).
 
-```json
-{
-  "urls": ["https://.../speech.mp3"],     // the generated audio
-  "expires_at": "2026-06-18T12:00:00Z",   // URL valid ~24h — download promptly
-  "artifact": true,
-  "payload": { ... },                      // the exact MiniMax API request that was sent
-  "metadata": {                            // present when return_metadata=true
-    "model_used": "MiniMax/speech-2.8-hd",
-    "usage": { ... }                       // billing is per character (按字符计费)
-  }
-}
-```
+Pick the voice that best fits the intent; if the user's described voice isn't available, fall back to a sensible default and tell them rather than inventing one.
 
-Give the user the `urls` value and warn that the link expires in ~24 hours. On error the tool returns an error dict instead — surface its `message`.
+## Step 3 — Set voice controls to match intent
 
-## Notes & troubleshooting
+| Control | Default | How to choose from intent |
+|---|---|---|
+| Speed | 1.0 | Faster (~1.1–2.0) for energetic/urgent delivery, slower (~0.5–0.9) for calm/serious. |
+| Volume | 1.0 | Raise or lower for loudness. |
+| Pitch | 0 | Negative for a deeper voice, positive for higher. |
+| Emotion | inferred | `happy` / `sad` / `angry` / `fearful` / `disgusted` / `surprised` / `neutral` — set it when the user names a mood; otherwise let the model infer from the text. |
+| Audio format | mp3 | `mp3` general, `wav`/`flac` for higher quality, `pcm` for raw. |
+| Sample rate | 32000 Hz | Higher for better fidelity, lower to save size. |
+| Pronunciation | — | If the user needs a specific pronunciation of a term, note it so it can be enforced. |
 
-- Billing is **per character** (元/万字符), so cost scales with `text` length — Turbo is ~1.75× cheaper than HD.
-- `speed` / `volume` / `pitch` / `emotion` are **MiniMax-only**; seed-tts ignores them.
-- If a requested voice isn't in the card's 327-voice list, fall back to the default and tell the user, rather than inventing an id.
-- `content_blocked` → rewrite sensitive text. `invalid_params` → check format/sample_rate/voice_id against the card. `quota_exceeded` → top up the account.
+## Step 4 — Confirm the choice back to the user
+
+Before synthesizing, briefly state the model, voice, and key controls you chose and why, so the user can correct any misread intent. If the desired voice or language is unclear, ask one focused question rather than guessing. Note that cost scales with text length, and Turbo is roughly 1.75× cheaper than HD.
