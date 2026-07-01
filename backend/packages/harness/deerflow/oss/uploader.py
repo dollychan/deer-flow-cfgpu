@@ -108,6 +108,50 @@ class OSSUploader:
         )
         return self._client.presign(key) if self._config.presigned_url else key
 
+    def inline_object_key(
+        self,
+        data: bytes,
+        thread_id: str,
+        *,
+        mime_type: str | None = None,
+        filename: str | None = None,
+    ) -> str:
+        """Derive the (deterministic) object_key for inline bytes **without** uploading.
+
+        Pure content-hash key derivation so callers can dedup against the registry
+        before spending an upload (mirrors the ``find_by_address`` short-circuit on the
+        URL path). :meth:`rehost_bytes` derives the same key.
+        """
+        name = _inline_filename(data, mime_type, filename)
+        return f"agent-artifacts/{thread_id}/{_infer_category(name)}/{name}"
+
+    async def rehost_bytes(
+        self,
+        data: bytes,
+        thread_id: str,
+        *,
+        mime_type: str | None = None,
+        filename: str | None = None,
+    ) -> str:
+        """Re-host an in-memory media payload into our bucket; return the **object_key**.
+
+        Sibling of :meth:`rehost_url` for inline media that arrives without a URL (e.g.
+        MiniMax speech's hex audio blob, normalised by the MCP into a base64
+        ``inline_media`` descriptor). The object_key embeds a content hash so re-hosting
+        the same bytes (a ``task_wait`` replay or a repeat within one batch) is idempotent
+        — same key, no duplicate object.
+
+        The blocking OSS ``put_object`` is offloaded to a thread so the event loop is never
+        blocked. Raises on oversize / upload failure — the caller fail-opens (drops the item).
+        """
+        if len(data) > _REHOST_MAX_BYTES:
+            raise ValueError(f"inline payload {len(data)} bytes exceeds {_REHOST_MAX_BYTES} ceiling")
+        object_key = self.inline_object_key(data, thread_id, mime_type=mime_type, filename=filename)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._client.upload_bytes, object_key, data, mime_type)
+        logger.info("OSSUploader: re-hosted inline bytes → %s (%d bytes)", object_key, len(data))
+        return object_key
+
     async def rehost_url(self, url: str, thread_id: str) -> str:
         """Fetch a remote URL and re-host its bytes into our bucket; return the **object_key**.
 
@@ -138,6 +182,22 @@ class OSSUploader:
         await loop.run_in_executor(None, self._client.upload_bytes, object_key, data, content_type)
         logger.info("OSSUploader: re-hosted %s → %s (%d bytes)", url, object_key, len(data))
         return object_key
+
+
+def _inline_filename(data: bytes, mime_type: str | None, filename: str | None) -> str:
+    """Stable, collision-resistant object filename for inline bytes: ``<sha1(data)[:16]>-<name>``.
+
+    The content hash makes re-hosting identical bytes deterministic (idempotent key); the
+    extension is taken from ``filename`` or guessed from ``mime_type`` so the object serves
+    with a sensible type (and ``_infer_category`` can bucket it as image/video/audio).
+    """
+    digest = hashlib.sha1(data).hexdigest()[:16]
+    name = filename or "inline"
+    if not Path(name).suffix and mime_type:
+        ext = mimetypes.guess_extension(mime_type)
+        if ext:
+            name = f"{name}{ext}"
+    return f"{digest}-{name}"
 
 
 def _filename_from_url(url: str, content_type: str | None) -> str:

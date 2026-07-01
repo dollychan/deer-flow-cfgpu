@@ -158,6 +158,39 @@ async def rehost_remote_url(
     return MaterializeOutcome(id=mid, update=upd, ref_type="oss_path", ref=object_key, stable=True, deduped=False)
 
 
+async def rehost_inline_bytes(
+    materials: dict[str, Material],
+    data: bytes,
+    *,
+    thread_id: str,
+    kind: Kind,
+    mime_type: str | None = None,
+    filename: str | None = None,
+    origin: Origin = "generate",
+    caption: str | None = None,
+    turn: int | None = None,
+    display: bool | None = None,
+) -> MaterializeOutcome:
+    """Capture 内联字节路径（无 url）：inline media bytes → 我方 OSS object_key（oss_path）。
+
+    ``rehost_remote_url`` 的姊妹原语——部分 provider 不回 url 而把媒体内联返回（如 MiniMax
+    speech 的 hex 音频 blob，经 MCP 归一为 base64 ``inline_media`` 描述符）。object_key 由**内容
+    哈希**派生 → ``task_wait`` 重放 / 同批重复字节 **幂等**（同 key 不二次上传）。查重 R3/R4：先按
+    派生 object_key 地址反查，命中既有 → 跳过上传 IO。**失败 raise**（调用方 fail-open 丢弃该 item，
+    §I5：内联无临期 url 可退回，故是「无产物准入」而非 stable=false global_url）。
+    """
+    uploader = get_oss_uploader()
+    if uploader is None:
+        raise RuntimeError("OSS uploader unavailable — cannot re-host inline bytes")
+    object_key = uploader.inline_object_key(data, thread_id, mime_type=mime_type, filename=filename)
+    hit = find_by_address(materials, "oss_path", object_key)
+    if hit is not None:
+        return _deduped(materials, hit)  # 幂等：同内容字节已登记 → 不二次上传
+    uploaded = await uploader.rehost_bytes(data, thread_id, mime_type=mime_type, filename=filename)
+    mid, upd = register(materials, kind=kind, origin=origin, ref_type="oss_path", ref=uploaded, caption=caption, turn=turn, display=display, stable=True)
+    return MaterializeOutcome(id=mid, update=upd, ref_type="oss_path", ref=uploaded, stable=True, deduped=False)
+
+
 def register_remote_url(
     materials: dict[str, Material],
     url: str,

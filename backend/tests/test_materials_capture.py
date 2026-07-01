@@ -7,6 +7,7 @@ task_wait 重放去重、D4 我方对象短路、双轨改写（content 零 url 
 
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import dataclass, field, replace
 
@@ -63,15 +64,29 @@ class FakeRequest:
 
 
 class _FakeUploader:
-    def __init__(self, fail: bool = False) -> None:
+    def __init__(self, fail: bool = False, inline_fail: bool = False) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.inline_calls: list[tuple[int, str, str | None, str | None]] = []
         self._fail = fail
+        self._inline_fail = inline_fail
 
     async def rehost_url(self, url: str, thread_id: str) -> str:
         self.calls.append((url, thread_id))
         if self._fail:
             raise RuntimeError("boom")
         return f"agent-artifacts/{thread_id}/images/{url.rsplit('/', 1)[-1]}"
+
+    def inline_object_key(self, data: bytes, thread_id: str, *, mime_type: str | None = None, filename: str | None = None) -> str:
+        import hashlib
+
+        digest = hashlib.sha1(data).hexdigest()[:16]
+        return f"agent-artifacts/{thread_id}/audios/{digest}-{filename or 'inline'}"
+
+    async def rehost_bytes(self, data: bytes, thread_id: str, *, mime_type: str | None = None, filename: str | None = None) -> str:
+        self.inline_calls.append((len(data), thread_id, mime_type, filename))
+        if self._inline_fail:
+            raise RuntimeError("inline boom")
+        return self.inline_object_key(data, thread_id, mime_type=mime_type, filename=filename)
 
 
 def _cfdream_result(urls, *, name="cfdream_generate_image", artifact=True, extra=None):
@@ -322,3 +337,117 @@ async def test_multi_url_distinct_content_derived_ids():
     assert set(out.update["materials"]) == {a, b}
     assert json.loads(out.update["messages"][0].content)["materials"] == [a, b]
     assert len(up.calls) == 2
+
+
+# --- 内联字节路径（inline_media，无 url）: MiniMax speech 等 --------------------
+#
+# provider 不回 url、把媒体内联返回（base64 blob 走 structuredContent 侧信道 →
+# ToolMessage.artifact['structured_content']['inline_media']）。capture decode+upload →
+# oss_path material，并从 content / structuredContent 双双剥掉 blob（I9）。
+
+
+def _b64_audio(raw: bytes = b"\xff\xfb\x90\x00mp3-frames") -> tuple[str, bytes]:
+    return base64.b64encode(raw).decode("ascii"), raw
+
+
+def _inline_audio_result(b64, *, mime="audio/mpeg", filename="speech.mp3", name="cfdream_generate_audio", with_usage=True):
+    """成功但无 url 的音频结果：content 精简、inline_media 在 structuredContent。"""
+    content = {"urls": [], "expires_at": None, "artifact": True, "status": "done"}
+    sc = {"inline_media": [{"data": b64, "mime_type": mime, "filename": filename}]}
+    if with_usage:
+        sc["usage"] = {"characters": 34}
+    return ToolMessage(content=json.dumps(content), tool_call_id="tc_1", name=name, artifact={"structured_content": sc})
+
+
+def _inline_mid(raw: bytes, thread_id="t1", filename="speech.mp3") -> str:
+    key = f"agent-artifacts/{thread_id}/audios/{__import__('hashlib').sha1(raw).hexdigest()[:16]}-{filename}"
+    return material_id(*classify_ref(key))
+
+
+@pytest.mark.asyncio
+async def test_inline_bytes_rehost_to_oss_path():
+    up = _FakeUploader()
+    b64, raw = _b64_audio()
+    out = await _run(_inline_audio_result(b64), fake_uploader=up)
+
+    assert isinstance(out, Command)
+    mid = _inline_mid(raw)
+    mats = out.update["materials"]
+    assert mats[mid]["ref_type"] == "oss_path"
+    assert mats[mid]["ref"].endswith("-speech.mp3")
+    assert mats[mid]["kind"] == "audio"
+    assert mats[mid]["stable"] is True
+    # 上传一次，字节长度与 mime/filename 透传
+    assert up.inline_calls == [(len(raw), "t1", "audio/mpeg", "speech.mp3")]
+
+    # content 无 blob、无 urls，留 materials id
+    body = json.loads(out.update["messages"][0].content)
+    assert body["materials"] == [mid]
+    assert "inline_media" not in body and "inline_media" not in out.update["messages"][0].content
+
+    # structuredContent 里 usage 保留、inline_media（blob）已剥
+    sc = out.update["messages"][0].artifact["structured_content"]
+    assert sc == {"usage": {"characters": 34}}
+
+
+@pytest.mark.asyncio
+async def test_inline_bytes_dedup_same_content():
+    up = _FakeUploader()
+    b64, raw = _b64_audio()
+    # 同一结果携带两条相同 inline item → 内容哈希同 key → 只上传一次
+    res = _inline_audio_result(b64)
+    res.artifact["structured_content"]["inline_media"].append({"data": b64, "mime_type": "audio/mpeg", "filename": "speech.mp3"})
+    out = await _run(res, fake_uploader=up)
+
+    mid = _inline_mid(raw)
+    assert len(up.inline_calls) == 1  # 幂等：不二次上传
+    assert json.loads(out.update["messages"][0].content)["materials"] == [mid, mid]
+
+
+@pytest.mark.asyncio
+async def test_inline_bytes_upload_failure_fail_open_strips_blob():
+    up = _FakeUploader(inline_fail=True)
+    b64, _ = _b64_audio()
+    out = await _run(_inline_audio_result(b64, with_usage=False), fake_uploader=up)
+
+    # 上传失败 → 丢弃该 item（无产物准入），但 blob 仍须从 structuredContent 剥掉
+    assert isinstance(out, Command)
+    assert "materials" not in out.update
+    assert json.loads(out.update["messages"][0].content)["materials"] == []
+    assert out.update["messages"][0].artifact is None  # 只有 inline_media 一项，剥空 → None
+
+
+@pytest.mark.asyncio
+async def test_inline_bytes_bad_base64_skipped():
+    up = _FakeUploader()
+    out = await _run(_inline_audio_result("!!!not-base64!!!"), fake_uploader=up)
+    assert up.inline_calls == []  # 坏 base64 不触发上传
+    assert json.loads(out.update["messages"][0].content)["materials"] == []
+
+
+@pytest.mark.asyncio
+async def test_inline_media_rehosted_under_register_safety_net():
+    # register 策略工具若回 inline bytes → 仍 rehost（安全网：inline 必 rehost，register 对字节无定义）
+    up = _FakeUploader()
+    b64, raw = _b64_audio()
+    out = await _run(_inline_audio_result(b64, name="image_search"), fake_uploader=up, name="image_search")
+    mid = _inline_mid(raw)
+    assert isinstance(out, Command)
+    assert out.update["materials"][mid]["ref_type"] == "oss_path"
+    assert len(up.inline_calls) == 1
+    assert json.loads(out.update["messages"][0].content)["materials"] == [mid]
+
+
+@pytest.mark.asyncio
+async def test_inline_media_rehosted_under_off_safety_net():
+    # 漏配（off，默认策略）的工具若回 inline bytes → 安全网仍 rehost + 剥 blob（不放过、不丢字节）
+    up = _FakeUploader()
+    b64, raw = _b64_audio()
+    out = await _run(_inline_audio_result(b64, name="some_unconfigured_tool"), fake_uploader=up, name="some_unconfigured_tool")
+    mid = _inline_mid(raw)
+    assert isinstance(out, Command)
+    assert out.update["materials"][mid]["ref_type"] == "oss_path"
+    assert len(up.inline_calls) == 1
+    # blob 从 structuredContent 剥除，不随侧信道下行
+    sc = out.update["messages"][0].artifact["structured_content"]
+    assert "inline_media" not in sc

@@ -38,6 +38,7 @@ before_agent（Ingest）现状：上行素材登记发生在**消费侧** ``agen
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from collections.abc import Awaitable, Callable, Sequence
@@ -50,7 +51,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from deerflow.agents.materials.materialize import MaterializeOutcome, register_remote_url, rehost_remote_url, stage_to_oss
+from deerflow.agents.materials.materialize import MaterializeOutcome, register_remote_url, rehost_inline_bytes, rehost_remote_url, stage_to_oss
 from deerflow.agents.materials.policy import CapturePolicy, resolve_capture_policy, resolve_url_path
 from deerflow.agents.materials.registry import classify_ref, is_our_object_key, register
 from deerflow.agents.materials.types import Kind, Material
@@ -270,6 +271,44 @@ def _infer_kind(url: str) -> Kind:
     return "image"
 
 
+_KIND_BY_MIME_PREFIX: list[tuple[str, Kind]] = [("image/", "image"), ("video/", "video"), ("audio/", "audio")]
+
+
+def _infer_inline_kind(item: dict[str, Any]) -> Kind:
+    """内联媒体的 kind：先按 mime_type 前缀，再退回 filename 扩展名，最后默认 audio。
+
+    内联字节目前只有 MiniMax speech 一个产源（音频），故末位兜底取 audio 而非 ``_infer_kind``
+    的 image 默认。"""
+    mime = item.get("mime_type")
+    if isinstance(mime, str):
+        for prefix, kind in _KIND_BY_MIME_PREFIX:
+            if mime.startswith(prefix):
+                return kind
+    filename = item.get("filename")
+    if isinstance(filename, str) and filename:
+        return _infer_kind(filename)
+    return "audio"
+
+
+def _extract_inline_media(result: Any) -> list[dict[str, Any]]:
+    """从 structuredContent（``result.artifact['structured_content']``）读 ``inline_media`` 描述符。
+
+    MCP 的 ``split_structured`` 把内联媒体（base64 ``data`` + ``mime_type``）路由进 structuredContent，
+    langchain-mcp-adapters 映射为 ``ToolMessage.artifact['structured_content']``——故原始 blob **绝不进
+    LLM-facing content**（I9）。只认这个结构化侧信道、不扫 content。无 / 结构不符 → []。
+    """
+    artifact = getattr(result, "artifact", None)
+    if not isinstance(artifact, dict):
+        return []
+    sc = artifact.get("structured_content")
+    if not isinstance(sc, dict):
+        return []
+    items = sc.get("inline_media")
+    if not isinstance(items, list):
+        return []
+    return [it for it in items if isinstance(it, dict) and isinstance(it.get("data"), str) and it.get("data")]
+
+
 def _thread_id_from_request(request: ToolCallRequest) -> str:
     """cfdream rehost 的 object_key 前缀。runtime.context → config → 兜底 ``"default"``。"""
     runtime = getattr(request, "runtime", None)
@@ -286,7 +325,7 @@ def _thread_id_from_request(request: ToolCallRequest) -> str:
     return "default"
 
 
-def _rewrite_result(result: ToolMessage, ordered_urls: list[str], id_for_url: dict[str, str]) -> ToolMessage:
+def _rewrite_result(result: ToolMessage, material_ids: list[str]) -> ToolMessage:
     """改写 ``.content`` 去 url 留 id 形态（I10），加 ``materials:[id...]`` 供后续引用 + emit 投影。
 
     **不再在此重建 ``.artifact`` items**（D14：rehost 与 emit artifact 平行隔离）——交付 items 由
@@ -295,22 +334,27 @@ def _rewrite_result(result: ToolMessage, ordered_urls: list[str], id_for_url: di
     generate_* 的 usage/payload；无则置 None。**注意此处只是把 structuredContent 接力到外层**：
     MessageStreamMiddleware emit 完下行事件后会从 ToolMessage 上剥除它（``_strip_structured_side_channel``），
     故它不进 checkpoint —— content 进 LLM、structuredContent 只走下行给客户端，二者干净分离。
+
+    **``inline_media`` 已在此消费**（decode+upload→oss_path material），故从 content（防御性）与
+    structuredContent 双双剥除——原始 base64 blob 不进 LLM、不随 structuredContent 下行给客户端
+    （客户端改由 artifact 投影拿 presigned url），I9。
     """
     parsed = _parse_content_json(result)
-    ids = [id_for_url[u] for u in ordered_urls if u in id_for_url]
     if isinstance(parsed, dict):
         body = dict(parsed)
         body.pop("urls", None)
         body.pop("expires_at", None)  # url-bound，url 已去
         body.pop("artifact", None)
-        body["materials"] = ids  # 后续引用用 id；MessageStream 据此投影 artifact items
+        body.pop("inline_media", None)  # 防御性：blob 绝不留在 LLM-facing content
+        body["materials"] = material_ids  # 后续引用用 id；MessageStream 据此投影 artifact items
         new_content = json.dumps(body, ensure_ascii=False)
     else:
-        new_content = json.dumps({"materials": ids}, ensure_ascii=False)
+        new_content = json.dumps({"materials": material_ids}, ensure_ascii=False)
     new_artifact: dict[str, Any] | None = None
     orig_artifact = getattr(result, "artifact", None)
     if isinstance(orig_artifact, dict) and isinstance(orig_artifact.get("structured_content"), dict):
-        new_artifact = {"structured_content": orig_artifact["structured_content"]}
+        sc = {k: v for k, v in orig_artifact["structured_content"].items() if k != "inline_media"}  # 剥已消费的 blob（I9）
+        new_artifact = {"structured_content": sc} if sc else None
     return ToolMessage(
         content=new_content,
         tool_call_id=result.tool_call_id,
@@ -452,22 +496,36 @@ class MaterialsMiddleware(AgentMiddleware):
         """工具产物 Capture：rehost/register + content 改写。无可捕获产物 → None（原样放行）。
 
         只作用于 ToolMessage（cfdream MCP 结果）；Command（present_* 自管 artifact）暂不接管。
-        url 抽取走 per-tool ``url_path``（JSON 字段路径）。**本类不设 display、不建 artifact items**
-        （D14）：交付判定归 MessageStreamMiddleware。rehost 落不了盘（fetch/upload 失败）→
-        **fail-open**：置 ``stable=false`` 登记 global_url 续跑（不阻断 run；emit 端按 stable 过滤
-        不交付，I5），临期 url 只进 ``ref`` 不进 content/artifact/final_state（I9）。
-        """
-        if policy == "off" or not isinstance(result, ToolMessage):
-            return None
-        urls = _extract_urls_by_path(result, url_path)
-        if not urls:
-            return None
+        url 抽取走 per-tool ``url_path``（JSON 字段路径），**按 policy 门控**（off → 不碰 content 里的
+        url）。**本类不设 display、不建 artifact items**（D14）：交付判定归 MessageStreamMiddleware。
+        rehost 落不了盘（fetch/upload 失败）→ **fail-open**：置 ``stable=false`` 登记 global_url 续跑
+        （不阻断 run；emit 端按 stable 过滤不交付，I5），临期 url 只进 ``ref`` 不进 content/artifact/
+        final_state（I9）。
 
-        # 物化收口（§8 R3/R4）：逐 url 走统一 helper（地址反查去重 + rehost/register），
-        # ``working`` 滚动更新使同批重复 url / task_wait 重放幂等（不双计费）。
+        **inline 字节是内在必 rehost 的安全网，不受 policy 门控**：register 对裸字节无定义（无 ref
+        可留、无懒升级退路），off 会把 blob 放过——不落盘则字节永久丢失、且 blob 随 structured_content
+        侧信道下行。故只要结果带 ``inline_media`` 就 rehost（含漏配 off/register 的工具），非 rehost
+        策略下额外告警提示漏配。
+        """
+        if not isinstance(result, ToolMessage):
+            return None
+        urls = _extract_urls_by_path(result, url_path) if policy != "off" else []
+        inline_items = _extract_inline_media(result)  # 无条件——inline 必 rehost（安全网）
+        if not urls and not inline_items:
+            return None
+        if inline_items and policy != "rehost":
+            logger.warning(
+                "MaterialsCapture: tool %r returned inline media under policy=%s — rehosting as a "
+                "safety net (inline bytes are intrinsically must-rehost); configure "
+                "materials_capture=rehost for it to silence this.",
+                getattr(result, "name", "?"), policy,
+            )
+
+        # 物化收口（§8 R3/R4）：逐产物走统一 helper（地址反查去重 + rehost/register），
+        # ``working`` 滚动更新使同批重复 / task_wait 重放幂等（不双计费）。
         working = dict(materials)
         updates: dict[str, Material] = {}
-        id_for_url: dict[str, str] = {}
+        ordered_ids: list[str] = []
 
         for url in urls:
             kind = _infer_kind(url)
@@ -480,12 +538,36 @@ class MaterialsMiddleware(AgentMiddleware):
                     outcome = MaterializeOutcome(id=mid, update=upd, ref_type="global_url", ref=url, stable=False, deduped=False)
             else:  # register：仅准入，ref 保持 global_url，不 fetch/不 upload
                 outcome = register_remote_url(working, url, kind=kind, origin="generate")
-            id_for_url[url] = outcome.id
+            ordered_ids.append(outcome.id)
             if outcome.update:
                 updates.update(outcome.update)
                 working.update(outcome.update)
 
-        new_msg = _rewrite_result(result, urls, id_for_url)
+        # 内联字节（无 url）：decode base64 → upload → oss_path。失败即丢弃该 item（fail-open，
+        # 内联无临期 url 可退回，故是「无产物准入」而非 stable=false）。
+        for item in inline_items:
+            try:
+                raw = base64.b64decode(item["data"], validate=True)
+            except Exception as exc:  # noqa: BLE001 — 坏 base64 不阻断 run
+                logger.warning("MaterialsCapture: bad base64 inline media (%s) — skip", exc)
+                continue
+            if not raw:
+                continue
+            try:
+                outcome = await rehost_inline_bytes(
+                    working, raw, thread_id=thread_id, kind=_infer_inline_kind(item),
+                    mime_type=item.get("mime_type"), filename=item.get("filename"), origin="generate",
+                )
+            except Exception as exc:  # noqa: BLE001 — 上传失败不得阻断 run（fail-open，I5）
+                logger.warning("MaterialsCapture: inline rehost failed (%s) — dropping item", exc)
+                continue
+            ordered_ids.append(outcome.id)
+            if outcome.update:
+                updates.update(outcome.update)
+                working.update(outcome.update)
+
+        # 即便内联全部失败（ordered_ids 空）也要 rewrite——剥掉 structuredContent 里的 blob（I9）。
+        new_msg = _rewrite_result(result, ordered_ids)
         update: dict[str, Any] = {"messages": [new_msg]}
         if updates:
             update["materials"] = updates
@@ -641,18 +723,17 @@ class MaterialsMiddleware(AgentMiddleware):
         # 调用 handler
         result = await handler(resolved)
 
-        # capture（所有工具，非 cfdream 工具也走）
-        policy = self._capture_policy(request)
-        if policy != "off":
-            captured = await self._capture(
-                result,
-                policy=policy,
-                url_path=self._capture_url_path(request),
-                materials=materials,
-                thread_id=thread_id,
-            )
-            if captured is not None:
-                result = captured
+        # capture（所有工具无条件走——即便 policy=off 也要跑：inline 字节是内在必 rehost 的安全网，
+        # off 工具漏配也不能放过 blob，见 _capture）。url 抽取仍在 _capture 内按 policy 门控。
+        captured = await self._capture(
+            result,
+            policy=self._capture_policy(request),
+            url_path=self._capture_url_path(request),
+            materials=materials,
+            thread_id=thread_id,
+        )
+        if captured is not None:
+            result = captured
 
         # 折入 stage_updates（local→oss_path 升级）
         if stage_updates:
