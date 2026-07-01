@@ -43,6 +43,8 @@ Decide in this order:
 4. **Then cost/speed.** Among MiniMax: **HD** for top fidelity and emotional nuance; **Turbo** for the cheapest, fastest bulk narration (same voices/controls). If a Chinese job fits both families, note that **seed-tts is ~8× the price of HD and ~14× Turbo** — reserve it for when its specialist voices are the reason to use it.
 5. **Sync vs async.** MiniMax returns synchronously (immediate); seed-tts is asynchronous (submit → poll `get_task_status` / `wait_for_task`).
 
+**Reach a concrete model + voice before you fire `generate_audio` — never leave it unresolved.** If the deciding information is missing — the **language/dialect** is unknown, or the intended **speaker persona** (gender/age/character) is unclear — `ask_clarification` and wait rather than defaulting silently (these two gate everything downstream). If the client restricted the models for this task, you'll see a manual-mode `<system-reminder>` listing the allowed audio model IDs; pick your model **from that list only** (then choose a voice it actually offers), and if none of the allowed models can serve the need, tell the user and ask instead of reaching outside it.
+
 ## Step 3 — Choose the voice (音色) — the heart of this skill
 
 Each model exposes **many** voices. Don't scan the whole list — narrow with this procedure:
