@@ -1,8 +1,14 @@
 """Materials-aware summarization (cfgpu-docs/materials.md §7, materials-impl-plan.md P5).
 
-§7 一致性契约的「核心新增」：summarization 把历史消息压成纯文本时，素材的 url/描述/意图
-会被压糊或压没（关联性断裂）。本子类在 summary prompt 末尾注入**当前素材清单 + id 铁律**，
-让摘要本身保留 id 级关联（id 短到压不坏、是注册表主键永久可解析；url 长且会被压烂故禁止入摘要）。
+§7 一致性契约：summarization 把历史消息压成纯文本时，素材的 url/描述/意图会被压糊或压没
+（关联性断裂）。本子类在 summary prompt 末尾注入一段**纯素材指令**（**不再注入素材清单本身**）：
+用 id 指代、禁复述 url、只保留用户明确表达过的关系，并**严禁给素材编造判定/反馈**。
+
+为何从「注入清单」改为「纯指令」（否决旧设计）：live ``<materials>`` 台账（MaterialsMiddleware
+每轮 ``wrap_model_call`` 重注）已是素材存在与状态的唯一实时 SSOT，id 级关联从不因摘要丢失。旧版
+把当前全量台账塞进 summary prompt 让摘要复述——既冗余，又会诱使摘要模型把「上一素材不满意→重试」
+的历史模式**投射到刚生成、用户尚未评价的最新素材**上，伪造出「用户要求重新生成」的假指令，driving
+agent 丢掉好产物空转（trace 实证）。故只留纯指令，素材清单一律归 live 台账。
 
 **不改 deerflow 原 middleware**：纯子类化 ``DeerFlowSummarizationMiddleware``，只 override
 ``_build_summary_prompt`` 追加素材段 + ``before_model``/``abefore_model`` 搬运 materials。
@@ -19,7 +25,6 @@ from __future__ import annotations
 import contextvars
 from typing import TYPE_CHECKING, override
 
-from deerflow.agents.materials.middleware import render_materials_ledger
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 
 if TYPE_CHECKING:
@@ -35,15 +40,23 @@ _materials_ctx: contextvars.ContextVar[dict[str, Material]] = contextvars.Contex
 
 
 def _build_materials_summary_section(materials: dict[str, Material] | None) -> str | None:
-    """素材清单 + id 铁律段（§7③）。空台账→None（不追加）。复用台账渲染器 → **零 url**（I9）。"""
-    ledger = render_materials_ledger(materials)
-    if ledger is None:
+    """素材一致性**纯指令**段（§7③）。空台账→None（不追加）。
+
+    **不注入素材清单**（区别于旧版）：素材存在/状态归 live ``<materials>`` 台账（SSOT），本段只
+    约束摘要模型「怎么提素材」——用 id、禁 url、只留用户明确说过的关系、**严禁编造或泛化判定/反馈**。
+    末句显式压过 base prompt 的 ``## ARTIFACTS`` / 逐项判定要求（summary_prompt=null 用 langchain
+    默认模板，其结构本会诱导给素材编状态，见 §7）。
+    """
+    if not materials:
         return None
     return (
-        "已知素材清单（压缩后仍须保留 id 级关联）：\n"
-        f"{ledger}\n"
-        "铁律：摘要中素材一律用 [mN] id 指代，禁止复述其 url/object_key；"
-        "保留素材与用户意图、素材间衍生关系的对应（如『用户要求将 m3 转为视频→m4』）。"
+        "关于素材：下方 <materials> 台账是素材存在与状态的唯一实时真相，"
+        "摘要**不要**输出任何素材/artifacts 清单或对素材逐条描述。\n"
+        "引用素材只用 [mN] id（禁止复述其 url/object_key）。\n"
+        "只保留对话中**用户明确表达过**的素材↔意图、素材间衍生关系（如『用户要求将 m3 转为视频→m4』）。\n"
+        "严禁给任何素材附加『第几次/成功/失败/用户是否满意/需重新生成』之类判定，除非用户对该素材 id "
+        "明确说过；绝不把针对某素材的反馈泛化或投射到另一个素材（尤其是最新生成、用户尚未评价的素材）。\n"
+        "（若与上文要求输出 ARTIFACTS 清单或逐项判定的指示冲突，以本段为准。）"
     )
 
 

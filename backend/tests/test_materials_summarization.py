@@ -1,15 +1,15 @@
 """P5 — summarization 一致性契约（cfgpu-docs/materials.md §7, materials-impl-plan.md P5）。
 
-覆盖 MaterialsSummarizationMiddleware：摘要 prompt 末尾注入素材清单 + id 铁律、**零 url**、
-衍生关系铁律保留、空台账不追加、before_model/abefore_model 经 ContextVar 搬运 materials 且
-finally 复位（并发安全）。用 __new__ 绕开父类重模型构造，monkeypatch 父链隔离 override 行为。
+覆盖 MaterialsSummarizationMiddleware：摘要 prompt 末尾注入**纯素材指令**（不列清单）、禁 url、
+禁编造判定/反馈、只保留用户明确表达过的关系、空台账不追加、before_model/abefore_model 经
+ContextVar 搬运 materials 且 finally 复位（并发安全）。用 __new__ 绕开父类重模型构造，
+monkeypatch 父链隔离 override 行为。
 """
 
 from __future__ import annotations
 
 import pytest
 
-import deerflow.agents.materials.summarization as sm
 from deerflow.agents.materials.summarization import (
     MaterialsSummarizationMiddleware,
     _build_materials_summary_section,
@@ -36,13 +36,29 @@ def test_section_none_when_empty():
     assert _build_materials_summary_section({}) is None
 
 
-def test_section_has_ids_and_iron_rule():
+def test_section_is_pure_instruction_no_inventory():
+    """§7 改造：纯指令，**不列素材清单**——[m1]/caption 不得出现在段内（清单归 live 台账 SSOT）。"""
     section = _build_materials_summary_section({"m1": _mat("m1", caption="暮色独行")})
     assert section is not None
-    assert "[m1]" in section
-    assert "铁律" in section
+    # 指令要件
+    assert "唯一实时真相" in section  # 台账为 SSOT
+    assert "清单" in section  # 禁止输出清单
     assert "禁止复述其 url/object_key" in section
     assert "衍生关系" in section
+    assert "严禁" in section  # 禁编造判定
+    assert "投射" in section  # 禁把反馈泛化到最新素材
+    # 反向：不得把台账内容抄进段里
+    assert "[m1]" not in section
+    assert "暮色独行" not in section
+
+
+def test_section_forbids_fabricated_verdicts():
+    """伪造判定/反馈是本次 bug 的直接根因——指令必须显式点名这些词并压过 base prompt。"""
+    section = _build_materials_summary_section({"m1": _mat("m1")})
+    assert "用户是否满意" in section
+    assert "需重新生成" in section
+    assert "用户明确表达过" in section
+    assert "以本段为准" in section  # 覆盖 base prompt 的 ARTIFACTS/逐项判定
 
 
 def test_section_never_contains_url():
@@ -69,9 +85,11 @@ def test_prompt_appends_section(monkeypatch):
     finally:
         _materials_ctx.reset(token)
     assert out.startswith("BASE PROMPT")
-    assert "[m1]" in out
-    assert "参考图" in out
-    assert "铁律" in out
+    # 追加的是纯指令段，不复述素材本体
+    assert "唯一实时真相" in out
+    assert "严禁" in out
+    assert "[m1]" not in out
+    assert "参考图" not in out
 
 
 def test_prompt_none_passthrough(monkeypatch):
@@ -151,16 +169,13 @@ def test_end_to_end_seam(monkeypatch):
     inst = _bare_instance()
     inst.before_model({"materials": {"m3": _mat("m3", caption="图生视频源")}, "messages": []}, runtime=None)
     assert "SUMMARY" in captured["prompt"]
-    assert "[m3]" in captured["prompt"]
-    assert "图生视频源" in captured["prompt"]
+    # 指令段接上，但不复述素材本体
+    assert "严禁" in captured["prompt"]
+    assert "[m3]" not in captured["prompt"]
+    assert "图生视频源" not in captured["prompt"]
 
 
 def test_name_preserves_parent_for_frontend_key():
     """子类化不得改 LangGraph update key——前端按 DeerFlowSummarizationMiddleware.before_model 识别。"""
     inst = _bare_instance()
     assert inst.name == "DeerFlowSummarizationMiddleware"
-
-
-def test_imported_render_ledger_is_shared():
-    """复用 P4 台账渲染器（同一零-url 规则跨 §6/§7 一致）。"""
-    assert sm.render_materials_ledger is not None
