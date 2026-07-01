@@ -11,13 +11,20 @@ Two independent client-controlled parameters from the MQ task message are surfac
    (suppressed for the cf-dream agent via its ``config.yaml: skills: []``).
 
 2. ``config.models`` → ``runtime.context["models"]`` — **方案 3 (router-whitelist), human-final**.
-   The client UI restricts the *selection range* of cfdream generate models per task type. In
-   ``(a)after_model`` the ``model`` argument of each cfdream ``generate_image`` / ``generate_video``
-   tool call in the freshly produced AIMessage is constrained to the allowed cfdream model IDs: the
-   LLM's preference is kept when it is inside the range, otherwise the whole allowed range is
-   written down so cfdream's own router (``select_model(allowed=...)``) scores within it. Even with
-   **no** ``config.models`` whitelist, a null/empty generate ``model`` is defaulted to ``"auto"``
-   so the cfdream tool never receives ``null`` (its own ``model`` default is ``"auto"``).
+   The client UI restricts the *selection range* of cfdream generate models per task type. The
+   top-level ``type`` field gates whether the whitelist is applied at all:
+
+   - ``type == "manual"`` — **server-authoritative**. In ``(a)after_model`` the ``model`` argument
+     of each cfdream ``generate_image`` / ``generate_video`` tool call in the freshly produced
+     AIMessage is constrained to the allowed cfdream model IDs: the LLM's preference is kept when it
+     is inside the range, otherwise the whole allowed range is written down so cfdream's own router
+     (``select_model(allowed=...)``) scores within it.
+   - ``type == "auto"`` (also the default for a missing/unknown ``type``) — **LLM's choice stands**.
+     The whitelist is *not* enforced; the model the LLM picked is passed through unchanged.
+
+   In **both** modes (and even with **no** ``config.models`` at all), a null/empty generate ``model``
+   is defaulted to ``"auto"`` so the cfdream tool never receives ``null`` (its own ``model`` default
+   is ``"auto"``). This null-safety normalization is independent of the ``type`` gate.
 
    **Ordering matters.** This runs in ``after_model`` and is registered *after*
    ``HumanApprovalMiddleware`` (HAM) so that — because LangChain dispatches ``after_model`` in
@@ -67,6 +74,17 @@ _DEFAULT_MODEL_BINDINGS: dict[str, str] = {
     "*generate_video": "video",
 }
 _AUTO_MODEL = "auto"
+_MANUAL_MODE = "manual"
+
+
+def _is_manual_selection(models_cfg: object) -> bool:
+    """Return whether ``config.models`` requests manual (server-authoritative) selection.
+
+    Only an explicit top-level ``type == "manual"`` (case/space-insensitive) enables the whitelist
+    constraint. Any other value — ``"auto"``, missing, or malformed — is treated as auto: the LLM's
+    own ``model`` choice stands and only the null/empty → ``"auto"`` null-safety normalization runs.
+    """
+    return isinstance(models_cfg, dict) and str(models_cfg.get("type", "")).strip().lower() == _MANUAL_MODE
 
 
 def _is_real_user_message(message: object) -> bool:
@@ -330,9 +348,11 @@ class RuntimeConfigMiddleware(AgentMiddleware):
     def _constrain_tool_call(self, tool_call: dict, models_cfg: object) -> dict | None:
         """Return a model-constrained/normalized copy of *tool_call*, or None to pass through.
 
-        With a client whitelist for this task type, constrain ``model`` to the allowed range
-        (this also rewrites a null/``"auto"`` model into the range). Without one, still ensure
-        the ``model`` arg is never null/empty by defaulting it to ``"auto"``.
+        Only in **manual** mode (``config.models.type == "manual"``) with a non-empty whitelist for
+        this task type is ``model`` constrained to the allowed range (this also rewrites a
+        null/``"auto"`` model into the range). In **auto** mode (or with no whitelist) the LLM's
+        choice stands; we only ensure the ``model`` arg is never null/empty by defaulting it to
+        ``"auto"``.
         """
         task_type = _task_type_for_tool(tool_call.get("name", "") or "", self._model_bindings)
         if task_type is None:
@@ -341,7 +361,10 @@ class RuntimeConfigMiddleware(AgentMiddleware):
         if not isinstance(args, dict):
             return None
         allowed = _allowed_models_for_task(models_cfg, task_type)
-        new_args = _restrict_model_arg(args, allowed) if allowed else _normalize_empty_model(args)
+        if allowed and _is_manual_selection(models_cfg):
+            new_args = _restrict_model_arg(args, allowed)
+        else:
+            new_args = _normalize_empty_model(args)
         if new_args is None:
             return None
         logger.debug(
@@ -356,8 +379,9 @@ class RuntimeConfigMiddleware(AgentMiddleware):
     def _apply_models(self, state, runtime: Runtime) -> dict | None:
         """Constrain/normalize cfdream generate ``model`` args in the latest AIMessage.
 
-        Applies the ``config.models`` whitelist when present; always defaults a null/empty
-        generate ``model`` to ``"auto"`` so the tool never receives ``null``.
+        Applies the ``config.models`` whitelist only in manual mode (``type == "manual"``); in auto
+        mode the LLM's choice stands. In every mode a null/empty generate ``model`` is defaulted to
+        ``"auto"`` so the tool never receives ``null``.
         """
         models_cfg = _context_dict(runtime).get("models")
         messages = state.get("messages") or []

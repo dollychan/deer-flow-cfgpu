@@ -3,8 +3,10 @@
 Covers:
 - config.skills (Model B): eager full-content injection, str-as-single-skill, missing-skill
   strategy B (warn + visible note), partial found/missing, idempotency, async offload path.
-- config.models (方案 3): cfdream generate-tool model arg constrained to the client-allowed range
-  via wrap_tool_call — keep LLM choice when in range, else fall back to the allowed range.
+- config.models (方案 3): in manual mode (type == "manual") the cfdream generate-tool model arg is
+  constrained to the client-allowed range in after_model — keep LLM choice when in range, else fall
+  back to the allowed range; in auto mode the LLM's choice stands. Empty/null model is always
+  normalized to "auto" (null-safety), independent of the type gate.
 - consumer `_build_config` transport (config.skills/config.models → runtime.context).
 
 See cfgpu-docs/config.md "config.skills — Model B" / "config.models — 方案 3".
@@ -24,6 +26,7 @@ from deerflow.agents.middlewares.runtime_config_middleware import (
     _SKILL_REMINDER_KEY,
     RuntimeConfigMiddleware,
     _allowed_models_for_task,
+    _is_manual_selection,
     _normalize_empty_model,
     _restrict_model_arg,
     _task_type_for_tool,
@@ -358,11 +361,33 @@ def test_normalize_empty_model_leaves_usable_value(model):
     assert _normalize_empty_model({"model": model}) is None
 
 
+# ── config.models: _is_manual_selection (type gate) ─────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "cfg,expected",
+    [
+        ({"type": "manual", "content": []}, True),
+        ({"type": "MANUAL"}, True),  # case-insensitive
+        ({"type": " manual "}, True),  # whitespace-tolerant
+        ({"type": "auto", "content": []}, False),
+        ({"content": []}, False),  # type absent → auto
+        ({"type": "weird"}, False),  # unknown → auto
+        (None, False),
+        ("not a dict", False),
+    ],
+)
+def test_is_manual_selection(cfg, expected):
+    assert _is_manual_selection(cfg) is expected
+
+
 # ── config.models: after_model integration (runs before HAM) ─────────────────────
 
 
-def _models_cfg(task_type: str, names: list[str]) -> dict:
-    return {"type": "auto", "content": [{"type": task_type, "model_names": names}]}
+def _models_cfg(task_type: str, names: list[str], mode: str = "manual") -> dict:
+    # Default to manual: the whitelist constraint only applies in manual mode (auto keeps the
+    # LLM's choice), so most integration tests below exercise the manual/constrain path.
+    return {"type": mode, "content": [{"type": task_type, "model_names": names}]}
 
 
 def _models_runtime(models_cfg) -> SimpleNamespace:
@@ -488,6 +513,61 @@ def test_after_model_custom_bindings_replace_default():
     # default-named generate_image is NO LONGER bound (default replaced) → untouched
     r2 = mw.after_model({"messages": [_ai_with_tool_call("generate_image", {"model": "anything"})]}, _models_runtime(cfg))
     assert r2 is None
+
+
+# ── config.models: type gate — manual constrains, auto keeps LLM's choice ────────
+
+
+def test_after_model_manual_constrains_out_of_range_model():
+    # Explicit type=manual → whitelist enforced, out-of-range model forced into the range.
+    mw = RuntimeConfigMiddleware()
+    state = {"messages": [_ai_with_tool_call("cfdream_generate_video", {"prompt": "x", "model": "forbidden"})]}
+
+    result = mw.after_model(state, _models_runtime(_models_cfg("video", ["wan-2-0-fast"], mode="manual")))
+
+    assert result is not None
+    assert _model_of(result) == "wan-2-0-fast"
+
+
+def test_after_model_auto_keeps_out_of_range_llm_choice():
+    # type=auto → whitelist NOT enforced; the LLM's own (out-of-range) pick stands untouched.
+    mw = RuntimeConfigMiddleware()
+    state = {"messages": [_ai_with_tool_call("cfdream_generate_video", {"prompt": "x", "model": "forbidden"})]}
+
+    result = mw.after_model(state, _models_runtime(_models_cfg("video", ["wan-2-0-fast"], mode="auto")))
+
+    assert result is None  # LLM choice preserved, no rewrite
+
+
+def test_after_model_auto_keeps_llm_choice_over_configured_range():
+    # Even a concrete in-list vs out-of-list distinction is irrelevant in auto: LLM decides.
+    mw = RuntimeConfigMiddleware()
+    state = {"messages": [_ai_with_tool_call("generate_image", {"model": "some-other-model"})]}
+
+    result = mw.after_model(state, _models_runtime(_models_cfg("image", ["seedream"], mode="auto")))
+
+    assert result is None
+
+
+def test_after_model_missing_type_defaults_to_auto():
+    # A config.models object without a top-level type behaves as auto (no constraint).
+    mw = RuntimeConfigMiddleware()
+    cfg = {"content": [{"type": "video", "model_names": ["wan-2-0-fast"]}]}
+    state = {"messages": [_ai_with_tool_call("generate_video", {"model": "forbidden"})]}
+
+    assert mw.after_model(state, _models_runtime(cfg)) is None
+
+
+@pytest.mark.parametrize("model_arg", [None, "", "   ", []])
+def test_after_model_auto_still_normalizes_empty_model(model_arg):
+    # Null-safety is independent of the type gate: auto mode still defaults empty/null → "auto".
+    mw = RuntimeConfigMiddleware()
+    state = {"messages": [_ai_with_tool_call("cfdream_generate_image", {"prompt": "x", "model": model_arg})]}
+
+    result = mw.after_model(state, _models_runtime(_models_cfg("image", ["seedream"], mode="auto")))
+
+    assert result is not None
+    assert _model_of(result) == "auto"  # normalized despite auto mode not enforcing the whitelist
 
 
 # ── ordering: RuntimeConfigMiddleware must be registered AFTER HumanApprovalMiddleware ──
