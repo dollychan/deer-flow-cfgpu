@@ -28,10 +28,7 @@ class OSSClient:
             import alibabacloud_oss_v2 as oss
             from alibabacloud_oss_v2 import credentials
         except ImportError as exc:
-            raise ImportError(
-                "The 'alibabacloud-oss-v2' package is required for OSS integration. "
-                "Install it with: uv add alibabacloud-oss-v2"
-            ) from exc
+            raise ImportError("The 'alibabacloud-oss-v2' package is required for OSS integration. Install it with: uv add alibabacloud-oss-v2") from exc
 
         self._oss = oss
         creds = credentials.StaticCredentialsProvider(
@@ -42,6 +39,13 @@ class OSSClient:
         cfg.credentials_provider = creds
         if config.region:
             cfg.region = config.region
+        # A custom CNAME domain overrides the SDK's auto-generated bucket endpoint so that
+        # every generated (presigned) URL is rooted at the unified domain, e.g.
+        # https://dream-oss.cfgpu.com/{key}?... . use_cname makes the SDK treat the endpoint
+        # host verbatim (no bucket prefix); the domain must be CNAME-mapped to the bucket.
+        if config.domain:
+            cfg.endpoint = config.domain
+            cfg.use_cname = True
 
         self._client = oss.Client(cfg)
         self._bucket = config.bucket
@@ -148,9 +152,7 @@ class OSSClient:
         except Exception as exc:
             exc_str = str(exc)
             if "NoSuchBucket" in exc_str or "404" in exc_str:
-                logger.warning(
-                    "OSSClient: bucket %r not found — check bucket name and region config", self._bucket
-                )
+                logger.warning("OSSClient: bucket %r not found — check bucket name and region config", self._bucket)
             else:
                 logger.debug("OSSClient: bucket check skipped (%s)", exc_str.split("\n")[0])
 

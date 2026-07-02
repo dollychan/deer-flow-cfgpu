@@ -1,7 +1,7 @@
 """OSS ``presigned_url`` toggle + removal of ``cfdream_url_refresh_threshold_hours``.
 
 `OSSClient.upload_file` returns a presigned GET URL when ``presigned_url`` is true
-(default) and the bare object key when it is false. The SDK client is faked via
+and the bare object key when it is false (default). The SDK client is faked via
 ``__new__`` so these stay pure unit tests with no network or SDK construction.
 """
 
@@ -15,8 +15,8 @@ from deerflow.oss.oss_config import OSSConfig
 # ── OSSConfig ───────────────────────────────────────────────────────────────────
 
 
-def test_presigned_url_defaults_true():
-    assert OSSConfig().presigned_url is True
+def test_presigned_url_defaults_false():
+    assert OSSConfig().presigned_url is False
 
 
 def test_presigned_url_can_be_disabled():

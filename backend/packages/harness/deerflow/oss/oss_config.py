@@ -13,9 +13,17 @@ class OSSConfig(BaseModel):
     the Gateway ``/api/threads/{id}/artifacts/{path}`` endpoint.
 
     When ``enabled`` is true, ``present_files`` uploads each output file to AliOSS.
-    With ``presigned_url`` true (default) it replaces the local path with a presigned
-    URL before writing to ``artifacts``; with ``presigned_url`` false it writes the
+    With ``presigned_url`` true it replaces the local path with a presigned URL before
+    writing to ``artifacts``; with ``presigned_url`` false (default) it writes the
     bare object key (the path inside the bucket) instead.
+
+    ``domain`` (optional) sets a custom CNAME domain for the generated URLs. When empty
+    (default), presigned URLs use the SDK's auto-generated virtual-hosted endpoint
+    ``{bucket}.oss-{region}.aliyuncs.com``. When set (e.g. ``dream-oss.cfgpu.com``), the
+    OSS client is configured with ``endpoint=domain`` + ``use_cname=True`` so every
+    presigned URL is rooted at that unified domain (``https://dream-oss.cfgpu.com/{key}?...``);
+    the domain must be CNAME-mapped to the bucket in DNS. Scheme is optional (defaults to
+    https).
 
     ``delete_artifacts_on_thread_delete`` (default false) gates whether handling an MQ
     ``type=delete`` also recycles the thread's OSS artifact prefix
@@ -33,6 +41,7 @@ class OSSConfig(BaseModel):
           access_key_secret: $OSS_ACCESS_KEY_SECRET
           bucket: cf-dream
           region: cn-beijing
+          domain: $OSS_DOMAIN            # e.g. dream-oss.cfgpu.com — unified CNAME domain for URLs
           presigned_url_expires_days: 7
           presigned_url: false
           delete_artifacts_on_thread_delete: false
@@ -43,6 +52,15 @@ class OSSConfig(BaseModel):
     access_key_secret: str = Field(default="", description="Alibaba Cloud access key secret")
     bucket: str = Field(default="cf-dream", description="Target bucket name")
     region: str = Field(default="", description="AliOSS region, e.g. cn-beijing; required for V4 signing")
+    domain: str = Field(
+        default="",
+        description=(
+            "Custom CNAME domain for generated URLs, e.g. dream-oss.cfgpu.com. When set, the OSS "
+            "client uses endpoint=domain + use_cname=True so presigned URLs are rooted at this unified "
+            "domain instead of the auto-generated bucket endpoint. Must be CNAME-mapped to the bucket. "
+            "Scheme optional (defaults to https). Empty = SDK default endpoint."
+        ),
+    )
     presigned_url_expires_days: int = Field(
         default=7,
         ge=1,
