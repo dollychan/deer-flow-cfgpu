@@ -14,6 +14,7 @@ from langgraph.config import get_config
 from langgraph.types import Command
 
 from deerflow.agents.materials.materialize import stage_to_oss
+from deerflow.agents.materials.registry import classify_ref
 from deerflow.agents.materials.types import Material
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, map_virtual_to_physical
 from deerflow.oss.client import get_oss_client
@@ -586,7 +587,19 @@ async def present_file_tool(
                     # download button is the fallback. No bytes are read into memory here; the
                     # item ``size`` tracks its ``ref`` (the snapshot poster), not the original —
                     # which stays reachable via ``download``.
-                    file_url = await uploader.upload_local_file(vpath, physical, thread_id)
+                    file_ref = await uploader.upload_local_file(vpath, physical, thread_id)
+                    # The shell HTML embeds this URL as BOTH the <iframe src> and the download
+                    # link, so a browser resolves it relative to the shell's own OSS URL — it MUST
+                    # be an absolute presigned URL. Reuse the materials out-gate resolve
+                    # (cfgpu-docs/materials.md §4.3): classify the upload ref to its object_key
+                    # (oss_path) and presign fresh, exactly like MaterialResolve. This covers both
+                    # presigned_url=false (bare object key → presign) and presigned_url=true
+                    # (presigned URL → strip signature back to object_key → re-presign fresh). A
+                    # third-party URL (ref_type != oss_path) passes through untouched. Without this
+                    # a bare relative key resolves against the shell's `.../documents/` dir into a
+                    # broken doubled `.../documents/agent-artifacts/.../files/...` path.
+                    ref_type, resolved = classify_ref(file_ref)
+                    file_url = _presign(resolved) if ref_type == "oss_path" else file_ref
                     ref, item = await _build_iframe_item(uploader, sandbox, thread_id, name, file_url)
                     artifacts.append(ref)
                     items.append(item)

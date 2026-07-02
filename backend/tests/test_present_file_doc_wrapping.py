@@ -246,6 +246,58 @@ def test_non_renderable_binary_office_gets_iframe_shell(wired):
     assert "<iframe" in snapped and item["download"] in snapped
 
 
+def test_iframe_presigns_bare_object_key_for_embedded_url(wired, monkeypatch):
+    """presigned_url=false → upload returns a bare object key; the shell HTML must embed
+    an ABSOLUTE presigned URL, not the relative key. A bare key would resolve against the
+    shell's own `.../documents/` URL into a broken doubled `.../documents/.../files/...` path.
+    """
+
+    async def bare_key_upload(virtual_path, physical_path, thread_id):
+        # Mirrors OSSClient.upload_file when presigned_url=false: returns the bare key.
+        return f"agent-artifacts/{thread_id}/files/{physical_path.rsplit('/', 1)[-1]}"
+
+    monkeypatch.setattr(wired.uploader, "upload_local_file", bare_key_upload)
+    monkeypatch.setattr(mod, "_presign", lambda key: f"https://dream-oss.cfgpu.com/{key}?sig=x")
+
+    f = wired.outputs_dir / "slides.pptx"
+    f.write_bytes(b"PK\x03\x04binary\xff")
+
+    result = _present(runtime=_make_runtime(str(wired.outputs_dir)), filepaths=[str(f)], tool_call_id="tc")
+
+    item = _items(result)[0]
+    # download is the absolute presigned URL, never the bare relative key.
+    assert item["download"].startswith("https://dream-oss.cfgpu.com/agent-artifacts/")
+    assert item["download"].endswith("?sig=x")
+    # The shell HTML embeds that same absolute URL; no bare relative key leaked in.
+    snapped = wired.sandbox.calls[0]
+    assert item["download"] in snapped
+    assert 'src="agent-artifacts/' not in snapped and 'href="agent-artifacts/' not in snapped
+
+
+def test_iframe_re_presigns_our_object_url_fresh(wired, monkeypatch):
+    """presigned_url=true → upload returns a presigned URL of our object; the materials
+    out-gate resolve strips it back to the object_key and re-signs FRESH, rather than
+    reusing the (possibly stale) URL upload returned. Third-party URLs pass through."""
+
+    async def presigned_upload(virtual_path, physical_path, thread_id):
+        name = physical_path.rsplit("/", 1)[-1]
+        return f"https://dream-oss.cfgpu.com/agent-artifacts/{thread_id}/files/{name}?x-oss-signature=STALE"
+
+    monkeypatch.setattr(wired.uploader, "upload_local_file", presigned_upload)
+    monkeypatch.setattr(mod, "_presign", lambda key: f"https://dream-oss.cfgpu.com/{key}?x-oss-signature=FRESH")
+
+    f = wired.outputs_dir / "deck.pdf"
+    f.write_bytes(b"%PDF-1.4\n%bin\xff")
+
+    result = _present(runtime=_make_runtime(str(wired.outputs_dir)), filepaths=[str(f)], tool_call_id="tc")
+
+    item = _items(result)[0]
+    # Stripped back to object_key then re-signed fresh — not the stale URL upload returned.
+    assert item["download"].endswith("?x-oss-signature=FRESH")
+    assert "STALE" not in item["download"]
+    assert "agent-artifacts/thread-1/files/deck.pdf" in item["download"]
+
+
 def test_pptx_iframe_no_poster_when_sandbox_absent(wired, monkeypatch):
     monkeypatch.setattr(mod, "_resolve_snapshot_sandbox", lambda runtime: None)
     f = wired.outputs_dir / "slides.pptx"
