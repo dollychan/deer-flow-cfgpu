@@ -876,7 +876,7 @@ class TestArtifactMaterialsProjection:
         captured = self._run(mw, self._req({}), cmd)
 
         assert len(captured) == 1 and captured[0]["type"] == "artifact"
-        assert captured[0]["items"] == [{"id": mid, "ref": "agent-artifacts/t1/images/a.png", "kind": "image", "stable": True}]
+        assert captured[0]["items"] == [{"id": mid, "ref": "agent-artifacts/t1/images/a.png", "kind": "image", "stable": True, "size": None}]
         # textual content rides alongside (url-stripped capture body)
         assert captured[0]["content"]["materials"] == [mid]
         # display stamped back onto the persisted material (for final_state projection parity)
@@ -906,7 +906,7 @@ class TestArtifactMaterialsProjection:
         captured = self._run(mw, self._req(prior, tool_name="cfdream_task_wait"), cmd)
 
         assert captured[0]["type"] == "artifact"
-        assert captured[0]["items"] == [{"id": mid, "ref": "agent-artifacts/t1/v.mp4", "kind": "video", "stable": True}]
+        assert captured[0]["items"] == [{"id": mid, "ref": "agent-artifacts/t1/v.mp4", "kind": "video", "stable": True, "size": None}]
         # partial display stamp added to update so it persists despite dedup
         assert cmd.update["materials"][mid] == {"id": mid, "display": True}
 

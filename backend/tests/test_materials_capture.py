@@ -70,11 +70,11 @@ class _FakeUploader:
         self._fail = fail
         self._inline_fail = inline_fail
 
-    async def rehost_url(self, url: str, thread_id: str) -> str:
+    async def rehost_url(self, url: str, thread_id: str) -> tuple[str, int]:
         self.calls.append((url, thread_id))
         if self._fail:
             raise RuntimeError("boom")
-        return f"agent-artifacts/{thread_id}/images/{url.rsplit('/', 1)[-1]}"
+        return f"agent-artifacts/{thread_id}/images/{url.rsplit('/', 1)[-1]}", 1234
 
     def inline_object_key(self, data: bytes, thread_id: str, *, mime_type: str | None = None, filename: str | None = None) -> str:
         import hashlib
@@ -377,6 +377,7 @@ async def test_inline_bytes_rehost_to_oss_path():
     assert mats[mid]["ref"].endswith("-speech.mp3")
     assert mats[mid]["kind"] == "audio"
     assert mats[mid]["stable"] is True
+    assert mats[mid]["size"] == len(raw)  # inline 字节数记入 material.size
     # 上传一次，字节长度与 mime/filename 透传
     assert up.inline_calls == [(len(raw), "t1", "audio/mpeg", "speech.mp3")]
 

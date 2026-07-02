@@ -160,6 +160,7 @@ def register(
     scope: str | None = None,
     display: bool | None = None,
     stable: bool | None = None,
+    size: int | None = None,
 ) -> tuple[str, dict[str, Material]]:
     """分配内容派生 id 并产出 reducer 形态更新 ``{id: Material}``。不查重（调用方按需先 resolve）。
 
@@ -182,6 +183,7 @@ def register(
         ("scope", scope),
         ("display", display),
         ("stable", stable),
+        ("size", size),
     ):
         if value is not None:
             mat[key] = value  # type: ignore[literal-required]
@@ -217,6 +219,9 @@ def project_artifact_items(materials: dict[str, Material] | None, ids: list[str]
     由 visibility 决定、在调用方门控；这里只挡未落盘的 unstable 项，I5）。保留 `ids` 顺序（=工具结果
     content 里 `materials:[...]` 的顺序＝产出序）。**绝不 presigned**：item.ref 是稳定 ref（oss_path
     object_key / global_url url），客户端按约定取。
+
+    每个 item 带 `size`（字节数）：随物化写入 `Material.size`（rehost/upload 时算一次），此处原样
+    带出；未落盘（第三方 global_url 仅 register、从未下载）的素材无 size → 该字段为 `None`。
     """
     if not materials:
         return []
@@ -232,7 +237,7 @@ def project_artifact_items(materials: dict[str, Material] | None, ids: list[str]
         if not ref:
             continue
         seen.add(mid)
-        items.append({"id": mid, "ref": ref, "kind": mat.get("kind"), "stable": True})
+        items.append({"id": mid, "ref": ref, "kind": mat.get("kind"), "stable": True, "size": mat.get("size")})
     return items
 
 

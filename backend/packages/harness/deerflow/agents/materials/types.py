@@ -34,6 +34,7 @@ class Material(TypedDict):
     caption: NotRequired[str | None]  # generate 用 prompt；上行用文件名/alt
     turn: NotRequired[int | None]  # 产生轮次，帮"第二张图"指代
     origin_url: NotRequired[str | None]  # 仅审计/回溯，不参与流转
+    size: NotRequired[int | None]  # 文件字节数；rehost/upload 物化时算一次，供下行 artifact item 展示大小（无副本时缺省 None）
 
 
 # 注：id 生成已改为**内容派生确定性 id**（``registry.material_id``，§B）——顺序 ``new_material_id``

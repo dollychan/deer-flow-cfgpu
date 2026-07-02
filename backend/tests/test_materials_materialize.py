@@ -28,9 +28,9 @@ class _FakeUploader:
         self.rehost_calls: list[tuple[str, str]] = []
         self.upload_calls: list[tuple[str, str, str]] = []
 
-    async def rehost_url(self, url: str, thread_id: str) -> str:
+    async def rehost_url(self, url: str, thread_id: str) -> tuple[str, int]:
         self.rehost_calls.append((url, thread_id))
-        return f"agent-artifacts/{thread_id}/images/{url.rsplit('/', 1)[-1]}"
+        return f"agent-artifacts/{thread_id}/images/{url.rsplit('/', 1)[-1]}", 1234
 
     async def upload_local_file(self, virtual_path: str, physical_path: str, thread_id: str) -> str:
         self.upload_calls.append((virtual_path, physical_path, thread_id))
@@ -103,6 +103,7 @@ async def test_rehost_remote_registers_oss_path():
     assert out.ref == "agent-artifacts/t1/images/x.png"
     assert out.deduped is False
     assert out.update[out.id]["origin_url"] == "https://cdn.cfgpu.com/x.png"
+    assert out.update[out.id]["size"] == 1234  # rehost_url 回传的字节数记入 material.size
     assert up.rehost_calls == [("https://cdn.cfgpu.com/x.png", "t1")]
 
 
@@ -191,6 +192,25 @@ async def test_rehost_local_upgrades_ref_type_chain():
     assert merged["m1"]["ref_type"] == "oss_path"  # 升级放行
     assert merged["m1"]["ref"] == "agent-artifacts/t1/files/a.png"
     assert merged["m1"]["local_path"] == "/mnt/user-data/outputs/a.png"  # 保留
+
+
+@pytest.mark.asyncio
+async def test_rehost_local_records_file_size(tmp_path):
+    up = _FakeUploader()
+    _patch(up)
+    physical = tmp_path / "a.png"
+    physical.write_bytes(b"x" * 321)  # 真文件 → _file_size 读到 321 字节
+    out = await rehost_local_file({}, "/mnt/user-data/outputs/a.png", str(physical), thread_id="t1", kind="image")
+    assert out.update[out.id]["size"] == 321
+
+
+@pytest.mark.asyncio
+async def test_rehost_local_size_none_when_file_missing(tmp_path):
+    up = _FakeUploader()
+    _patch(up)
+    # 物理文件不存在 → _file_size 吞 OSError 返回 None，不阻断物化
+    out = await rehost_local_file({}, "/mnt/user-data/outputs/a.png", "/host/missing.png", thread_id="t1", kind="image")
+    assert out.update[out.id].get("size") is None
 
 
 @pytest.mark.asyncio

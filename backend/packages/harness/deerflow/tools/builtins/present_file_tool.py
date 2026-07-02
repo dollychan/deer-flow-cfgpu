@@ -110,14 +110,25 @@ def _virtual_to_physical(virtual_path: str, outputs_path: str) -> str:
     return str(Path(outputs_path).resolve() / relative)
 
 
-def _artifact_item(ref: str) -> dict:
+def _artifact_item(ref: str, size: int | None = None) -> dict:
     """Build an artifact item, classifying ref as a fetchable URL or virtual path.
 
     `kind="url"` (OSS presigned link) is fetched directly by the client;
     `kind="path"` (virtual outputs path) is fetched via the artifacts API route.
+
+    `size` is the presented file's byte count (measured at upload time); `None` when the
+    size is unknown, so every emitted item carries the field for a uniform client contract.
     """
     kind = "url" if ref.startswith(("http://", "https://")) else "path"
-    return {"ref": ref, "kind": kind, "expires_at": None}
+    return {"ref": ref, "kind": kind, "expires_at": None, "size": size}
+
+
+def _path_size(physical_path: str) -> int | None:
+    """Byte count of a local file for an artifact item; None when unavailable (missing/perm)."""
+    try:
+        return Path(physical_path).stat().st_size
+    except OSError:
+        return None
 
 
 # Non-media text files larger than this are not wrapped (treated as opaque
@@ -319,6 +330,7 @@ async def _build_rich_item(
     thread_id: str,
     filename: str,
     raw: bytes,
+    size: int | None = None,
 ) -> tuple[str, dict] | None:
     """Wrap a non-media text file as an HTML doc + PNG snapshot → a rich artifact item.
 
@@ -368,7 +380,7 @@ async def _build_rich_item(
     # ``html_ref`` (png and html share the same OSS scheme) so they hold even when the
     # snapshot is absent.
     item = {
-        **_artifact_item(html_ref),
+        **_artifact_item(html_ref, size),
         "ref": snapshot_ref,
         "mime": "text/html",
         "html": html_ref,
@@ -383,6 +395,7 @@ async def _build_iframe_item(
     thread_id: str,
     filename: str,
     file_url: str,
+    size: int | None = None,
 ) -> tuple[str, dict]:
     """Wrap a browser-renderable binary (PDF) as an <iframe> shell + snapshot → rich item.
 
@@ -415,7 +428,7 @@ async def _build_iframe_item(
     # file even when the preview is unavailable. ``kind``/``expires_at`` classify off
     # ``html_ref`` (poster and shell share the OSS scheme), holding when poster is None.
     item = {
-        **_artifact_item(html_ref),
+        **_artifact_item(html_ref, size),
         "ref": snapshot_ref,
         "mime": "text/html",
         "html": html_ref,
@@ -429,11 +442,13 @@ async def _present_materials(
     runtime: Runtime,
     ids: list[str],
     materials: dict[str, Material],
-) -> tuple[list[str], dict[str, Material]]:
+) -> tuple[list[tuple[str, int | None]], dict[str, Material]]:
     """Stage each material id to durable OSS + mark it as a deliverable (display=true).
 
     present = ``stage`` 原语 + ``display=true``（§4.8.3/D16）：确保 oss_path（durable）再标交付物投影。
-    任意 material id 皆可展示（generate 产物 / 第三方 / 本地）。返回 (presigned refs, materials update)。
+    任意 material id 皆可展示（generate 产物 / 第三方 / 本地）。返回 ((presigned ref, size) 列表,
+    materials update)——``size`` 取自 stage 后 material 的 ``size`` 字段（rehost/upload 时算入），
+    未落盘素材（第三方 global_url 从未下载）为 None。
     """
     thread_id = _get_thread_id(runtime) or "unknown"
     thread_data = (runtime.state or {}).get("thread_data") or {}
@@ -444,7 +459,7 @@ async def _present_materials(
 
     working = dict(materials)
     update: dict[str, Material] = {}
-    refs: list[str] = []
+    refs: list[tuple[str, int | None]] = []
     for mid in ids:
         outcome = await stage_to_oss(working, mid, thread_id=str(thread_id), to_physical=to_physical, display=True)
         # 合并 stage 升级 + 确保 display=true（oss_path 已持久时 outcome.update 为空，须显式置）。
@@ -452,7 +467,7 @@ async def _present_materials(
         ent["display"] = True
         update[mid] = ent  # type: ignore[assignment]
         working[mid] = {**working.get(mid, {}), **ent}  # type: ignore[typeddict-item]
-        refs.append(_presign(outcome.ref or working[mid].get("ref", "")))
+        refs.append((_presign(outcome.ref or working[mid].get("ref", "")), working[mid].get("size")))
     return refs, update
 
 
@@ -500,8 +515,8 @@ async def present_file_tool(
         except Exception as exc:  # noqa: BLE001 — stage 失败回 error，不阻断 run
             logger.warning("present_files: failed to stage material(s) %s (%s)", id_entries, exc)
             return Command(update={"messages": [ToolMessage(f"Error: failed to present material(s): {exc}", tool_call_id=tool_call_id, status="error")]})
-        artifacts.extend(refs)
-        items.extend(_artifact_item(r) for r in refs)
+        artifacts.extend(r for r, _ in refs)
+        items.extend(_artifact_item(r, size) for r, size in refs)
 
     # --- local paths: existing behaviour (artifacts channel) ---
     if path_entries:
@@ -512,40 +527,45 @@ async def present_file_tool(
 
         from deerflow.oss.uploader import _infer_category, get_oss_uploader
 
+        thread_data = state.get("thread_data") or {}
+        outputs_path = thread_data.get("outputs_path", "")
+
         uploader = get_oss_uploader()
         if uploader is None:
             # OSS not configured: original behaviour — store virtual paths directly.
+            # size still measurable from the local file the virtual path maps to.
             artifacts.extend(normalized_paths)
-            items.extend(_artifact_item(p) for p in normalized_paths)
+            items.extend(_artifact_item(p, _path_size(_virtual_to_physical(p, outputs_path))) for p in normalized_paths)
         else:
             thread_id = _get_thread_id(runtime) or "unknown"
-            thread_data = state.get("thread_data") or {}
-            outputs_path = thread_data.get("outputs_path", "")
             # Resolve the sandbox once for snapshot rendering; tolerate its
             # absence (e.g. LocalSandbox / not initialized) → no poster (I1/I2).
             sandbox = _resolve_snapshot_sandbox(runtime)
             for vpath in normalized_paths:
                 try:
                     physical = _virtual_to_physical(vpath, outputs_path)
+                    size = _path_size(physical)
                     category = _infer_category(Path(physical).name)
                     if category in ("images", "videos", "audios"):
                         # Media: existing behaviour — single URL artifact item.
                         url = await uploader.upload_local_file(vpath, physical, thread_id)
                         artifacts.append(url)
-                        items.append(_artifact_item(url))
+                        items.append(_artifact_item(url, size))
                         continue
                     if _is_iframe_renderable(Path(physical).name):
                         # Browser-renderable binary (PDF, §6.3): upload the original as-is
                         # (download + iframe src — never converted, I8) then wrap it in an
-                        # <iframe> shell + snapshot. No bytes read into memory.
+                        # <iframe> shell + snapshot. No bytes read into memory. ``size`` is the
+                        # original file (the download), not the shell.
                         file_url = await uploader.upload_local_file(vpath, physical, thread_id)
-                        ref, item = await _build_iframe_item(uploader, sandbox, thread_id, Path(physical).name, file_url)
+                        ref, item = await _build_iframe_item(uploader, sandbox, thread_id, Path(physical).name, file_url, size)
                         artifacts.append(ref)
                         items.append(item)
                         continue
-                    # Non-media: try wrapping as HTML doc + snapshot poster.
+                    # Non-media: try wrapping as HTML doc + snapshot poster. ``size`` is the
+                    # original source file (len(raw)), not the wrapped HTML/snapshot.
                     raw = await asyncio.to_thread(_read_bytes, physical)
-                    rich = await _build_rich_item(uploader, sandbox, thread_id, Path(physical).name, raw)
+                    rich = await _build_rich_item(uploader, sandbox, thread_id, Path(physical).name, raw, len(raw))
                     if rich is not None:
                         ref, item = rich
                         artifacts.append(ref)
@@ -554,11 +574,11 @@ async def present_file_tool(
                     # Not wrappable (binary / too large): bare download link.
                     url = await uploader.upload_local_file(vpath, physical, thread_id)
                     artifacts.append(url)
-                    items.append(_artifact_item(url))
+                    items.append(_artifact_item(url, size))
                 except Exception:
                     logger.warning("present_files: OSS upload failed for %s, falling back to local path", vpath)
                     artifacts.append(vpath)
-                    items.append(_artifact_item(vpath))
+                    items.append(_artifact_item(vpath, _path_size(_virtual_to_physical(vpath, outputs_path))))
 
     update: dict = {
         "artifacts": artifacts,

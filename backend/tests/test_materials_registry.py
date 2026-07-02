@@ -8,6 +8,7 @@ from deerflow.agents.materials.registry import (
     build_reverse_index,
     classify_ref,
     material_id,
+    project_artifact_items,
     project_display_refs,
     register,
     resolve_or_register,
@@ -185,3 +186,24 @@ def test_project_display_refs_empty():
     assert project_display_refs(None) == []
     assert project_display_refs({}) == []
     assert project_display_refs({"m1": _mat("m1", "k")}) == []  # 全无 display
+
+
+# --- project_artifact_items（下行 item 带 size）---------------------------------
+
+
+def test_project_artifact_items_carries_size():
+    materials = {"m1": {"id": "m1", "kind": "image", "origin": "generate", "ref_type": "oss_path", "ref": "agent-artifacts/t/a.png", "stable": True, "size": 4096}}
+    items = project_artifact_items(materials, ["m1"])
+    assert items == [{"id": "m1", "ref": "agent-artifacts/t/a.png", "kind": "image", "stable": True, "size": 4096}]
+
+
+def test_project_artifact_items_size_none_when_absent():
+    # 未落盘素材（第三方 global_url 仅 register、从未下载）无 size → 字段为 None，但仍带出。
+    materials = {"m1": {"id": "m1", "kind": "image", "origin": "generate", "ref_type": "global_url", "ref": "https://cdn/x.png", "stable": True}}
+    items = project_artifact_items(materials, ["m1"])
+    assert items[0]["size"] is None
+
+
+def test_register_stores_size_when_given():
+    _mid, update = register({}, kind="image", origin="generate", ref_type="oss_path", ref="agent-artifacts/t/a.png", size=2048)
+    assert update[_mid]["size"] == 2048

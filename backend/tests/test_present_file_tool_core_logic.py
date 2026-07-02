@@ -53,6 +53,9 @@ def test_present_files_normalizes_host_outputs_path(tmp_path):
 
     assert result.update["artifacts"] == ["/mnt/user-data/outputs/report.md"]
     assert result.update["messages"][0].content == "Successfully presented files"
+    # 每个下行 item 带 size（本地文件字节数），即便 OSS 关闭仍从虚拟路径映射的本地文件量得
+    items = result.update["messages"][0].artifact["items"]
+    assert items[0]["size"] == 2  # "ok" == 2 bytes
 
 
 def test_present_files_keeps_virtual_outputs_path(tmp_path):
@@ -141,6 +144,7 @@ def test_present_material_id_stages_and_marks_display(tmp_path, monkeypatch):
 
     outputs_dir = tmp_path / "threads" / "thread-1" / "user-data" / "outputs"
     outputs_dir.mkdir(parents=True)
+    (outputs_dir / "a.png").write_bytes(b"z" * 77)  # 真文件 → stage 记 size=77
     materials = {"m1": {"id": "m1", "kind": "image", "origin": "local", "ref_type": "local", "local_path": "/mnt/user-data/outputs/a.png"}}
     runtime = SimpleNamespace(
         state={"thread_data": {"outputs_path": str(outputs_dir)}, "materials": materials},
@@ -156,6 +160,9 @@ def test_present_material_id_stages_and_marks_display(tmp_path, monkeypatch):
     assert result.update["materials"]["m1"]["display"] is True
     # 交付物 ref（presign 回裸 key，OSS off）进 artifacts
     assert result.update["artifacts"] == ["agent-artifacts/thread-1/files/a.png"]
+    # material 记入 size，下行 item 带出（stage 上传时量得）
+    assert result.update["materials"]["m1"]["size"] == 77
+    assert result.update["messages"][0].artifact["items"][0]["size"] == 77
 
 
 def test_present_files_rejects_paths_outside_outputs(tmp_path):

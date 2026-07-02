@@ -119,6 +119,8 @@ def test_text_file_produces_rich_item_with_poster(wired):
     item = _items(result)[0]
     assert item["mime"] == "text/html"
     assert item["source_name"] == "report.md"
+    # size is the ORIGINAL source file (not the wrapped HTML/snapshot).
+    assert item["size"] == f.stat().st_size
     # ref is the snapshot PNG; html carries the source-viewer HTML path.
     assert item["ref"].endswith(".png") and "images" in item["ref"]
     assert item["html"].endswith(".html") or "documents" in item["html"]
@@ -190,6 +192,8 @@ def test_pdf_produces_iframe_item_with_download(wired):
     item = _items(result)[0]
     assert item["mime"] == "text/html"
     assert item["source_name"] == "deck.pdf"
+    # size is the ORIGINAL PDF (the download), not the iframe shell/snapshot.
+    assert item["size"] == f.stat().st_size
     # Original PDF uploaded as-is for download (never converted, I8) and reused as iframe src.
     assert wired.uploader.local_calls and wired.uploader.local_calls[0].endswith("deck.pdf")
     assert item["download"].endswith("deck.pdf")
@@ -239,5 +243,6 @@ def test_image_file_uses_media_branch(wired):
 
     item = _items(result)[0]
     assert "poster" not in item
+    assert item["size"] == f.stat().st_size  # media item carries the file's byte size
     assert wired.uploader.local_calls and wired.uploader.local_calls[0].endswith("pic.png")
     assert not wired.uploader.inline_calls  # media never goes through inline wrap

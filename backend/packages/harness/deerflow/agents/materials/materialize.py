@@ -36,6 +36,14 @@ _FETCH_TIMEOUT_S = 60.0
 _FETCH_MAX_BYTES = 256 * 1024 * 1024  # 256 MiB（视频安全上限）
 
 
+def _file_size(physical_path: str) -> int | None:
+    """本地文件字节数（供 material.size）。取不到（文件缺失/权限）→ None，不阻断物化。"""
+    try:
+        return Path(physical_path).stat().st_size
+    except OSError:
+        return None
+
+
 @dataclass(frozen=True)
 class FetchedBytes:
     data: bytes
@@ -153,8 +161,8 @@ async def rehost_remote_url(
     uploader = get_oss_uploader()
     if uploader is None:
         raise RuntimeError("OSS uploader unavailable — cannot re-host")
-    object_key = await uploader.rehost_url(url, thread_id)
-    mid, upd = register(materials, kind=kind, origin=origin, ref_type="oss_path", ref=object_key, origin_url=url, caption=caption, turn=turn, display=display, stable=True)
+    object_key, size = await uploader.rehost_url(url, thread_id)
+    mid, upd = register(materials, kind=kind, origin=origin, ref_type="oss_path", ref=object_key, origin_url=url, caption=caption, turn=turn, display=display, stable=True, size=size)
     return MaterializeOutcome(id=mid, update=upd, ref_type="oss_path", ref=object_key, stable=True, deduped=False)
 
 
@@ -187,7 +195,7 @@ async def rehost_inline_bytes(
     if hit is not None:
         return _deduped(materials, hit)  # 幂等：同内容字节已登记 → 不二次上传
     uploaded = await uploader.rehost_bytes(data, thread_id, mime_type=mime_type, filename=filename)
-    mid, upd = register(materials, kind=kind, origin=origin, ref_type="oss_path", ref=uploaded, caption=caption, turn=turn, display=display, stable=True)
+    mid, upd = register(materials, kind=kind, origin=origin, ref_type="oss_path", ref=uploaded, caption=caption, turn=turn, display=display, stable=True, size=len(data))
     return MaterializeOutcome(id=mid, update=upd, ref_type="oss_path", ref=uploaded, stable=True, deduped=False)
 
 
@@ -238,6 +246,7 @@ async def rehost_local_file(
     uploader = get_oss_uploader()
     if uploader is None:
         raise RuntimeError("OSS uploader unavailable — cannot re-host local file")
+    size = _file_size(physical_path)
     ref = await uploader.upload_local_file(virtual_path, physical_path, thread_id)
     # ref 可能是 presigned（presigned_url=true）或裸 object_key（false）→ 一律归一 oss_path
     _ref_type, object_key = classify_ref(ref)
@@ -247,11 +256,13 @@ async def rehost_local_file(
         upd: dict[str, Material] = {
             hit: {"id": hit, "kind": kind, "origin": origin, "ref_type": "oss_path", "ref": object_key, "local_path": virtual_path}
         }
+        if size is not None:
+            upd[hit]["size"] = size
         if display:
             upd[hit]["display"] = True
         return MaterializeOutcome(id=hit, update=upd, ref_type="oss_path", ref=object_key, stable=True, deduped=False)
 
-    mid, new_upd = register(materials, kind=kind, origin=origin, ref_type="oss_path", ref=object_key, local_path=virtual_path, caption=caption, turn=turn, display=display, stable=True)
+    mid, new_upd = register(materials, kind=kind, origin=origin, ref_type="oss_path", ref=object_key, local_path=virtual_path, caption=caption, turn=turn, display=display, stable=True, size=size)
     return MaterializeOutcome(id=mid, update=new_upd, ref_type="oss_path", ref=object_key, stable=True, deduped=False)
 
 
@@ -366,10 +377,13 @@ async def stage_to_oss(
     uploader = get_oss_uploader()
     if uploader is None:
         raise RuntimeError("OSS uploader unavailable — cannot stage")
-    _rt, object_key = classify_ref(await uploader.rehost_url(url, thread_id))
+    rehosted_key, size = await uploader.rehost_url(url, thread_id)
+    _rt, object_key = classify_ref(rehosted_key)
     upd: dict[str, Material] = {
         mid: {"id": mid, "kind": kind, "origin": mat.get("origin", "generate"), "ref_type": "oss_path", "ref": object_key, "origin_url": url}
     }
+    if size is not None:
+        upd[mid]["size"] = size
     if mat.get("local_path"):
         upd[mid]["local_path"] = mat["local_path"]
     if display:

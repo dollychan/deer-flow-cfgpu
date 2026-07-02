@@ -28,9 +28,9 @@ class _FakeUploader:
         self.upload_calls.append((virtual_path, physical_path, thread_id))
         return f"agent-artifacts/{thread_id}/files/{virtual_path.rsplit('/', 1)[-1]}"
 
-    async def rehost_url(self, url: str, thread_id: str) -> str:
+    async def rehost_url(self, url: str, thread_id: str) -> tuple[str, int]:
         self.rehost_calls.append((url, thread_id))
-        return f"agent-artifacts/{thread_id}/images/{url.rsplit('/', 1)[-1]}"
+        return f"agent-artifacts/{thread_id}/images/{url.rsplit('/', 1)[-1]}", 1234
 
 
 @pytest.fixture(autouse=True)

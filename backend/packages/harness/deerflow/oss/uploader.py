@@ -152,14 +152,18 @@ class OSSUploader:
         logger.info("OSSUploader: re-hosted inline bytes → %s (%d bytes)", object_key, len(data))
         return object_key
 
-    async def rehost_url(self, url: str, thread_id: str) -> str:
-        """Fetch a remote URL and re-host its bytes into our bucket; return the **object_key**.
+    async def rehost_url(self, url: str, thread_id: str) -> tuple[str, int]:
+        """Fetch a remote URL and re-host its bytes into our bucket; return ``(object_key, size)``.
 
         Used by ``MaterialsMiddleware`` Capture (§4.2): a freshly generated cfdream URL is
         short-lived, so its bytes are pulled into our OSS once and thereafter referenced by
         the stable object_key (presigned at the out-gate). The object_key embeds a stable
         hash of the source URL so re-hosting the same URL (e.g. a ``task_wait`` replay) is
         idempotent — same key, no duplicate object, dedup-friendly.
+
+        ``size`` is the fetched byte count — the caller records it on the material so the
+        downstream ``artifact`` item can surface the file size (only the uploader holds the
+        bytes on this path, so it is the natural place to measure).
 
         Network fetch is async (httpx); the blocking OSS ``put_object`` is offloaded to a
         thread so the event loop is never blocked.
@@ -171,8 +175,9 @@ class OSSUploader:
             resp.raise_for_status()
             data = resp.content
             content_type = (resp.headers.get("content-type") or "").split(";")[0].strip() or None
-        if len(data) > _REHOST_MAX_BYTES:
-            raise ValueError(f"re-host payload {len(data)} bytes exceeds {_REHOST_MAX_BYTES} ceiling")
+        size = len(data)
+        if size > _REHOST_MAX_BYTES:
+            raise ValueError(f"re-host payload {size} bytes exceeds {_REHOST_MAX_BYTES} ceiling")
 
         filename = _filename_from_url(url, content_type)
         category = _infer_category(filename)
@@ -180,8 +185,8 @@ class OSSUploader:
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._client.upload_bytes, object_key, data, content_type)
-        logger.info("OSSUploader: re-hosted %s → %s (%d bytes)", url, object_key, len(data))
-        return object_key
+        logger.info("OSSUploader: re-hosted %s → %s (%d bytes)", url, object_key, size)
+        return object_key, size
 
 
 def _inline_filename(data: bytes, mime_type: str | None, filename: str | None) -> str:
