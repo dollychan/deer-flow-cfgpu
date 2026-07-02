@@ -8,8 +8,7 @@ import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from deerflow.agents.middlewares.human_approval_middleware import HumanApprovalMiddleware
-from deerflow.agents.thread_state import ThreadState, merge_tool_approvals
-
+from deerflow.agents.thread_state import merge_tool_approvals
 
 # ---------------------------------------------------------------------------
 # Helpers

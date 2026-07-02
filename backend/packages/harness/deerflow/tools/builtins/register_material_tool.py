@@ -21,7 +21,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from deerflow.agents.materials.materialize import register_local_file
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX, map_virtual_to_physical
+from deerflow.config.paths import map_virtual_to_physical
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)

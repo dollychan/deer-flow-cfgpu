@@ -80,7 +80,7 @@ def _format_facts(facts_json: str, *, indent: int = 2) -> str:
     return "\n".join(lines)
 
 
-def _format_user_rows(rows: "list[MemoryUserRow]") -> str:
+def _format_user_rows(rows: list[MemoryUserRow]) -> str:
     sections = []
     for row in rows:
         label = f"[scope: {row.scope_key}]" if row.scope_key else "[general]"
@@ -97,7 +97,7 @@ def _format_user_rows(rows: "list[MemoryUserRow]") -> str:
     return "## User Knowledge\n" + "\n".join(sections)
 
 
-def _format_agent_row(row: "MemoryAgentRow") -> str:
+def _format_agent_row(row: MemoryAgentRow) -> str:
     parts = []
     if row.summary:
         parts.append(f"  Summary: {row.summary}")
@@ -109,7 +109,7 @@ def _format_agent_row(row: "MemoryAgentRow") -> str:
     return "## Agent Knowledge\n" + "\n".join(parts)
 
 
-def _format_project_rows(rows: "list[MemoryProjectRow]") -> str:
+def _format_project_rows(rows: list[MemoryProjectRow]) -> str:
     sections = []
     for row in rows:
         label = f"[scope: {row.scope_key}]" if row.scope_key else "[general]"

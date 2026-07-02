@@ -8,12 +8,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from deerflow.agents.memory.extractor import ExtractionResult, _parse_response, _render_skill
-
 
 # Mirrors the literal braces present in the real skill markdown
 # (skills/public/memory/extract-*.md): a JSON example block plus the

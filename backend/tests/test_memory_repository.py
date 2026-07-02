@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.config.mlm_config import MlmConfig
 from deerflow.persistence.base import Base
-from deerflow.persistence.memory.repository import _MAX_RETRIES, _coerce_confidence, MemoryRepository, merge_facts
+from deerflow.persistence.memory.repository import _MAX_RETRIES, MemoryRepository, _coerce_confidence, merge_facts
 
 # ---------------------------------------------------------------------------
 # Shared fixture

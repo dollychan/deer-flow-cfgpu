@@ -10,7 +10,6 @@ import pytest
 from deerflow.agents.memory.injector import _format_facts, build_injection, filter_by_scope
 from deerflow.config.mlm_config import MlmConfig
 
-
 # ---------------------------------------------------------------------------
 # filter_by_scope
 # ---------------------------------------------------------------------------

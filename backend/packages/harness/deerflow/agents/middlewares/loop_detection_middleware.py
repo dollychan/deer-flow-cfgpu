@@ -278,7 +278,6 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     @classmethod
     def from_config(cls, config: LoopDetectionConfig) -> LoopDetectionMiddleware:
         """Construct from a Pydantic-validated config, trusting its validation."""
-        from deerflow.config.loop_detection_config import ToolKeyOverride as _TKO
 
         return cls(
             warn_threshold=config.warn_threshold,

@@ -7,10 +7,10 @@ Run:
 
 from __future__ import annotations
 
+import datetime
 import io
 import os
 import sys
-import datetime
 
 
 def _load_env() -> None:
@@ -77,7 +77,7 @@ def test_presign(object_key: str) -> str:
 
 
 def test_download(url: str) -> None:
-    print(f"\n[3] Download via presigned URL")
+    print("\n[3] Download via presigned URL")
     import urllib.request
     with urllib.request.urlopen(url) as resp:
         data = resp.read()
