@@ -224,17 +224,62 @@ def test_pdf_iframe_no_poster_when_sandbox_absent(wired, monkeypatch):
     assert wired.uploader.local_calls and len(wired.uploader.inline_calls) == 1
 
 
-def test_non_renderable_binary_office_falls_back_to_bare_link(wired):
-    # PPT/Word stay as bare download links — never converted, no iframe shell.
+def test_non_renderable_binary_office_gets_iframe_shell(wired):
+    # PPT/Word/Excel → iframe shell (download button + best-effort iframe preview).
+    # Browser cannot render pptx natively, so iframe is blank but download always works.
     f = wired.outputs_dir / "slides.pptx"
     f.write_bytes(b"PK\x03\x04binary-ooxml\xff")
 
     result = _present(runtime=_make_runtime(str(wired.outputs_dir)), filepaths=[str(f)], tool_call_id="tc")
 
     item = _items(result)[0]
-    assert "download" not in item and "html" not in item
+    assert item["mime"] == "text/html"
+    assert item["source_name"] == "slides.pptx"
+    # Original file uploaded as-is for download (never converted, I8).
     assert wired.uploader.local_calls and wired.uploader.local_calls[0].endswith("slides.pptx")
-    assert not wired.uploader.inline_calls  # no shell wrapping
+    assert item["download"].endswith("slides.pptx")
+    # Shell HTML + poster PNG uploaded inline.
+    assert item["html"].endswith(".html") or "documents" in item["html"]
+    assert len(wired.uploader.inline_calls) == 2
+    # The snapshot rendered an iframe shell embedding the original file URL.
+    snapped = wired.sandbox.calls[0]
+    assert "<iframe" in snapped and item["download"] in snapped
+
+
+def test_pptx_iframe_no_poster_when_sandbox_absent(wired, monkeypatch):
+    monkeypatch.setattr(mod, "_resolve_snapshot_sandbox", lambda runtime: None)
+    f = wired.outputs_dir / "slides.pptx"
+    f.write_bytes(b"PK\x03\x04binary-ooxml\xff")
+
+    result = _present(runtime=_make_runtime(str(wired.outputs_dir)), filepaths=[str(f)], tool_call_id="tc")
+
+    item = _items(result)[0]
+    assert item["ref"] is None  # no snapshot → no poster (I1/I8)
+    assert item["size"] is None  # size tracks ref → None without a poster
+    assert item["html"].endswith(".html") or "documents" in item["html"]
+    assert item["download"].endswith("slides.pptx")  # download still delivered
+    assert item["mime"] == "text/html"
+    # original upload + shell HTML inline; no PNG.
+    assert wired.uploader.local_calls and len(wired.uploader.inline_calls) == 1
+
+
+def test_binary_never_read_into_memory(wired, monkeypatch):
+    """Binary files (pptx/docx/zip) skip _read_bytes entirely — they go straight
+    to upload_local_file + iframe shell, never loading bytes into the host process."""
+    read_calls = []
+    original_read = mod._read_bytes
+
+    def tracking_read(path):
+        read_calls.append(path)
+        return original_read(path)
+
+    monkeypatch.setattr(mod, "_read_bytes", tracking_read)
+    f = wired.outputs_dir / "deck.pptx"
+    f.write_bytes(b"PK\x03\x04binary-ooxml\xff")
+
+    _present(runtime=_make_runtime(str(wired.outputs_dir)), filepaths=[str(f)], tool_call_id="tc")
+
+    assert not read_calls, "binary file should not be read into memory"
 
 
 def test_image_file_uses_media_branch(wired):
