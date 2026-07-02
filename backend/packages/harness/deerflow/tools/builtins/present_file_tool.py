@@ -330,7 +330,6 @@ async def _build_rich_item(
     thread_id: str,
     filename: str,
     raw: bytes,
-    size: int | None = None,
 ) -> tuple[str, dict] | None:
     """Wrap a non-media text file as an HTML doc + PNG snapshot → a rich artifact item.
 
@@ -339,6 +338,9 @@ async def _build_rich_item(
     snapshot is best-effort: if the sandbox has no browser (LocalSandbox → ``None``)
     or rendering fails, ``ref`` is ``None`` while ``html`` still points at the HTML,
     so the file is still delivered without a poster (I1).
+
+    ``size`` describes what ``ref`` points to — here the snapshot PNG — so it is the
+    poster's byte count (``None`` when there is no snapshot), NOT the source file.
     """
     if len(raw) > _WRAPPABLE_MAX_BYTES:
         return None
@@ -361,9 +363,11 @@ async def _build_rich_item(
     html_ref = await uploader.upload_inline_bytes(html_key, html_bytes, "text/html")
 
     snapshot_ref = None
+    snapshot_size: int | None = None
     if sandbox is not None:
         png = await asyncio.to_thread(sandbox.snapshot_html, html_doc)
         if png:
+            snapshot_size = len(png)
             png_key = _inline_key(thread_id, "images", png, f"{Path(filename).stem}.png")
             snapshot_ref = await uploader.upload_inline_bytes(png_key, png, "image/png")
         else:
@@ -378,9 +382,10 @@ async def _build_rich_item(
     # / render failure) ``ref`` is ``None`` while ``html`` still points at the HTML, so
     # the file is delivered without a poster (I1). ``kind``/``expires_at`` classify off
     # ``html_ref`` (png and html share the same OSS scheme) so they hold even when the
-    # snapshot is absent.
+    # snapshot is absent. ``size`` tracks ``ref`` (the poster PNG), so it is ``None``
+    # when there is no snapshot.
     item = {
-        **_artifact_item(html_ref, size),
+        **_artifact_item(html_ref, snapshot_size),
         "ref": snapshot_ref,
         "mime": "text/html",
         "html": html_ref,
@@ -395,7 +400,6 @@ async def _build_iframe_item(
     thread_id: str,
     filename: str,
     file_url: str,
-    size: int | None = None,
 ) -> tuple[str, dict]:
     """Wrap a browser-renderable binary (PDF) as an <iframe> shell + snapshot → rich item.
 
@@ -406,6 +410,9 @@ async def _build_iframe_item(
     debt, cfgpu-docs §6.3 / D8 / I8). The snapshot is best-effort: headless chromium
     rarely renders an embedded PDF, so ``ref`` (poster) may be ``None`` while ``html``
     still carries the shell — the file is delivered without a poster (I1/I8).
+
+    ``size`` describes what ``ref`` points to — the snapshot PNG — so it is the poster's
+    byte count (``None`` when there is no snapshot), NOT the original PDF (see ``download``).
     """
     html_doc = build_iframe_html(file_url, filename)
     html_bytes = html_doc.encode("utf-8")
@@ -413,9 +420,11 @@ async def _build_iframe_item(
     html_ref = await uploader.upload_inline_bytes(html_key, html_bytes, "text/html")
 
     snapshot_ref = None
+    snapshot_size: int | None = None
     if sandbox is not None:
         png = await asyncio.to_thread(sandbox.snapshot_html, html_doc)
         if png:
+            snapshot_size = len(png)
             png_key = _inline_key(thread_id, "images", png, f"{Path(filename).stem}.png")
             snapshot_ref = await uploader.upload_inline_bytes(png_key, png, "image/png")
         else:
@@ -427,8 +436,9 @@ async def _build_iframe_item(
     # ``download`` carrying the original file URL so the client always has the as-is
     # file even when the preview is unavailable. ``kind``/``expires_at`` classify off
     # ``html_ref`` (poster and shell share the OSS scheme), holding when poster is None.
+    # ``size`` tracks ``ref`` (the poster PNG), so it is ``None`` when there is no snapshot.
     item = {
-        **_artifact_item(html_ref, size),
+        **_artifact_item(html_ref, snapshot_size),
         "ref": snapshot_ref,
         "mime": "text/html",
         "html": html_ref,
@@ -555,17 +565,18 @@ async def present_file_tool(
                     if _is_iframe_renderable(Path(physical).name):
                         # Browser-renderable binary (PDF, §6.3): upload the original as-is
                         # (download + iframe src — never converted, I8) then wrap it in an
-                        # <iframe> shell + snapshot. No bytes read into memory. ``size`` is the
-                        # original file (the download), not the shell.
+                        # <iframe> shell + snapshot. No bytes read into memory. The item ``size``
+                        # tracks its ``ref`` (the snapshot poster), not the original file — the
+                        # original stays reachable via ``download``.
                         file_url = await uploader.upload_local_file(vpath, physical, thread_id)
-                        ref, item = await _build_iframe_item(uploader, sandbox, thread_id, Path(physical).name, file_url, size)
+                        ref, item = await _build_iframe_item(uploader, sandbox, thread_id, Path(physical).name, file_url)
                         artifacts.append(ref)
                         items.append(item)
                         continue
-                    # Non-media: try wrapping as HTML doc + snapshot poster. ``size`` is the
-                    # original source file (len(raw)), not the wrapped HTML/snapshot.
+                    # Non-media: try wrapping as HTML doc + snapshot poster. The item ``size``
+                    # tracks its ``ref`` (the snapshot poster), computed inside the builder.
                     raw = await asyncio.to_thread(_read_bytes, physical)
-                    rich = await _build_rich_item(uploader, sandbox, thread_id, Path(physical).name, raw, len(raw))
+                    rich = await _build_rich_item(uploader, sandbox, thread_id, Path(physical).name, raw)
                     if rich is not None:
                         ref, item = rich
                         artifacts.append(ref)

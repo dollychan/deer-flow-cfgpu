@@ -119,8 +119,8 @@ def test_text_file_produces_rich_item_with_poster(wired):
     item = _items(result)[0]
     assert item["mime"] == "text/html"
     assert item["source_name"] == "report.md"
-    # size is the ORIGINAL source file (not the wrapped HTML/snapshot).
-    assert item["size"] == f.stat().st_size
+    # size tracks ref (the snapshot PNG), NOT the source file.
+    assert item["size"] == len(wired.sandbox.png)
     # ref is the snapshot PNG; html carries the source-viewer HTML path.
     assert item["ref"].endswith(".png") and "images" in item["ref"]
     assert item["html"].endswith(".html") or "documents" in item["html"]
@@ -153,8 +153,9 @@ def test_no_poster_when_sandbox_absent(wired, monkeypatch):
     result = _present(runtime=_make_runtime(str(wired.outputs_dir)), filepaths=[str(f)], tool_call_id="tc")
 
     item = _items(result)[0]
-    # No snapshot → ref is None, html still carries the HTML file (I1/I2).
+    # No snapshot → ref is None; size tracks ref so it is None too. html still carries the HTML file (I1/I2).
     assert item["ref"] is None
+    assert item["size"] is None
     assert item["html"].endswith(".html") or "documents" in item["html"]
     assert item["mime"] == "text/html"  # HTML still delivered (I1/I2)
     assert len(wired.uploader.inline_calls) == 1  # only the HTML, no PNG
@@ -192,8 +193,8 @@ def test_pdf_produces_iframe_item_with_download(wired):
     item = _items(result)[0]
     assert item["mime"] == "text/html"
     assert item["source_name"] == "deck.pdf"
-    # size is the ORIGINAL PDF (the download), not the iframe shell/snapshot.
-    assert item["size"] == f.stat().st_size
+    # size tracks ref (the snapshot poster), NOT the original PDF (reachable via download).
+    assert item["size"] == len(wired.sandbox.png)
     # Original PDF uploaded as-is for download (never converted, I8) and reused as iframe src.
     assert wired.uploader.local_calls and wired.uploader.local_calls[0].endswith("deck.pdf")
     assert item["download"].endswith("deck.pdf")
@@ -215,6 +216,7 @@ def test_pdf_iframe_no_poster_when_sandbox_absent(wired, monkeypatch):
 
     item = _items(result)[0]
     assert item["ref"] is None  # no snapshot → no poster (I1/I8)
+    assert item["size"] is None  # size tracks ref → None without a poster
     assert item["html"].endswith(".html") or "documents" in item["html"]
     assert item["download"].endswith("deck.pdf")  # download still delivered
     assert item["mime"] == "text/html"
