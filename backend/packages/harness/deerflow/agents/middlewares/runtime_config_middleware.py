@@ -22,6 +22,14 @@ Two independent client-controlled parameters from the MQ task message are surfac
    - ``type == "auto"`` (also the default for a missing/unknown ``type``) — **LLM's choice stands**.
      The whitelist is *not* enforced; the model the LLM picked is passed through unchanged.
 
+   In **manual** mode this middleware *also* eager-injects a ``<system-reminder>`` HumanMessage in
+   ``(a)before_agent`` (alongside the skills reminder) that lists the allowed cfdream model IDs per
+   media type and instructs the LLM to select each generation's ``model`` from within that range
+   (or ``ask_clarification`` if none fits). This turns the ``after_model`` clamp from a silent
+   correction into an explicit up-front constraint the LLM chooses within — the server-side clamp
+   still guarantees non-human runs never escape the range (defence in depth). Only bound task types
+   (the agent's ``model_bindings``) are listed. No reminder is injected in auto mode.
+
    In **both** modes (and even with **no** ``config.models`` at all), a null/empty generate ``model``
    is defaulted to ``"auto"`` so the cfdream tool never receives ``null`` (its own ``model`` default
    is ``"auto"``). This null-safety normalization is independent of the ``type`` gate.
@@ -63,6 +71,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _SKILL_REMINDER_KEY = "runtime_config_skill_reminder"
+_MODELS_REMINDER_KEY = "runtime_config_models_reminder"
 _SUMMARY_MESSAGE_NAME = "summary"
 
 # Built-in default model_bindings: tool-name fnmatch pattern → config.models task-type slice.
@@ -104,6 +113,19 @@ def _is_skill_reminder(message: object) -> bool:
     return isinstance(message, HumanMessage) and bool((getattr(message, "additional_kwargs", None) or {}).get(_SKILL_REMINDER_KEY))
 
 
+def _is_models_reminder(message: object) -> bool:
+    """Return whether *message* is a models-whitelist reminder injected by this middleware."""
+    return isinstance(message, HumanMessage) and bool((getattr(message, "additional_kwargs", None) or {}).get(_MODELS_REMINDER_KEY))
+
+
+def _anchor_index(messages: list) -> int | None:
+    """Index of the current turn = the last genuine user message, or None if there is none."""
+    for i in range(len(messages) - 1, -1, -1):
+        if _is_real_user_message(messages[i]):
+            return i
+    return None
+
+
 def _context_dict(runtime: object) -> dict:
     ctx = getattr(runtime, "context", None) or {}
     return ctx if isinstance(ctx, dict) else {}
@@ -132,6 +154,28 @@ def _build_reminder(found: list[tuple[str, str]], missing: list[str], out_of_sco
         if found or out_of_scope:
             lines.append("")
         lines.append(f"The following requested skill(s) were NOT found and cannot be applied: {', '.join(missing)}. Tell the user you cannot apply them.")
+    lines.append("</system-reminder>")
+    return "\n".join(lines)
+
+
+def _build_models_reminder(allowed_by_type: dict[str, list[str]]) -> str:
+    """Build the manual-mode ``<system-reminder>`` that lists the allowed model IDs per media type.
+
+    Only emitted when ``config.models.type == "manual"`` (the client restricted the selection
+    range). It tells the LLM to pick each generation's model *from* the listed range, to ask via
+    ``ask_clarification`` when it cannot decide, and to ignore any model outside the list — turning
+    the server-side ``after_model`` clamp from a silent correction into an explicit up-front
+    constraint the LLM selects within.
+    """
+    lines = [
+        "<system-reminder>",
+        "The client has restricted model selection for THIS task (manual mode). Before EACH generation, you MUST choose the `model` from the allowed list for its media type below — do not use any model outside it:",
+        "",
+    ]
+    for task_type, ids in allowed_by_type.items():
+        lines.append(f"- {task_type}: {', '.join(ids)}")
+    lines.append("")
+    lines.append("If you cannot decide which allowed model best fits the request, ask the user with ask_clarification instead of guessing. Ignore any model not listed here, even if list_models reports others.")
     lines.append("</system-reminder>")
     return "\n".join(lines)
 
@@ -306,15 +350,10 @@ class RuntimeConfigMiddleware(AgentMiddleware):
         if not messages:
             return None
 
-        # Anchor to the current turn = the last genuine user message.
-        target_idx: int | None = None
-        for i in range(len(messages) - 1, -1, -1):
-            if _is_real_user_message(messages[i]):
-                target_idx = i
-                break
+        # Anchor to the current turn = the last genuine user message. No user message to anchor to
+        # (e.g. pure HIL resume) → the original turn's reminder is already in history; nothing new.
+        target_idx = _anchor_index(messages)
         if target_idx is None:
-            # No user message to anchor to (e.g. pure HIL resume) — the original turn's
-            # reminder is already in history; nothing new to inject.
             return None
 
         # Idempotency: this turn already carries a skill reminder.
@@ -327,21 +366,80 @@ class RuntimeConfigMiddleware(AgentMiddleware):
         )
         return {"messages": [reminder]}
 
+    def _skill_reminder_messages(self, state, found: list[tuple[str, str]], missing: list[str], out_of_scope: list[str]) -> list:
+        update = self._build_update(state, found, missing, out_of_scope)
+        return list(update["messages"]) if update else []
+
     @override
     def before_agent(self, state, runtime: Runtime) -> dict | None:
+        messages: list = []
         names = self._requested_skills(runtime)
-        if not names:
-            return None
-        found, missing, out_of_scope = self._load_blocks(names)
-        return self._build_update(state, found, missing, out_of_scope)
+        if names:
+            found, missing, out_of_scope = self._load_blocks(names)
+            messages += self._skill_reminder_messages(state, found, missing, out_of_scope)
+        messages += self._models_reminder_messages(state, runtime)
+        return {"messages": messages} if messages else None
 
     @override
     async def abefore_agent(self, state, runtime: Runtime) -> dict | None:
+        messages: list = []
         names = self._requested_skills(runtime)
-        if not names:
-            return None
-        found, missing, out_of_scope = await asyncio.to_thread(self._load_blocks, names)
-        return self._build_update(state, found, missing, out_of_scope)
+        if names:
+            found, missing, out_of_scope = await asyncio.to_thread(self._load_blocks, names)
+            messages += self._skill_reminder_messages(state, found, missing, out_of_scope)
+        # Models reminder is a pure, IO-free build from runtime.context — no offload needed.
+        messages += self._models_reminder_messages(state, runtime)
+        return {"messages": messages} if messages else None
+
+    # ── config.models — manual-mode whitelist injection (before_agent) ────────────
+
+    def _manual_allowed_by_type(self, models_cfg: object) -> dict[str, list[str]]:
+        """Return ``{task_type: [allowed ids]}`` for manual mode, restricted to this agent's bindings.
+
+        Empty dict when not manual (``type != "manual"``), when ``config.models`` is absent/malformed,
+        or when no bound task type has a non-empty ``model_names`` slice. Restricting to the agent's
+        ``model_bindings`` task types keeps the injected reminder aligned with what ``after_model``
+        actually enforces (a slice for a media type this agent cannot produce is not advertised).
+        """
+        if not _is_manual_selection(models_cfg):
+            return {}
+        content = models_cfg.get("content") if isinstance(models_cfg, dict) else None
+        if not isinstance(content, list):
+            return {}
+        bound_types = set(self._model_bindings.values())
+        out: dict[str, list[str]] = {}
+        for entry in content:
+            if not isinstance(entry, dict):
+                continue
+            task_type = entry.get("type")
+            if task_type not in bound_types or task_type in out:
+                continue
+            ids = _allowed_models_for_task(models_cfg, task_type)
+            if ids:
+                out[task_type] = ids
+        return out
+
+    def _models_reminder_messages(self, state, runtime: Runtime) -> list:
+        """Build the manual-mode model-whitelist reminder message(s) for this turn (idempotent).
+
+        Mirrors the skills injection: anchors to the current turn's last real user message and
+        skips re-injection when this turn already carries a models reminder. Returns ``[]`` in auto
+        mode / when there is no restrictable range / when there is no user turn to anchor to.
+        """
+        allowed_by_type = self._manual_allowed_by_type(_context_dict(runtime).get("models"))
+        if not allowed_by_type:
+            return []
+        messages = list(state.get("messages", []))
+        target_idx = _anchor_index(messages)
+        if target_idx is None:
+            return []
+        if any(_is_models_reminder(m) for m in messages[target_idx + 1 :]):
+            return []
+        reminder = HumanMessage(
+            content=_build_models_reminder(allowed_by_type),
+            additional_kwargs={"hide_from_ui": True, _MODELS_REMINDER_KEY: True},
+        )
+        return [reminder]
 
     # ── config.models — router-whitelist, applied before HAM (方案 3) ─────────────
 

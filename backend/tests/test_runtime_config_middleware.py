@@ -23,6 +23,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.runtime_config_middleware import (
     _DEFAULT_MODEL_BINDINGS,
+    _MODELS_REMINDER_KEY,
     _SKILL_REMINDER_KEY,
     RuntimeConfigMiddleware,
     _allowed_models_for_task,
@@ -31,6 +32,10 @@ from deerflow.agents.middlewares.runtime_config_middleware import (
     _restrict_model_arg,
     _task_type_for_tool,
 )
+
+# cf-dream binds all three media types in its config.yaml; construct with the same bindings so the
+# manual-whitelist injection tests exercise image / video / audio like the real agent.
+_ALL_MEDIA_BINDINGS = {"*generate_image": "image", "*generate_video": "video", "*generate_audio": "audio"}
 
 _REMINDER_TAG = "<system-reminder>"
 _SKILL_NAME = "Seedance 2.0 视频创作"
@@ -568,6 +573,164 @@ def test_after_model_auto_still_normalizes_empty_model(model_arg):
 
     assert result is not None
     assert _model_of(result) == "auto"  # normalized despite auto mode not enforcing the whitelist
+
+
+# ── config.models: manual-mode whitelist injection (before_agent) ────────────────
+
+
+def _models_reminder(content: str = "<system-reminder>x</system-reminder>") -> HumanMessage:
+    return HumanMessage(content=content, additional_kwargs={"hide_from_ui": True, _MODELS_REMINDER_KEY: True})
+
+
+def _multi_models_cfg(mode: str, content: list[dict]) -> dict:
+    return {"type": mode, "content": content}
+
+
+def test_before_agent_injects_manual_whitelist_reminder():
+    mw = RuntimeConfigMiddleware()  # default bindings (image/video)
+    cfg = _multi_models_cfg(
+        "manual",
+        [
+            {"type": "image", "model_names": ["doubao-seedream-5-0-lite"]},
+            {"type": "video", "model_names": ["wan-2-0", "wan-2-0-fast"]},
+        ],
+    )
+    state = {"messages": [HumanMessage(content="做个短片")]}
+
+    result = mw.before_agent(state, _models_runtime(cfg))
+
+    assert result is not None
+    msgs = result["messages"]
+    assert len(msgs) == 1
+    reminder = msgs[0]
+    assert isinstance(reminder, HumanMessage)
+    assert reminder.additional_kwargs.get(_MODELS_REMINDER_KEY) is True
+    assert reminder.additional_kwargs.get("hide_from_ui") is True
+    content = reminder.content
+    assert _REMINDER_TAG in content
+    assert "manual mode" in content
+    assert "MUST choose" in content
+    assert "ask_clarification" in content  # ask when it cannot decide
+    assert "Ignore any model not listed" in content
+    # each bound type + its allowed ids are listed
+    assert "image: doubao-seedream-5-0-lite" in content
+    assert "video: wan-2-0, wan-2-0-fast" in content
+    assert "做个短片" not in content  # reminder only, not the user text
+
+
+def test_before_agent_lists_audio_when_bound():
+    # An agent that binds audio (like cf-dream) surfaces the audio slice too.
+    mw = RuntimeConfigMiddleware(model_bindings=_ALL_MEDIA_BINDINGS)
+    cfg = _multi_models_cfg("manual", [{"type": "audio", "model_names": ["minimax-speech-2-8-hd", "seed-tts-2-0"]}])
+    state = {"messages": [HumanMessage(content="配个音")]}
+
+    result = mw.before_agent(state, _models_runtime(cfg))
+
+    assert result is not None
+    assert "audio: minimax-speech-2-8-hd, seed-tts-2-0" in result["messages"][0].content
+
+
+def test_before_agent_drops_unbound_task_type():
+    # Default bindings only cover image/video → an audio slice is not advertised (would not be enforced).
+    mw = RuntimeConfigMiddleware()  # image/video only
+    cfg = _multi_models_cfg(
+        "manual",
+        [
+            {"type": "image", "model_names": ["seedream"]},
+            {"type": "audio", "model_names": ["minimax-speech-2-8-hd"]},
+        ],
+    )
+    state = {"messages": [HumanMessage(content="go")]}
+
+    content = mw.before_agent(state, _models_runtime(cfg))["messages"][0].content
+    assert "image: seedream" in content
+    assert "audio" not in content  # unbound type omitted
+
+
+def test_before_agent_no_reminder_in_auto_mode():
+    mw = RuntimeConfigMiddleware()
+    cfg = _multi_models_cfg("auto", [{"type": "image", "model_names": ["seedream"]}])
+    state = {"messages": [HumanMessage(content="go")]}
+
+    assert mw.before_agent(state, _models_runtime(cfg)) is None
+
+
+def test_before_agent_no_reminder_when_no_models():
+    mw = RuntimeConfigMiddleware()
+    state = {"messages": [HumanMessage(content="go")]}
+
+    assert mw.before_agent(state, _models_runtime(None)) is None
+
+
+def test_before_agent_no_reminder_when_manual_but_all_slices_empty():
+    mw = RuntimeConfigMiddleware()
+    cfg = _multi_models_cfg("manual", [{"type": "image", "model_names": []}])
+    state = {"messages": [HumanMessage(content="go")]}
+
+    assert mw.before_agent(state, _models_runtime(cfg)) is None
+
+
+def test_manual_reminder_is_idempotent_within_turn():
+    mw = RuntimeConfigMiddleware()
+    cfg = _multi_models_cfg("manual", [{"type": "image", "model_names": ["seedream"]}])
+    state = {"messages": [HumanMessage(content="go"), _models_reminder()]}
+
+    assert mw.before_agent(state, _models_runtime(cfg)) is None
+
+
+def test_manual_reminder_reinjected_on_new_turn():
+    mw = RuntimeConfigMiddleware()
+    cfg = _multi_models_cfg("manual", [{"type": "image", "model_names": ["seedream"]}])
+    state = {
+        "messages": [
+            HumanMessage(content="turn-1"),
+            _models_reminder(),
+            AIMessage(content="ok"),
+            HumanMessage(content="turn-2"),
+        ]
+    }
+
+    result = mw.before_agent(state, _models_runtime(cfg))
+    assert result is not None
+    assert "image: seedream" in result["messages"][0].content
+
+
+def test_manual_reminder_noop_on_pure_resume_without_user_message():
+    mw = RuntimeConfigMiddleware()
+    cfg = _multi_models_cfg("manual", [{"type": "image", "model_names": ["seedream"]}])
+    state = {"messages": [_models_reminder(), AIMessage(content="...")]}
+
+    assert mw.before_agent(state, _models_runtime(cfg)) is None
+
+
+def test_before_agent_injects_both_skill_and_models_reminders(monkeypatch, tmp_path):
+    # skills (Model B) and manual models whitelist are independent; both fire in before_agent.
+    _write_skill(tmp_path, "seedance", _SKILL_NAME, _SKILL_MARKER)
+    _patch_storage(monkeypatch, tmp_path)
+    mw = RuntimeConfigMiddleware()
+    cfg = _multi_models_cfg("manual", [{"type": "video", "model_names": ["wan-2-0-fast"]}])
+    runtime = SimpleNamespace(context={"skills": [_SKILL_NAME], "models": cfg})
+    state = {"messages": [HumanMessage(content="go")]}
+
+    result = mw.before_agent(state, runtime)
+
+    assert result is not None
+    msgs = result["messages"]
+    assert len(msgs) == 2
+    assert any(m.additional_kwargs.get(_SKILL_REMINDER_KEY) and _SKILL_MARKER in m.content for m in msgs)
+    assert any(m.additional_kwargs.get(_MODELS_REMINDER_KEY) and "video: wan-2-0-fast" in m.content for m in msgs)
+
+
+@pytest.mark.asyncio
+async def test_async_before_agent_injects_manual_whitelist():
+    mw = RuntimeConfigMiddleware()
+    cfg = _multi_models_cfg("manual", [{"type": "image", "model_names": ["seedream"]}])
+    state = {"messages": [HumanMessage(content="go")]}
+
+    result = await mw.abefore_agent(state, _models_runtime(cfg))
+
+    assert result is not None
+    assert "image: seedream" in result["messages"][0].content
 
 
 # ── ordering: RuntimeConfigMiddleware must be registered AFTER HumanApprovalMiddleware ──
