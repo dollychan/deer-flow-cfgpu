@@ -1,6 +1,6 @@
 ---
 name: cfdream-video-generation
-description: Use this skill when the user requests to generate, create, animate, or imagine videos by calling the cfdream MCP generate_video tool. It drives the full loop — understand the intent, plan the production steps, then execute each step: confirm the step's target, choose the right model (by capability, cost, speed, and parameter ranges), and emit a concrete tool call from the MCP schema. Covers prompt craft, text-to-video vs image-to-video (first/last frame) vs multimodal reference, synchronized audio, and duration/resolution choices.
+description: "Use this skill when the user requests to generate, create, animate, or imagine videos by calling the cfdream MCP generate_video tool. It drives the full loop — understand the intent, plan the production steps, then execute each step: confirm the step's target, choose the right model (by capability, cost, speed, and parameter ranges), and emit a concrete tool call from the MCP schema. Covers prompt craft, text-to-video vs image-to-video (first/last frame) vs multimodal reference, synchronized audio, and duration/resolution choices."
 ---
 
 # Video Generation Skill (cfdream MCP)
