@@ -13,21 +13,21 @@ Unlike Seedance, the 万相 family bakes the *capability into the model id* — 
 
 | Model | Scenario | What the user provides |
 |---|---|---|
-| `wan-2-7-t2v` | Text-to-video (2.7, newest) | a prompt |
-| `wan-2-6-t2v` | Text-to-video (2.6) | a prompt |
-| `wan-2-7-i2v` | Image-to-video (2.7) | prompt + first frame |
-| `wan-2-6-i2v` | Image-to-video **+ audio-drive** (2.6) | prompt + first frame + optionally one audio track |
-| `wan-2-7-r2v` | Reference-to-video (2.7) | prompt + reference video(s) and/or image(s) |
-| `wan-2-6-r2v` | Reference-to-video (2.6) | prompt + reference video(s) and/or image(s) |
-| `wan-2-7-videoedit` | Video editing (2.7 only) | prompt + one source video + optional reference image(s) |
+| `wan2.7-t2v` | Text-to-video (2.7, newest) | a prompt |
+| `wan2.6-t2v` | Text-to-video (2.6) | a prompt |
+| `wan2.7-i2v` | Image-to-video (2.7) | prompt + first frame |
+| `wan2.6-i2v` | Image-to-video **+ audio-drive** (2.6) | prompt + first frame + optionally one audio track |
+| `wan2.7-r2v` | Reference-to-video (2.7) | prompt + reference video(s) and/or image(s) |
+| `wan2.6-r2v` | Reference-to-video (2.6) | prompt + reference video(s) and/or image(s) |
+| `wan2.7-videoedit` | Video editing (2.7 only) | prompt + one source video + optional reference image(s) |
 
 How to decide, based on intent:
 
-- Just a description → `wan-2-7-t2v` (default to 2.7 for newest quality)
-- Bring a still image to life → `wan-2-7-i2v`
-- **Audio-driven avatar** — make the figure in an image sing/rap/talk to an audio track → `wan-2-6-i2v` (only 2.6 i2v accepts an audio track; 2.7 i2v does not)
-- Drive a video from **character/scene references** (the prompt refers to `character1`, etc.) → `wan-2-7-r2v` / `wan-2-6-r2v`
-- **Edit an existing video** (replace clothing/objects using a reference image) → `wan-2-7-videoedit`
+- Just a description → `wan2.7-t2v` (default to 2.7 for newest quality)
+- Bring a still image to life → `wan2.7-i2v`
+- **Audio-driven avatar** — make the figure in an image sing/rap/talk to an audio track → `wan2.6-i2v` (only 2.6 i2v accepts an audio track; 2.7 i2v does not)
+- Drive a video from **character/scene references** (the prompt refers to `character1`, etc.) → `wan2.7-r2v` / `wan2.6-r2v`
+- **Edit an existing video** (replace clothing/objects using a reference image) → `wan2.7-videoedit`
 - Default to the **2.7** variant for quality; reach for **2.6** specifically when you need audio-driven i2v.
 
 ## Step 2 — Read the scenario correctly
@@ -36,7 +36,7 @@ Send only the inputs that match the chosen variant.
 
 - **t2v** takes a prompt only.
 - **i2v** is first-frame only — no last-frame morphing anywhere in this family.
-- Audio-driven avatar is a **2.6 i2v** feature only; if the user asks for it on 2.7, switch them to `wan-2-6-i2v`.
+- Audio-driven avatar is a **2.6 i2v** feature only; if the user asks for it on 2.7, switch them to `wan2.6-i2v`.
 - **r2v** needs at least one reference (video or image); in the prompt, videos come before images and are named `character1`, `character2`, …
 - **videoedit** needs exactly one source video, plus optional reference image(s) that define the change.
 

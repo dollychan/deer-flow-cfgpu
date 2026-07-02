@@ -53,7 +53,7 @@ For every line in order, call `generate_audio` with that line's text and the mat
 ```json
 generate_audio({
   "text": "Hello Deer! Welcome back to another fascinating episode. Today we're diving into the history of artificial intelligence.",
-  "model": "minimax-speech-2-8-hd",
+  "model": "MiniMax/speech-2.8-hd",
   "voice": "presenter_male",
   "audio_format": "mp3",
   "sample_rate": 32000

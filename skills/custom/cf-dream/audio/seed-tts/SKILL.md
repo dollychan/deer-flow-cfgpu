@@ -9,7 +9,7 @@ The job of this skill is to read the user's request, figure out what they actual
 
 ## Step 1 — Confirm this is the right model
 
-There is one Doubao TTS model: `seed-tts-2-0`. It offers **122 expressive Chinese system voices** with emotion and ASMR support.
+There is one Doubao TTS model: `seed-tts-2.0`. It offers **122 expressive Chinese system voices** with emotion and ASMR support.
 
 > For English/multilingual narration or the finest pitch/speed/emotion control, consider the **minimax-speech** skill instead. seed-tts is the better fit for Chinese character/role voices and audiobook narration.
 

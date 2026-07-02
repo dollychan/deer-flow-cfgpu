@@ -52,7 +52,7 @@ Example — request "a 1990s Tokyo street-style woman":
 ```json
 generate_image({
   "prompt": "Japanese woman, mid-20s, slender and elegant; delicate features, expressive eyes, subtle lip-focused makeup, long dark hair partly wet from rain; stylish trench coat, designer handbag, high heels, 1990s Tokyo street fashion. Leica M11 street-photography aesthetic, film grain, natural warm palette, bokeh background. Medium shot, rule of thirds, subject off-center, Tokyo street context, shallow depth of field. Neon storefront lighting, wet-pavement reflections, rim light from background neons. Avoid: blurry/deformed face, oversaturated colors, studio/posed/selfie look.",
-  "model": "doubao-seedream-5-0-lite",
+  "model": "doubao-seedream-5-0-260128",
   "aspect_ratio": "2:3",
   "resolution": "2K"
 })
@@ -62,7 +62,7 @@ Example — with reference materials (refer positionally, pass ids):
 ```json
 generate_image({
   "prompt": "The character from reference 1 standing next to a vehicle inspired by reference 2 on a bustling alien marketplace street, Star Wars original-trilogy aesthetic; worn leather jacket and utility vest, blaster holster; weathered repulsor vehicle in desert dust; multi-level alien architecture, hanging market stalls, alien passers-by; twin-suns golden hour, atmospheric dust, practical stall lighting; gritty lived-in look, film grain, cinematic medium-wide shot.",
-  "model": "doubao-seedream-5-0-lite",
+  "model": "doubao-seedream-5-0-260128",
   "reference_images": ["m1", "m2"],
   "aspect_ratio": "16:9"
 })
@@ -70,7 +70,7 @@ generate_image({
 
 ## Step 2.5 — Decide the model (required before you fire)
 
-**Never send a generation with an unresolved model** — pick a concrete image model deliberately, the same way video/audio do (your SOUL's "Decide the Model Before You Generate" owns this rule). Call `list_models(task_type="image")` to see the enabled models and `get_model_card(<id>)` for exact per-model capabilities/limits, then choose by fit: Chinese-prompt adherence, image-group (`n>1`) support (only `doubao-seedream-*`), resolution ceiling, and quality-vs-cost-vs-speed priority. `doubao-seedream-5-0-lite` is a strong fast default with good Chinese support.
+**Never send a generation with an unresolved model** — pick a concrete image model deliberately, the same way video/audio do (your SOUL's "Decide the Model Before You Generate" owns this rule). Call `list_models(task_type="image")` to see the enabled models and `get_model_card(<id>)` for exact per-model capabilities/limits, then choose by fit: Chinese-prompt adherence, image-group (`n>1`) support (only `doubao-seedream-*`), resolution ceiling, and quality-vs-cost-vs-speed priority. `doubao-seedream-5-0-260128` is a strong fast default with good Chinese support.
 
 - **If the deciding information is missing** (e.g. quality-vs-cost priority, or which of several viable looks the user wants), `ask_clarification` rather than defaulting silently.
 - **`model="auto"`** (let cfdream's router pick, optionally constrained by a list) is a deliberate choice only when you are genuinely indifferent — not a way to skip the decision.
@@ -82,7 +82,7 @@ generate_image({
 | Parameter | Default | Notes |
 |---|---|---|
 | `prompt` | — | Full structured description (required) |
-| `model` | `"auto"` | **Choose a concrete adapter id** (e.g. `doubao-seedream-5-0-lite`) per Step 2.5 — a list constrains auto-selection, `"auto"` only when deliberately indifferent; honor the **locked Production Spec** model |
+| `model` | `"auto"` | **Choose a concrete model id / cfgpu model id** (e.g. `doubao-seedream-5-0-260128`) per Step 2.5 — a list constrains auto-selection, `"auto"` only when deliberately indifferent; honor the **locked Production Spec** model |
 | `aspect_ratio` | `"1:1"` | `1:1 3:2 2:3 4:3 3:4 16:9 9:16 21:9` — keep **identical across all assets** in a production |
 | `resolution` | `"2K"` | `1K 2K 3K 4K` — keep consistent across scenes |
 | `reference_images` | — | List of **material ids** (`["m1"]`), never raw URLs |
@@ -92,7 +92,7 @@ generate_image({
 | `wait` | `true` | leave true — image models are effectively synchronous; no polling needed |
 | `model_specific` | — | raw API extras merged last, e.g. `{"tools": [{"type": "web_search"}]}` |
 
-> Tool names may be host-namespaced (e.g. `mcp__cfdream__generate_image` / `cfdream_generate_image`). Use whatever prefix your environment exposes; parameters are identical. Call `list_models(task_type="image")` to see enabled models, or `get_model_card("doubao-seedream-5-0-lite")` for exact per-model constraints.
+> Tool names may be host-namespaced (e.g. `mcp__cfdream__generate_image` / `cfdream_generate_image`). Use whatever prefix your environment exposes; parameters are identical. Call `list_models(task_type="image")` to see enabled models, or `get_model_card("doubao-seedream-5-0-260128")` for exact per-model constraints.
 
 ## Improving quality with reference images
 

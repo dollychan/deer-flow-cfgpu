@@ -10,6 +10,7 @@ This skill runs the **model + voice selection** for text-to-speech: given the us
 - For deep per-model voice guidance and settings, hand off to the family skill after selecting: `audio/minimax-speech` (MiniMax HD/Turbo) or `audio/seed-tts` (Doubao). Those hold the fuller voice lists.
 - The full authoritative voice catalog is large (hundreds of ids). This file gives the **decision procedure + representative anchors** — for the complete list of a model's voices, read its family skill or call `get_model_card(<id>)`.
 - Verify live availability with `list_models(task_type="audio")` before committing on anything cost-sensitive.
+- **All model identifiers below are `model_id` (cfgpu model id), not adapter id.** The `generate_audio(model=…)` parameter accepts both, but `model_id` is the canonical identifier used by the cfgpu API internally. To cross-reference with the adapter id (e.g. `minimax-speech-2-8-hd`), use `list_models` or consult the adapter registry.
 
 **Tier legend:** `cost` 1 = cheapest … 5 = most expensive. `speed` 1 = slowest … 5 = fastest.
 
@@ -29,19 +30,19 @@ If a decisive detail (language, or which persona) is genuinely unclear, ask **on
 
 ## Step 2 — Pick the model (language + controls gate, then cost/speed)
 
-| Model (adapter id) | Voices | Languages | Controls | Call | cost | speed | Price (per 万字符) |
+| Model (model id) | Voices | Languages | Controls | Call | cost | speed | Price (per 万字符) |
 |---|---|---|---|---|:--:|:--:|---|
-| `minimax-speech-2-8-hd` | ~327 | 中文(普/粤) · English · 日 · 한 · Español · Português · Français · Deutsch · Русский · +~14 more | speed / volume / pitch / **emotion** / pronunciation_dict | **sync** | 2 | 3 | 0.3675 元 |
-| `minimax-speech-2-8-turbo` | ~327 (same list) | same as HD | same as HD | **sync** | **1** | 4 | 0.21 元 |
-| `seed-tts-2-0` | ~122 | **中文-focused** (Mandarin + 方言 via Vivi; a few 美式英语) | none (shape via text + expressive speaker) | **async** (poll) | 3 | 3 | **2.94 元** |
+| `MiniMax/speech-2.8-hd` | ~327 | 中文(普/粤) · English · 日 · 한 · Español · Português · Français · Deutsch · Русский · +~14 more | speed / volume / pitch / **emotion** / pronunciation_dict | **sync** | 2 | 3 | 0.3675 元 |
+| `MiniMax/speech-2.8-turbo` | ~327 (same list) | same as HD | same as HD | **sync** | **1** | 4 | 0.21 元 |
+| `seed-tts-2.0` | ~122 | **中文-focused** (Mandarin + 方言 via Vivi; a few 美式英语) | none (shape via text + expressive speaker) | **async** (poll) | 3 | 3 | **2.94 元** |
 
 Decide in this order:
 
-1. **Language gate.** Any non-Chinese or multilingual need (EN / JA / KO / ES / PT / FR / …) → **MiniMax** (20+ languages, 327 voices). seed-tts is Chinese-focused with only a handful of English voices.
-2. **Controls gate.** Need explicit **speed / pitch / volume / emotion** tuning or **custom pronunciation** → **MiniMax** (seed-tts has none of those params).
-3. **Chinese-specialist gate.** For rich **Chinese character/role voices**, **dialects** (四川/陕西/东北/粤), **famous IP characters** (孙悟空 / 唐僧 / 猪八戒 / 熊二 / 武则天 …), **有声阅读**, **ASMR**, or **COT/QA role-play** (the `saturn_*` voices) → **seed-tts-2.0** is the specialist.
+1. **Language gate.** Any non-Chinese or multilingual need (EN / JA / KO / ES / PT / FR / …) → **MiniMax** (20+ languages, 327 voices). `seed-tts-2.0` is Chinese-focused with only a handful of English voices.
+2. **Controls gate.** Need explicit **speed / pitch / volume / emotion** tuning or **custom pronunciation** → **MiniMax** (`seed-tts-2.0` has none of those params).
+3. **Chinese-specialist gate.** For rich **Chinese character/role voices**, **dialects** (四川/陕西/东北/粤), **famous IP characters** (孙悟空 / 唐僧 / 猪八戒 / 熊二 / 武则天 …), **有声阅读**, **ASMR**, or **COT/QA role-play** (the `saturn_*` voices) → **`seed-tts-2.0`** is the specialist.
 4. **Then cost/speed.** Among MiniMax: **HD** for top fidelity and emotional nuance; **Turbo** for the cheapest, fastest bulk narration (same voices/controls). If a Chinese job fits both families, note that **seed-tts is ~8× the price of HD and ~14× Turbo** — reserve it for when its specialist voices are the reason to use it.
-5. **Sync vs async.** MiniMax returns synchronously (immediate); seed-tts is asynchronous (submit → poll `get_task_status` / `wait_for_task`).
+5. **Sync vs async.** MiniMax returns synchronously (immediate); `seed-tts-2.0` is asynchronous (submit → poll `get_task_status` / `wait_for_task`).
 
 **Reach a concrete model + voice before you fire `generate_audio` — never leave it unresolved.** If the deciding information is missing — the **language/dialect** is unknown, or the intended **speaker persona** (gender/age/character) is unclear — `ask_clarification` and wait rather than defaulting silently (these two gate everything downstream). If the client restricted the models for this task, you'll see a manual-mode `<system-reminder>` listing the allowed audio model IDs; pick your model **from that list only** (then choose a voice it actually offers), and if none of the allowed models can serve the need, tell the user and ask instead of reaching outside it.
 
@@ -94,19 +95,19 @@ Every option must actually exist and fit the language/persona; if an alternative
 
 | Intent | Model | Voice starting point |
 |---|---|---|
-| English / other-language narration | `minimax-speech-2-8-hd` (or Turbo for bulk) | `English_*` / `Japanese_*` / `Korean_*` / `Spanish_*` … |
-| Cheapest / bulk multilingual narration | `minimax-speech-2-8-turbo` | any MiniMax voice |
+| English / other-language narration | `MiniMax/speech-2.8-hd` (or Turbo for bulk) | `English_*` / `Japanese_*` / `Korean_*` / `Spanish_*` … |
+| Cheapest / bulk multilingual narration | `MiniMax/speech-2.8-turbo` | any MiniMax voice |
 | Fine speed/pitch/emotion control | MiniMax (HD) | persona id + tuned controls |
-| Chinese audiobook / 有声阅读 | `seed-tts-2-0` | `zh_male_qingcang_*`, `zh_male_baqiqingshu_*` |
-| Chinese character / IP role | `seed-tts-2-0` | `zh_male_sunwukong_*`, `zh_male_tangseng_*`, `saturn_zh_*_tob` |
-| Chinese customer service | `seed-tts-2-0` | `saturn_zh_*_cs_tob`, `zh_female_kefunvsheng_*` |
-| Chinese children's content | `seed-tts-2-0` or MiniMax | `zh_female_xiaoxue_*` / `lovely_girl` |
-| Chinese dialect (四川/粤语…) | `seed-tts-2-0` (Vivi) or MiniMax `Cantonese_*` | `zh_female_vv_uranus_bigtts` |
+| Chinese audiobook / 有声阅读 | `seed-tts-2.0` | `zh_male_qingcang_*`, `zh_male_baqiqingshu_*` |
+| Chinese character / IP role | `seed-tts-2.0` | `zh_male_sunwukong_*`, `zh_male_tangseng_*`, `saturn_zh_*_tob` |
+| Chinese customer service | `seed-tts-2.0` | `saturn_zh_*_cs_tob`, `zh_female_kefunvsheng_*` |
+| Chinese children's content | `seed-tts-2.0` or MiniMax | `zh_female_xiaoxue_*` / `lovely_girl` |
+| Chinese dialect (四川/粤语…) | `seed-tts-2.0` (Vivi) or MiniMax `Cantonese_*` | `zh_female_vv_uranus_bigtts` |
 | Podcast (two hosts) | one model, two voices | pick two distinct same-model voices |
 
 ## Notes
 
-- **Cost scales with text length** for all three; seed-tts is by far the priciest per character — don't reach for it unless its Chinese-specialist voices are the reason.
+- **Cost scales with text length** for all three; `seed-tts-2.0` is by far the priciest per character — don't reach for it unless its Chinese-specialist voices are the reason.
 - MiniMax **HD and Turbo share the exact same voice list and controls** — switching between them never changes the available voices, only fidelity/cost/speed.
-- Only MiniMax supports `emotion` and pronunciation control; for seed-tts, shape emotion through the **text** and an expressive `_uranus_bigtts` speaker.
-- Never invent a voice id. If unsure a voice exists, confirm via the family skill or `get_model_card(<id>)`, and fall back to the model default (`male-qn-qingse` for MiniMax, `zh_female_xiaohe_uranus_bigtts` for seed-tts) if needed.
+- Only MiniMax supports `emotion` and pronunciation control; for `seed-tts-2.0`, shape emotion through the **text** and an expressive `_uranus_bigtts` speaker.
+- Never invent a voice id. If unsure a voice exists, confirm via the family skill or `get_model_card(<id>)`, and fall back to the model default (`male-qn-qingse` for MiniMax, `zh_female_xiaohe_uranus_bigtts` for `seed-tts-2.0`) if needed.

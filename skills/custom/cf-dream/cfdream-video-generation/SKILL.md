@@ -76,7 +76,7 @@ Use the `cfdream-video-model-select` skill — it holds the full model catalog a
    - Need a **reference video/audio**, **edit**, or **extend/stitch**? → a Seedance 2.0 model or the matching WAN variant.
    - Need **last-frame morphing**? → Seedance (HappyHorse/WAN have no last frame).
    - Need **480p** or **smart/auto duration** (`-1`)? → Seedance (HappyHorse has neither).
-2. **Then quality vs cost vs speed**, following the user's priority from Phase 1: top quality → the family's flagship (e.g. `doubao-seedance-2-0`); speed/cost with full features → a `fast` variant; cheapest / at-scale → a `mini` variant; a quick cheap look before committing → a preview/sample mode.
+2. **Then quality vs cost vs speed**, following the user's priority from Phase 1: top quality → the family's flagship (e.g. `doubao-seedance-2-0-260128`); speed/cost with full features → a `fast` variant; cheapest / at-scale → a `mini` variant; a quick cheap look before committing → a preview/sample mode.
 3. **Check parameter ranges fit the target** — max duration and supported resolutions differ per model (e.g. duration caps, 1080p support). If the target needs a value a model can't reach, pick a model that can.
 4. **`auto` is a deliberate choice, not a skip.** `model="auto"` scores enabled models by quality/speed/cost, and a **list** constrains the pool — use either only when you have genuinely decided you're indifferent within that set. Always honor a **locked Production Spec** model.
 
@@ -127,7 +127,7 @@ When the clip returns, check it actually meets the step target (subject, motion,
 | Parameter | Default | Notes |
 |---|---|---|
 | `prompt` | — | Full structured description (required) |
-| `model` | `"auto"` | Adapter id (e.g. `doubao-seedance-2-0`) or a list to constrain; honor the **locked Production Spec** model. See per-model skills for capability differences. |
+| `model` | `"auto"` | Model id / cfgpu model id (e.g. `doubao-seedance-2-0-260128`) or a list to constrain; honor the **locked Production Spec** model. See per-model skills for capability differences. |
 | `first_frame` / `last_frame` | — | **Material ids** of guiding frames (image-to-video) |
 | `reference_images` / `reference_videos` / `reference_audios` | — | **Material ids** for multimodal reference (≤9 / ≤3 / ≤3); mutually exclusive with first/last frame |
 | `duration_seconds` | `5` | 4–15 (model-dependent caps; `-1` = smart/auto). Prefer **5s while iterating**, 8–10s only for the final pass |

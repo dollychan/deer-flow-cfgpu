@@ -11,19 +11,19 @@ The job of this skill is to read the user's request, figure out what they actual
 
 | Model | Best for | Max duration | Resolutions | Reference video/audio · edit · extend |
 |---|---|---|---|---|
-| `doubao-seedance-2-0` | Highest quality, all capabilities | 15s | 480p/720p/1080p | ✅ |
-| `doubao-seedance-2-0-fast` | Faster + cheaper, same capabilities | 12s | 480p/720p/1080p | ✅ |
-| `doubao-seedance-2-0-mini` | Cheapest, high-frequency / at-scale, same capabilities | 15s | 480p/720p/1080p | ✅ |
-| `doubao-seedance-1-5-pro` | 1080p with a fast preview mode | 12s | 480p/720p/1080p | ❌ (text / image-frame / audio-gen only) |
+| `doubao-seedance-2-0-260128` | Highest quality, all capabilities | 15s | 480p/720p/1080p | ✅ |
+| `doubao-seedance-2-0-fast-260128` | Faster + cheaper, same capabilities | 12s | 480p/720p/1080p | ✅ |
+| `Doubao-Seedance-2.0-mini` | Cheapest, high-frequency / at-scale, same capabilities | 15s | 480p/720p/1080p | ✅ |
+| `doubao-seedance-1-5-pro-251215` | 1080p with a fast preview mode | 12s | 480p/720p/1080p | ❌ (text / image-frame / audio-gen only) |
 
 How to decide, based on what the user signals:
 
-- Wants **top quality** or "the best" → `doubao-seedance-2-0`
-- Cares about **speed or cost** but wants the full feature set → `doubao-seedance-2-0-fast`
-- Wants the **cheapest** option or is generating **many videos / at scale** → `doubao-seedance-2-0-mini`
+- Wants **top quality** or "the best" → `doubao-seedance-2-0-260128`
+- Cares about **speed or cost** but wants the full feature set → `doubao-seedance-2-0-fast-260128`
+- Wants the **cheapest** option or is generating **many videos / at scale** → `Doubao-Seedance-2.0-mini`
 - Needs a **reference video/audio**, wants to **edit** an existing video, or **extend/stitch** clips → must be a 2.0 model (1.5 Pro can't do these)
-- Wants a **quick cheap preview** before committing to a full render → `doubao-seedance-1-5-pro` in sample mode
-- Gives no preference → default to `doubao-seedance-2-0`
+- Wants a **quick cheap preview** before committing to a full render → `doubao-seedance-1-5-pro-251215` in sample mode
+- Gives no preference → default to `doubao-seedance-2-0-260128`
 
 ## Step 2 — Identify the scenario
 

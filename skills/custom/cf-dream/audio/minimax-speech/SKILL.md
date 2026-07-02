@@ -11,14 +11,14 @@ The job of this skill is to read the user's request, figure out what they actual
 
 | Model | Best for | Cost / speed |
 |---|---|---|
-| `minimax-speech-2-8-hd` | Highest fidelity, emotional nuance, custom pronunciation | cost 2/5 · speed 3/5 |
-| `minimax-speech-2-8-turbo` | Faster + cheaper, same voices and controls | cost 1/5 · speed 4/5 |
+| `MiniMax/speech-2.8-hd` | Highest fidelity, emotional nuance, custom pronunciation | cost 2/5 · speed 3/5 |
+| `MiniMax/speech-2.8-turbo` | Faster + cheaper, same voices and controls | cost 1/5 · speed 4/5 |
 
 How to decide, based on intent:
 
-- Wants **best quality** or emotional nuance → `minimax-speech-2-8-hd`
-- Cares about **cost or latency**, or is generating bulk narration → `minimax-speech-2-8-turbo`
-- No preference → `minimax-speech-2-8-hd`
+- Wants **best quality** or emotional nuance → `MiniMax/speech-2.8-hd`
+- Cares about **cost or latency**, or is generating bulk narration → `MiniMax/speech-2.8-turbo`
+- No preference → `MiniMax/speech-2.8-hd`
 
 > For Chinese-only character/role voices, consider the **seed-tts** skill (Doubao seed-tts-2.0) instead. MiniMax is the better fit for English/multilingual and fine voice tuning.
 
